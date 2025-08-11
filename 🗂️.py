@@ -204,8 +204,97 @@ def main_logic(stats):
         avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
         dots = '.' * dot_count + ' ' * (3 - dot_count)
         stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总时间: {format_seconds(total_time)} {dots}"
+        
+        # 为每行历史记录生成带柱状图的显示
+        def generate_bar_chart_for_history(history_lines):
+            if not history_lines:
+                return []
+                
+            # 分析所有历史记录，提取文件名和时间信息
+            parsed_lines = []
+            valid_intervals = []
+            
+            for line in history_lines:
+                if "✔️" in line:
+                    parts = line.split("✔️", 1)  # 只分割第一个✔️
+                    filename_part = parts[0] + "✔️"
+                    time_part = parts[1] if len(parts) > 1 else ""
+                    
+                    # 提取时间间隔（秒）
+                    interval = 0
+                    if "[初始文件]" not in time_part and "[不完整渲染时长]" not in time_part:
+                        if ":" in time_part:
+                            time_clean = time_part.strip()
+                            if time_clean != "[00:00:00]":
+                                try:
+                                    h, m, s = map(int, time_clean.split(':'))
+                                    interval = h * 3600 + m * 60 + s
+                                    if interval > 0:
+                                        valid_intervals.append(interval)
+                                except:
+                                    pass
+                    
+                    parsed_lines.append({
+                        'filename': filename_part,
+                        'time': time_part,
+                        'interval': interval,
+                        'is_special': "[初始文件]" in time_part or "[不完整渲染时长]" in time_part
+                    })
+                else:
+                    # 不包含✔️的行，直接保持原样
+                    parsed_lines.append({'original_line': line})
+            
+            # 计算动态比例
+            if valid_intervals:
+                max_time = max(valid_intervals)
+                min_time = min(valid_intervals)
+            else:
+                max_time = min_time = 0
+            
+            # 找出最长的文件名长度
+            max_filename_length = 0
+            for item in parsed_lines:
+                if 'filename' in item:
+                    max_filename_length = max(max_filename_length, len(item['filename']))
+            
+            # 生成对齐的显示行
+            enhanced_lines = []
+            bar_width = 20
+            
+            for item in parsed_lines:
+                if 'original_line' in item:
+                    # 非文件处理行，直接添加
+                    enhanced_lines.append(item['original_line'])
+                else:
+                    # 文件处理行，添加柱状图
+                    filename = item['filename']
+                    time_part = item['time']
+                    interval = item['interval']
+                    is_special = item['is_special']
+                    
+                    # 计算填充空格
+                    padding = " " * (max_filename_length - len(filename))
+                    
+                    if is_special or interval == 0:
+                        # 特殊状态或无时间间隔，显示空白柱状图
+                        bar = '░' * bar_width
+                    else:
+                        # 正常渲染时间，显示比例柱状图
+                        if max_time > min_time:
+                            ratio = (interval - min_time) / (max_time - min_time)
+                        else:
+                            ratio = 1.0
+                        
+                        filled_length = int(bar_width * ratio)
+                        bar = '█' * filled_length + '░' * (bar_width - filled_length)
+                    
+                    enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
+            
+            return enhanced_lines
+        
         os.system('cls')
-        for line in history:
+        enhanced_history = generate_bar_chart_for_history(history)
+        for line in enhanced_history:
             print(line)
         print(stat_line)
         dot_count = dot_count + 1 if dot_count < 3 else 1
