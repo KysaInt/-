@@ -6,8 +6,118 @@ import sys
 import subprocess
 import threading
 import msvcrt
+import psutil
+import json
+from datetime import datetime
+from pathlib import Path
 
 FLAG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '⏳')
+
+class C4DRenderMonitor:
+    def __init__(self):
+        """初始化C4D渲染监听器"""
+        self.c4d_process_names = [
+            'CINEMA 4D.exe',
+            'Cinema 4D.exe', 
+            'c4d.exe',
+            'Commandline.exe',  # C4D命令行渲染
+            'TeamRender Client.exe',  # 团队渲染客户端
+            'TeamRender Server.exe'   # 团队渲染服务器
+        ]
+        self.is_rendering = False
+        self.last_render_status = -1  # -1表示未初始化，0表示未渲染，1表示正在渲染
+        self.last_check_time = 0
+        self.cached_processes = []
+        self.cache_duration = 0.5  # 缓存0.5秒，提高响应速度
+        
+    def check_c4d_processes(self):
+        """检查C4D相关进程（带缓存优化）"""
+        current_time = time.time()
+        
+        # 如果缓存还有效，返回缓存的结果
+        if current_time - self.last_check_time < self.cache_duration:
+            return self.cached_processes
+        
+        c4d_processes = []
+        
+        try:
+            for process in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+                process_name = process.info['name']
+                if any(c4d_name.lower() in process_name.lower() for c4d_name in self.c4d_process_names):
+                    c4d_processes.append({
+                        'pid': process.info['pid'],
+                        'name': process_name,
+                        'cpu_percent': process.info['cpu_percent'],
+                        'memory': process.info['memory_info'].rss if process.info['memory_info'] else 0
+                    })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+        
+        # 更新缓存
+        self.cached_processes = c4d_processes
+        self.last_check_time = current_time
+        
+        return c4d_processes
+    
+    def is_rendering_active(self, processes):
+        """判断是否正在渲染"""
+        if not processes:
+            return False
+        
+        # 检查CPU使用率，如果C4D进程CPU使用率较高，可能在渲染
+        high_cpu_processes = [p for p in processes if p['cpu_percent'] > 20.0]
+        
+        # 检查是否有命令行渲染进程
+        commandline_processes = [p for p in processes if 'commandline' in p['name'].lower()]
+        
+        # 检查是否有团队渲染进程
+        teamrender_processes = [p for p in processes if 'teamrender' in p['name'].lower()]
+        
+        # 如果有命令行渲染或团队渲染进程，认为正在渲染
+        if commandline_processes or teamrender_processes:
+            return True
+        
+        # 如果有高CPU使用率的C4D进程，可能在渲染
+        if high_cpu_processes:
+            return True
+        
+        return False
+    
+    def check_render_queue_files(self):
+        """检查C4D渲染队列相关文件（优化版本）"""
+        # 为了提高性能，减少文件系统检查的频率
+        # 只检查最常见的渲染队列文件位置，而不进行深度遍历
+        possible_files = [
+            os.path.expanduser("~/AppData/Roaming/Maxon/render_queue.xml"),
+            os.path.expanduser("~/AppData/Roaming/Maxon/queue.dat"),
+            os.path.expanduser("~/Documents/Maxon/render_queue.xml"),
+            "C:\\ProgramData\\Maxon\\render_queue.xml"
+        ]
+        
+        for file_path in possible_files:
+            try:
+                if os.path.exists(file_path):
+                    mtime = os.path.getmtime(file_path)
+                    if time.time() - mtime < 60:  # 1分钟内修改的文件
+                        return True
+            except Exception:
+                continue
+        
+        return False
+    
+    def check_render_status(self):
+        """检查当前渲染状态"""
+        # 检查C4D进程
+        processes = self.check_c4d_processes()
+        
+        # 检查渲染队列文件
+        queue_active = self.check_render_queue_files()
+        
+        # 判断是否正在渲染
+        process_rendering = self.is_rendering_active(processes)
+        current_rendering = process_rendering or queue_active
+        
+        return current_rendering
 
 def format_seconds(seconds):
     h = int(seconds // 3600)
@@ -48,18 +158,42 @@ def main_logic(stats):
     folder_path = os.path.dirname(os.path.abspath(__file__))
     if 'history' not in stats:
         stats['history'] = []
+    if 'render_monitor' not in stats:
+        stats['render_monitor'] = C4DRenderMonitor()
+    
     history = stats['history']
+    render_monitor = stats['render_monitor']
+    
     try:
+        # 检查渲染状态
+        is_rendering = render_monitor.check_render_status()
+        render_status_changed = False
+        
+        if render_monitor.last_render_status != (1 if is_rendering else 0):
+            render_status_changed = True
+            render_monitor.last_render_status = 1 if is_rendering else 0
+        
         last_move_time = stats.get('last_move_time', None)
         moved_count = stats.get('moved_count', 0)
         program_start = stats.get('program_start', time.time())
         dot_count = stats.get('dot_count', 1)
         max_interval = stats.get('max_interval', 0)
         total_interval = stats.get('total_interval', 0)
+        total_render_time = stats.get('total_render_time', 0)  # 新增：纯渲染时间
+        last_render_check = stats.get('last_render_check', time.time())
         is_first_run = stats.get('is_first_run', True)
         is_second_run = stats.get('is_second_run', False)
         moved_this_round = 0
         move_failed = False
+        
+        # 更新渲染时间统计
+        current_time = time.time()
+        if stats.get('was_rendering', False) and is_rendering:
+            # 如果之前在渲染且现在还在渲染，累加渲染时间
+            total_render_time += current_time - last_render_check
+        
+        stats['was_rendering'] = is_rendering
+        stats['last_render_check'] = current_time
         
         # 第一步：分析所有PNG文件并确定序列，同时进行重命名
         base_dir = folder_path
@@ -163,19 +297,24 @@ def main_logic(stats):
                             moved_count += 1
                             moved_this_round += 1
                         else:
-                            # 第三次运行开始，正常记录时间间隔
-                            if last_move_time:
+                            # 第三次运行开始，只有在渲染时才记录时间间隔
+                            if last_move_time and is_rendering:
                                 interval = now - last_move_time
                                 total_interval += interval
                                 if interval > max_interval:
                                     max_interval = interval
                                 history.append(f'"{filename}"{format_seconds(interval)}')
+                            elif last_move_time and not is_rendering:
+                                # 渲染暂停时，显示暂停标记
+                                history.append(f'"{filename}"[渲染暂停]')
                             else:
                                 history.append(f'"{filename}"[00:00:00]')
                             moved_count += 1
                             moved_this_round += 1
                         
-                        last_move_time = now
+                        # 只有在渲染时才更新last_move_time
+                        if is_rendering:
+                            last_move_time = now
                     except Exception:
                         move_failed = True
                         # move失败不记录history，不增加moved_count和moved_this_round
@@ -203,7 +342,11 @@ def main_logic(stats):
         effective_moved_count = moved_count - first_run_moved - second_run_moved
         avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
         dots = '.' * dot_count + ' ' * (3 - dot_count)
-        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总时间: {format_seconds(total_time)} {dots}"
+        
+        # 渲染状态指示器
+        render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
+        
+        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator} {dots}"
         
         # 为每行历史记录生成带柱状图的显示
         def generate_bar_chart_for_history(history_lines):
@@ -223,7 +366,7 @@ def main_logic(stats):
                     
                     # 提取时间间隔（秒）
                     interval = 0
-                    if "[初始文件]" not in time_part and "[不完整渲染时长]" not in time_part:
+                    if "[初始文件]" not in time_part and "[不完整渲染时长]" not in time_part and "[渲染暂停]" not in time_part:
                         if ":" in time_part:
                             time_clean = time_part.strip()
                             if time_clean != "[00:00:00]":
@@ -239,7 +382,7 @@ def main_logic(stats):
                         'filename': filename_part,
                         'time': time_part,
                         'interval': interval,
-                        'is_special': "[初始文件]" in time_part or "[不完整渲染时长]" in time_part
+                        'is_special': "[初始文件]" in time_part or "[不完整渲染时长]" in time_part or "[渲染暂停]" in time_part
                     })
                 else:
                     # 不是文件处理行，直接保持原样
@@ -302,6 +445,7 @@ def main_logic(stats):
         stats['last_move_time'] = last_move_time
         stats['max_interval'] = max_interval
         stats['total_interval'] = total_interval
+        stats['total_render_time'] = total_render_time  # 保存总渲染时间
         stats['moved_count'] = moved_count
         stats['program_start'] = program_start
         stats['dot_count'] = dot_count
@@ -338,7 +482,7 @@ if __name__ == "__main__":
                 if stats.get('should_exit', False):
                     break
                 main_logic(stats)
-                time.sleep(1)
+                time.sleep(1)  # 1秒间隔检查渲染状态和处理文件
         except KeyboardInterrupt:
             pass
         finally:
