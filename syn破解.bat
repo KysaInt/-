@@ -1,0 +1,2 @@
+copy "C:\Program Files (x86)\Synthesia\file\synthesia_190855\Crack\Synthesia\settings.xml" "C:\Users\I\AppData\Roaming\Synthesia"
+copy "C:\Program Files (x86)\Synthesia\file\synthesia_190855\Crack\Synthesia.exe" "C:\Program Files (x86)\Synthesia"
