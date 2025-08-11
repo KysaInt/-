@@ -154,12 +154,12 @@ def main_logic(stats):
                         
                         if is_first_run:
                             # 第一次运行，不记录时间间隔，只记录文件移动
-                            history.append(f'"{filename}"✔️[初始文件]')
+                            history.append(f'"{filename}"[初始文件]')
                             moved_count += 1
                             moved_this_round += 1
                         elif is_second_run:
                             # 第二次运行，不记录时间间隔，标记为不完整渲染
-                            history.append(f'"{filename}"✔️[不完整渲染时长]')
+                            history.append(f'"{filename}"[不完整渲染时长]')
                             moved_count += 1
                             moved_this_round += 1
                         else:
@@ -169,9 +169,9 @@ def main_logic(stats):
                                 total_interval += interval
                                 if interval > max_interval:
                                     max_interval = interval
-                                history.append(f'"{filename}"✔️{format_seconds(interval)}')
+                                history.append(f'"{filename}"{format_seconds(interval)}')
                             else:
-                                history.append(f'"{filename}"✔️[00:00:00]')
+                                history.append(f'"{filename}"[00:00:00]')
                             moved_count += 1
                             moved_this_round += 1
                         
@@ -215,10 +215,11 @@ def main_logic(stats):
             valid_intervals = []
             
             for line in history_lines:
-                if "✔️" in line:
-                    parts = line.split("✔️", 1)  # 只分割第一个✔️
-                    filename_part = parts[0] + "✔️"
-                    time_part = parts[1] if len(parts) > 1 else ""
+                if line.startswith('"') and '"' in line[1:]:
+                    # 找到文件名结束的位置
+                    end_quote_pos = line.find('"', 1)
+                    filename_part = line[:end_quote_pos + 1]
+                    time_part = line[end_quote_pos + 1:]
                     
                     # 提取时间间隔（秒）
                     interval = 0
@@ -241,7 +242,7 @@ def main_logic(stats):
                         'is_special': "[初始文件]" in time_part or "[不完整渲染时长]" in time_part
                     })
                 else:
-                    # 不包含✔️的行，直接保持原样
+                    # 不是文件处理行，直接保持原样
                     parsed_lines.append({'original_line': line})
             
             # 计算动态比例
@@ -277,7 +278,7 @@ def main_logic(stats):
                     
                     if is_special or interval == 0:
                         # 特殊状态或无时间间隔，显示空白柱状图
-                        bar = '░' * bar_width
+                        bar = ' ' * bar_width
                     else:
                         # 正常渲染时间，显示比例柱状图
                         if max_time > min_time:
@@ -286,7 +287,7 @@ def main_logic(stats):
                             ratio = 1.0
                         
                         filled_length = int(bar_width * ratio)
-                        bar = '█' * filled_length + '░' * (bar_width - filled_length)
+                        bar = '█' * filled_length + ' ' * (bar_width - filled_length)
                     
                     enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
             
