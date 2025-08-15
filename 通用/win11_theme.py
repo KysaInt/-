@@ -39,6 +39,8 @@ ACCENT_COLOR = "AccentColor"
 
 # 配置文件路径
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "win11_theme_config.json")
+# 备用配置路径：用户主目录（当程序目录不可写或 OneDrive 同步冲突时使用）
+USER_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".win11_theme_config.json")
 
 # 默认配色方案
 DEFAULT_COLORS = {
@@ -56,8 +58,8 @@ DEFAULT_COLORS = {
         "fg": "#f2f2f2",
         "entry_bg": "#2d2d2d",
         "entry_fg": "#ffffff",
-        "button_bg": "#404040",
-        "button_fg": "#ffffff",
+        "button_bg": "#454545",  # 提高对比度
+        "button_fg": "#ffffff",  # 确保白色文字
         "accent": "#60cdff"
     }
 }
@@ -116,9 +118,15 @@ def get_accent_color_hex():
 def load_color_config():
     """加载配色配置"""
     try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        # 优先从主配置路径加载，其次尝试用户配置路径
+        for path in (CONFIG_FILE, USER_CONFIG_FILE):
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except Exception:
+                    # 如果配置文件损坏，忽略并继续尝试下一个位置
+                    continue
     except Exception:
         pass
     return DEFAULT_COLORS.copy()
@@ -126,9 +134,28 @@ def load_color_config():
 def save_color_config(config):
     """保存配色配置"""
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        return True
+        # 尝试以原子方式写入主配置路径，若失败则回退到用户主目录
+        global CONFIG_FILE
+        def _atomic_write(path, data):
+            dirpath = os.path.dirname(path)
+            if dirpath and not os.path.exists(dirpath):
+                os.makedirs(dirpath, exist_ok=True)
+            tmp_path = path + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, path)
+
+        try:
+            _atomic_write(CONFIG_FILE, config)
+            return True
+        except Exception:
+            # 回退到用户目录
+            try:
+                _atomic_write(USER_CONFIG_FILE, config)
+                CONFIG_FILE = USER_CONFIG_FILE
+                return True
+            except Exception:
+                return False
     except Exception:
         return False
 
@@ -221,9 +248,14 @@ def _apply_tk_theme(root: tk.Tk, colors=None, light=None):
     root.configure(bg=bg)
     style = ttk.Style(root)
 
+    # 首选 'clam' 主题（支持自定义颜色的渲染），若不可用再尝试使用 'vista'
     try:
-        style.theme_use("vista")
+        if 'clam' in style.theme_names():
+            style.theme_use('clam')
+        else:
+            style.theme_use('vista')
     except:
+        # 如果都不可用或发生错误，则忽略，继续使用当前主题
         pass
 
     # 基础样式
@@ -232,35 +264,53 @@ def _apply_tk_theme(root: tk.Tk, colors=None, light=None):
     style.configure("TFrame", background=bg)
     
     # 按钮样式 - 改进深色模式下的显示
+    button_hover_bg = "#e0e0e0" if light else "#555555"
+    button_pressed_bg = accent if light else "#606060"
+    
     style.configure("TButton", 
                    background=button_bg, 
                    foreground=button_fg,
                    borderwidth=1,
-                   focuscolor="none")
+                   relief="flat",
+                   focuscolor="none",
+                   font=("Segoe UI", 10))
     
     # 按钮状态映射 - 处理鼠标悬停和按下状态
     style.map("TButton",
-             background=[('active', accent if light else "#505050"),
-                        ('pressed', accent if light else "#606060"),
+             background=[('active', button_hover_bg),
+                        ('pressed', button_pressed_bg),
+                        ('disabled', "#cccccc" if light else "#333333"),
                         ('!active', button_bg)],
-             foreground=[('active', "#ffffff" if light else "#ffffff"),
-                        ('pressed', "#ffffff" if light else "#ffffff"),
-                        ('!active', button_fg)])
+             foreground=[('active', button_fg),
+                        ('pressed', "#ffffff" if button_pressed_bg == accent else button_fg),
+                        ('disabled', "#999999"),
+                        ('!active', button_fg)],
+             relief=[('pressed', 'sunken'),
+                    ('!pressed', 'flat')])
     
     # 强调按钮样式
+    accent_hover = "#106ebe" if light else "#4fb3ff"
+    accent_pressed = "#005a9e" if light else "#3da5ff"
+    
     style.configure("Accent.TButton", 
                    background=accent, 
                    foreground="#ffffff",
                    borderwidth=1,
-                   focuscolor="none")
+                   relief="flat",
+                   focuscolor="none",
+                   font=("Segoe UI", 10, "bold"))
     
     style.map("Accent.TButton",
-             background=[('active', "#106ebe" if light else "#4fb3ff"),
-                        ('pressed', "#005a9e" if light else "#3da5ff"),
+             background=[('active', accent_hover),
+                        ('pressed', accent_pressed),
+                        ('disabled', "#cccccc" if light else "#333333"),
                         ('!active', accent)],
              foreground=[('active', "#ffffff"),
                         ('pressed', "#ffffff"),
-                        ('!active', "#ffffff")])
+                        ('disabled', "#999999"),
+                        ('!active', "#ffffff")],
+             relief=[('pressed', 'sunken'),
+                    ('!pressed', 'flat')])
     
     # 输入框样式 - 改进深色模式下的对比度
     style.configure("TEntry", 
@@ -307,13 +357,20 @@ def _apply_tk_theme(root: tk.Tk, colors=None, light=None):
         try:
             if isinstance(widget, tk.Entry):
                 widget.configure(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg,
-                               selectbackground=accent, selectforeground="#ffffff")
+                               selectbackground=accent, selectforeground="#ffffff",
+                               relief="solid", bd=1)
             elif isinstance(widget, tk.Text):
                 widget.configure(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg,
-                               selectbackground=accent, selectforeground="#ffffff")
+                               selectbackground=accent, selectforeground="#ffffff",
+                               relief="solid", bd=1)
             elif isinstance(widget, tk.Button):
-                widget.configure(bg=button_bg, fg=button_fg, activebackground=accent,
-                               activeforeground="#ffffff")
+                # 改进普通 tk.Button 的配色
+                hover_bg = "#e0e0e0" if light else "#555555"
+                widget.configure(bg=button_bg, fg=button_fg, 
+                               activebackground=hover_bg,
+                               activeforeground=button_fg,
+                               relief="flat", bd=1,
+                               font=("Segoe UI", 10))
             else:
                 widget.configure(bg=bg, fg=fg)
         except:
