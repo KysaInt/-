@@ -489,19 +489,16 @@ def main():
     # 获取文档
     doc = c4d.documents.GetActiveDocument()
     if not doc:
-        c4d.gui.MessageDialog("请先打开C4D文档")
+        print("请先打开C4D文档")
         return
-    
     # 获取文档路径
     doc_path = doc.GetDocumentPath()
     if not doc_path:
-        c4d.gui.MessageDialog("请先保存文档")
+        print("请先保存文档")
         return
-    
     # 目标路径
     target_folder = os.path.join(doc_path, "0")
     mf_path = os.path.join(target_folder, "mf.py")
-    
     # 检查并创建文件
     if not os.path.exists(mf_path):
         try:
@@ -509,26 +506,21 @@ def main():
             if not os.path.exists(target_folder):
                 os.makedirs(target_folder)
                 print(f"已创建文件夹: {target_folder}")
-            
             # 创建mf.py文件
             with open(mf_path, 'w', encoding='utf-8') as f:
                 f.write(MF_CONTENT)
-            
-            c4d.gui.MessageDialog(f"已自动创建mf.py文件:\\n{mf_path}")
-            
+            print(f"已自动创建mf.py文件: {mf_path}")
         except Exception as e:
-            c4d.gui.MessageDialog(f"创建文件失败: {e}")
+            print(f"创建文件失败: {e}")
             return
-    
     # 启动 - 使用最简单的方式
     work_dir = os.path.dirname(mf_path)
     cmd = f'start cmd /c "cd /d "{work_dir}" && python mf.py && pause"'
-    
     try:
         os.system(cmd)
-        c4d.gui.MessageDialog("脚本已启动")
+        print("脚本已启动")
     except Exception as e:
-        c4d.gui.MessageDialog(f"启动失败: {e}")
+        print(f"启动失败: {e}")
 
 if __name__=='__main__':
     main()
