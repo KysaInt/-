@@ -162,6 +162,58 @@ def keyboard_listener(stats):
             print(f"键盘监听异常: {e}")
             break
 
+def save_cmd_output(stats, folder_path):
+    """保存当前命令行输出到文本文件"""
+    try:
+        # 获取当前时间戳
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 准备要保存的内容
+        lines_to_save = []
+        lines_to_save.append(f"=== C4D渲染监控日志 - {timestamp} ===\\\\n")
+        
+        # 添加历史记录
+        history = stats.get('history', [])
+        if history:
+            lines_to_save.append("渲染历史记录:\\\\n")
+            for line in history:
+                lines_to_save.append(f"{line}\\\\n")
+            lines_to_save.append("\\\\n")
+        
+        # 添加统计信息
+        moved_count = stats.get('moved_count', 0)
+        max_interval = stats.get('max_interval', 0)
+        total_interval = stats.get('total_interval', 0)
+        total_render_time = stats.get('total_render_time', 0)
+        program_start = stats.get('program_start', time.time())
+        
+        first_run_moved = stats.get('first_run_moved', 0)
+        second_run_moved = stats.get('second_run_moved', 0)
+        effective_moved_count = moved_count - first_run_moved - second_run_moved
+        avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
+        total_time = time.time() - program_start
+        
+        # 渲染状态
+        render_monitor = stats.get('render_monitor')
+        is_rendering = render_monitor.check_render_status() if render_monitor else False
+        render_status = "🔴渲染中" if is_rendering else "⚪暂停中"
+        
+        lines_to_save.append("统计信息:\\\\n")
+        lines_to_save.append(f"文件数量: {moved_count}\\\\n")
+        lines_to_save.append(f"最长渲染时间: {format_seconds(max_interval)}\\\\n")
+        lines_to_save.append(f"平均渲染时间: {format_seconds(avg_interval)}\\\\n")
+        lines_to_save.append(f"总渲染时间: {format_seconds(total_render_time)}\\\\n")
+        lines_to_save.append(f"程序运行时间: {format_seconds(total_time)}\\\\n")
+        lines_to_save.append(f"当前状态: {render_status}\\\\n")
+        
+        # 保存到文件
+        output_file = os.path.join(folder_path, "render_log.txt")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.writelines(lines_to_save)
+            
+    except Exception as e:
+        print(f"保存日志文件失败: {e}")
+
 def main_logic(stats):
     folder_path = os.path.dirname(os.path.abspath(__file__))
     if 'history' not in stats:
@@ -460,6 +512,10 @@ def main_logic(stats):
         stats['is_first_run'] = is_first_run
         stats['is_second_run'] = is_second_run
         stats['history'] = history
+        
+        # 每秒保存命令行输出到文本文件
+        save_cmd_output(stats, folder_path)
+        
     except Exception as e:
         print(f"main_logic发生异常: {e}")
 
