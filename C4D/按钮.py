@@ -341,6 +341,10 @@ def main_logic(stats):
                     channel_suffix = match.group(2)  # 通道名称（如果存在）
                     numlen = len(num)
                     
+                    # 检查通道后缀是否在预定义列表中
+                    if channel_suffix and channel_suffix.lower() not in [s.lower() for s in channel_suffixes]:
+                        channel_suffix = None
+                    
                     # 确定基础文件名（去除序号和通道后缀）
                     if channel_suffix:
                         basename = name[:-(numlen + len(channel_suffix) + 1)]  # -1 for the dot
