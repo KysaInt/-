@@ -535,8 +535,8 @@ def save_cmd_content_to_log(stats=None):
             history = stats.get('history', [])
             if history:
                 log_entry += f"文件处理历史:\n"
-                # 显示所有历史记录，但限制在最近50个
-                display_history = history[-50:] if len(history) > 50 else history
+                # 显示所有历史记录（完整列表）
+                display_history = history
                 
                 # 生成带柱状图的历史记录（使用全局函数确保与CMD窗口完全一致）
                 enhanced_history = generate_bar_chart_for_history(display_history)
