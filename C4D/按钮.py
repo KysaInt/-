@@ -101,7 +101,7 @@ class C4DRenderMonitor:
             os.path.expanduser("~/AppData/Roaming/Maxon/render_queue.xml"),
             os.path.expanduser("~/AppData/Roaming/Maxon/queue.dat"),
             os.path.expanduser("~/Documents/Maxon/render_queue.xml"),
-            "C:\\\\ProgramData\\\\Maxon\\\\render_queue.xml"
+            "C:\\ProgramData\\Maxon\\render_queue.xml"
         ]
         
         for file_path in possible_files:
@@ -252,6 +252,25 @@ def generate_bar_chart_for_history(history_lines):
             enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
     
     return enhanced_lines
+    """键盘监听线程"""
+    while True:
+        try:
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'o' or key == b'O':  # 按 O 键打开上一个文件夹
+                    last_folder = stats.get('last_target_folder', None)
+                    if last_folder and os.path.exists(last_folder):
+                        open_last_folder(last_folder)
+                    else:
+                        print("没有可打开的文件夹记录")
+                elif key == b'q' or key == b'Q':  # 按 Q 键退出
+                    print("收到退出信号")
+                    stats['should_exit'] = True
+                    break
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"键盘监听异常: {e}")
+            break
 
 def main_logic(stats):
     folder_path = os.path.dirname(os.path.abspath(__file__))
@@ -265,9 +284,9 @@ def main_logic(stats):
     history = stats['history']
     render_monitor = stats['render_monitor']
     
-    # 每10秒保存一次记录（实时更新）
+    # 每1秒保存一次记录（实时更新）
     current_time = time.time()
-    if current_time - stats['last_log_save'] > 10:  # 10秒间隔
+    if current_time - stats['last_log_save'] > 1:  # 1秒间隔
         save_cmd_content_to_log(stats)
         stats['last_log_save'] = current_time
     
@@ -316,15 +335,11 @@ def main_logic(stats):
                 
                 # 分析文件名结构：文件名+序号+.通道名称 或 文件名+序号
                 # 首先查找数字序列
-                match = re.search(r'(\\\\d{1,4})(?:\\\\.([^.]+))?$', name)
+                match = re.search(r'(\d{1,4})(?:\.([^.]+))?$', name)
                 if match:
                     num = match.group(1)
                     channel_suffix = match.group(2)  # 通道名称（如果存在）
                     numlen = len(num)
-                    
-                    # 检查通道后缀是否在预定义列表中
-                    if channel_suffix and channel_suffix.lower() not in [s.lower() for s in channel_suffixes]:
-                        channel_suffix = None
                     
                     # 确定基础文件名（去除序号和通道后缀）
                     if channel_suffix:
@@ -499,12 +514,12 @@ def save_cmd_content_to_log(stats=None):
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # 准备要写入的内容
-        log_entry = f"{'='*60}\\n"
-        log_entry += f"C4D文件管理器运行记录\\n"
-        log_entry += f"{'='*60}\\n"
-        log_entry += f"程序文件: {os.path.basename(__file__)}\\n"
-        log_entry += f"最后更新: {current_time}\\n"
-        log_entry += f"{'='*60}\\n\\n"
+        log_entry = f"{'='*60}\n"
+        log_entry += f"C4D文件管理器运行记录\n"
+        log_entry += f"{'='*60}\n"
+        log_entry += f"程序文件: {os.path.basename(__file__)}\n"
+        log_entry += f"最后更新: {current_time}\n"
+        log_entry += f"{'='*60}\n\n"
         
         # 如果有stats参数，记录程序统计信息
         if stats:
@@ -519,27 +534,27 @@ def save_cmd_content_to_log(stats=None):
             if render_monitor:
                 is_rendering = render_monitor.check_render_status()
             
-            log_entry += f"程序启动时间: {program_start_str}\\n"
-            log_entry += f"当前运行状态: {'🔴渲染中' if is_rendering else '⚪暂停中'}\\n"
-            log_entry += f"已处理文件数量: {moved_count}\\n"
-            log_entry += f"程序运行时长: {format_seconds(total_time)}\\n"
-            log_entry += f"总渲染时长: {format_seconds(total_render_time)}\\n"
-            log_entry += f"{'-'*60}\\n"
+            log_entry += f"程序启动时间: {program_start_str}\n"
+            log_entry += f"当前运行状态: {'🔴渲染中' if is_rendering else '⚪暂停中'}\n"
+            log_entry += f"已处理文件数量: {moved_count}\n"
+            log_entry += f"程序运行时长: {format_seconds(total_time)}\n"
+            log_entry += f"总渲染时长: {format_seconds(total_render_time)}\n"
+            log_entry += f"{'-'*60}\n"
             
-            # 记录最近的历史
+            # 记录完整历史
             history = stats.get('history', [])
             if history:
-                log_entry += f"文件处理历史:\\n"
-                # 显示所有历史记录（完整列表）
+                log_entry += f"文件处理历史:\n"
+                # 显示所有历史记录（无限制）
                 display_history = history
                 
                 # 生成带柱状图的历史记录（使用全局函数确保与CMD窗口完全一致）
                 enhanced_history = generate_bar_chart_for_history(display_history)
                 for line in enhanced_history:
-                    log_entry += f"{line}\\n"
+                    log_entry += f"{line}\n"
                 
                 # 添加与CMD窗口相同的统计行
-                log_entry += f"{'-'*60}\\n"
+                log_entry += f"{'-'*60}\n"
                 first_run_moved = stats.get('first_run_moved', 0)
                 second_run_moved = stats.get('second_run_moved', 0)
                 effective_moved_count = moved_count - first_run_moved - second_run_moved
@@ -550,12 +565,12 @@ def save_cmd_content_to_log(stats=None):
                 # 生成与CMD窗口完全相同的统计行
                 render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
                 stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator}"
-                log_entry += f"{stat_line}\\n"
+                log_entry += f"{stat_line}\n"
             else:
-                log_entry += f"暂无文件处理记录\\n"
+                log_entry += f"暂无文件处理记录\n"
         
-        log_entry += f"\\n{'='*60}\\n"
-        log_entry += f"记录文件: {os.path.basename(log_file_path)}\\n"
+        log_entry += f"\n{'='*60}\n"
+        log_entry += f"记录文件: {os.path.basename(log_file_path)}\n"
         log_entry += f"{'='*60}"
         
         # 覆盖写入到记录文件（替换模式）

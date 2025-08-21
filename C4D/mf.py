@@ -242,6 +242,25 @@ def generate_bar_chart_for_history(history_lines):
             enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
     
     return enhanced_lines
+    """键盘监听线程"""
+    while True:
+        try:
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'o' or key == b'O':  # 按 O 键打开上一个文件夹
+                    last_folder = stats.get('last_target_folder', None)
+                    if last_folder and os.path.exists(last_folder):
+                        open_last_folder(last_folder)
+                    else:
+                        print("没有可打开的文件夹记录")
+                elif key == b'q' or key == b'Q':  # 按 Q 键退出
+                    print("收到退出信号")
+                    stats['should_exit'] = True
+                    break
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"键盘监听异常: {e}")
+            break
 
 def main_logic(stats):
     folder_path = os.path.dirname(os.path.abspath(__file__))
@@ -255,9 +274,9 @@ def main_logic(stats):
     history = stats['history']
     render_monitor = stats['render_monitor']
     
-    # 每10秒保存一次记录（实时更新）
+    # 每1秒保存一次记录（实时更新）
     current_time = time.time()
-    if current_time - stats['last_log_save'] > 10:  # 10秒间隔
+    if current_time - stats['last_log_save'] > 1:  # 1秒间隔
         save_cmd_content_to_log(stats)
         stats['last_log_save'] = current_time
     
@@ -512,11 +531,11 @@ def save_cmd_content_to_log(stats=None):
             log_entry += f"总渲染时长: {format_seconds(total_render_time)}\n"
             log_entry += f"{'-'*60}\n"
             
-            # 记录最近的历史
+            # 记录完整历史
             history = stats.get('history', [])
             if history:
                 log_entry += f"文件处理历史:\n"
-                # 显示所有历史记录（完整列表）
+                # 显示所有历史记录（无限制）
                 display_history = history
                 
                 # 生成带柱状图的历史记录（使用全局函数确保与CMD窗口完全一致）
