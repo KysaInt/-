@@ -8,11 +8,13 @@ def install_requirements():
     """安装所需的依赖库"""
     requirements = [
         'pydub',
-        'numpy'
+        'numpy',
+        'librosa',
+        'mido'
     ]
     
-    print("正在安装音频切分工具所需的依赖库...")
-    print("需要安装的库:", requirements)
+    print("正在安装音频处理工具所需的依赖库...")
+    print("包括音频切分和MIDI转换功能所需的库...")
     
     for package in requirements:
         try:
@@ -34,7 +36,9 @@ def install_requirements():
 if __name__ == "__main__":
     success = install_requirements()
     if success:
-        print("\n现在可以运行 '切分.py' 来启动音频切分工具！")
+        print("\n现在可以运行以下程序：")
+        print("- '切分.py' 启动音频切分工具")
+        print("- 'to midi.py' 启动音频转MIDI工具")
     else:
         print("\n依赖安装失败，请检查网络连接或手动安装依赖。")
     
