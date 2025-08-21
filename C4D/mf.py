@@ -242,25 +242,6 @@ def generate_bar_chart_for_history(history_lines):
             enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
     
     return enhanced_lines
-    """键盘监听线程"""
-    while True:
-        try:
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                if key == b'o' or key == b'O':  # 按 O 键打开上一个文件夹
-                    last_folder = stats.get('last_target_folder', None)
-                    if last_folder and os.path.exists(last_folder):
-                        open_last_folder(last_folder)
-                    else:
-                        print("没有可打开的文件夹记录")
-                elif key == b'q' or key == b'Q':  # 按 Q 键退出
-                    print("收到退出信号")
-                    stats['should_exit'] = True
-                    break
-            time.sleep(0.1)
-        except Exception as e:
-            print(f"键盘监听异常: {e}")
-            break
 
 def main_logic(stats):
     folder_path = os.path.dirname(os.path.abspath(__file__))
