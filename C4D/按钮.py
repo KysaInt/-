@@ -685,46 +685,42 @@ def main():
             print("错误: 未找到Python，请确保Python已正确安装并添加到系统环境变量")
             return
             
-        # 使用bat文件方式启动，确保窗口不会立即关闭
+        # 直接使用subprocess启动，不创建bat文件
         import subprocess
         
-        # 创建临时bat文件
-        bat_path = os.path.join(work_dir, "start_monitor.bat")
         try:
-            with open(bat_path, 'w', encoding='utf-8') as f:
-                f.write('@echo off\n')
-                f.write('chcp 65001 >nul\n')  # 设置UTF-8编码
-                f.write(f'cd /d "{work_dir}"\n')
-                f.write('title C4D渲染监控\n')  # 设置窗口标题
-                f.write('echo 正在检查Python环境...\n')
-                f.write('python --version\n')
-                f.write('if errorlevel 1 (\n')
-                f.write('    echo Python未找到，请确保已安装Python并添加到环境变量\n')
-                f.write('    pause\n')
-                f.write('    exit\n')
-                f.write(')\n')
-                f.write('echo 启动文件管理器...\n')
-                f.write('python mf.py\n')
-                f.write('if errorlevel 1 (\n')
-                f.write('    echo 运行出错\n')
-                f.write(')\n')
-                f.write('pause\n')
-            print(f"已创建启动脚本: {bat_path}")
-        except Exception as e:
-            print(f"创建启动脚本失败: {e}")
-            return
-            
-        try:
-            # 使用start命令启动新窗口
+            # 使用Python直接启动mf.py，在新的命令行窗口中运行
             print("正在启动脚本...")
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            process = subprocess.Popen(['start', 'cmd', '/c', bat_path], 
+            
+            # 构建启动命令 - 修复引号嵌套问题
+            cmd = f'start "C4D监控" cmd /k "cd /d "{work_dir}" && python mf.py"'
+            
+            # 启动新窗口
+            process = subprocess.Popen(cmd, 
                                     shell=True,
-                                    startupinfo=startupinfo)
+                                    cwd=work_dir)
             print("脚本已启动")
+            print("监控程序正在新窗口中运行")
+                
         except Exception as e:
             print(f"启动脚本失败: {e}")
+            print("尝试备用启动方法...")
+            
+            # 备用方法1：简化命令
+            try:
+                simple_cmd = f'start cmd /k "cd /d "{work_dir}" && python mf.py"'
+                os.system(simple_cmd)
+                print("已使用备用方法1启动")
+            except Exception as backup_error1:
+                print(f"备用方法1失败: {backup_error1}")
+                
+                # 备用方法2：最简单的启动方式
+                try:
+                    os.chdir(work_dir)
+                    os.system('start cmd /k python mf.py')
+                    print("已使用备用方法2启动")
+                except Exception as backup_error2:
+                    print(f"所有启动方法都失败: {backup_error2}")
         
     except Exception as e:
         print(f"启动失败，错误信息: {e}")
