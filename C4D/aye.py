@@ -99,7 +99,7 @@ def main():
             print("正在启动脚本...")
             
             # 构建启动命令 - 修复引号嵌套问题
-            cmd = f'start "C4D监控" cmd /k "cd /d "{work_dir}" && python mf.py"'
+            cmd = f'start "💀" cmd /k "cd /d "{work_dir}" && python mf.py"'
             
             # 启动新窗口
             process = subprocess.Popen(cmd, 
