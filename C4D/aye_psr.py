@@ -261,49 +261,20 @@ def rotate_around_axis(obj, axes, value, is_absolute):
     使用矩阵变换实现真正的绕轴旋转
     """
     if is_absolute:
-        # 绝对旋转：保持位置和缩放，只重置旋转
-        # 保存当前位置和缩放
-        current_pos = obj.GetRelPos()
-        current_scale = obj.GetRelScale()
-        
-        # 创建新的变换矩阵，只包含旋转
-        ml = c4d.Matrix()
-        
-        # 将度数转换为弧度，并自动取负数以符合预期的旋转方向
+        # 绝对旋转：只修改指定轴的 HPB 角度分量，保留未指定轴的值，避免被清零
+        # 采用 HPB（GetRelRot / SetRelRot）方式直接修改对应分量
+        rot = obj.GetRelRot()
         radians = math.radians(-value)
-        
+        # 注意：C4D 的数值为 HPB（Heading, Pitch, Bank），rx/ry 映射为 HPB 的不同分量
+        # 将 .r 的映射调整为与 r 保持一致（X/Y 对调）
         for axis in axes:
-            # 创建旋转矩阵
             if axis == "X":
-                rotation_matrix = c4d.Matrix()
-                rotation_matrix.v1 = c4d.Vector(1, 0, 0)
-                rotation_matrix.v2 = c4d.Vector(0, math.cos(radians), -math.sin(radians))
-                rotation_matrix.v3 = c4d.Vector(0, math.sin(radians), math.cos(radians))
-                rotation_matrix.off = c4d.Vector(0, 0, 0)
+                rot.y = radians
             elif axis == "Y":
-                rotation_matrix = c4d.Matrix()
-                rotation_matrix.v1 = c4d.Vector(math.cos(radians), 0, math.sin(radians))
-                rotation_matrix.v2 = c4d.Vector(0, 1, 0)
-                rotation_matrix.v3 = c4d.Vector(-math.sin(radians), 0, math.cos(radians))
-                rotation_matrix.off = c4d.Vector(0, 0, 0)
+                rot.x = radians
             elif axis == "Z":
-                rotation_matrix = c4d.Matrix()
-                rotation_matrix.v1 = c4d.Vector(math.cos(radians), -math.sin(radians), 0)
-                rotation_matrix.v2 = c4d.Vector(math.sin(radians), math.cos(radians), 0)
-                rotation_matrix.v3 = c4d.Vector(0, 0, 1)
-                rotation_matrix.off = c4d.Vector(0, 0, 0)
-            
-            ml = ml * rotation_matrix
-        
-        # 应用缩放到旋转矩阵
-        ml.v1 = ml.v1 * current_scale.x
-        ml.v2 = ml.v2 * current_scale.y
-        ml.v3 = ml.v3 * current_scale.z
-        
-        # 设置位置
-        ml.off = current_pos
-        
-        obj.SetRelMl(ml)
+                rot.z = radians
+        obj.SetRelRot(rot)
     else:
         # 相对旋转：在当前旋转基础上增加
         radians = math.radians(-value)
@@ -345,9 +316,8 @@ def rotate_relative(obj, axes, value, is_absolute):
     radians = math.radians(value)
     
     if is_absolute:
-        # 绝对设置：直接设置旋转值
-        rot = c4d.Vector(0, 0, 0)
-        
+        # 绝对设置：只替换指定轴的 HPB 分量，保留未指定轴的原始值
+        rot = obj.GetRelRot()
         for axis in axes:
             if axis == "X":
                 rot.x = radians  # 俯仰 (Pitch)
@@ -376,9 +346,8 @@ def print_c4d_coordinate_info():
 def scale_object(obj, axes, value, is_absolute):
     """缩放对象"""
     if is_absolute:
-        # 绝对设置：直接设置缩放值
-        scale = c4d.Vector(1, 1, 1)  # 从默认缩放开始
-        
+        # 绝对设置：只替换指定轴的缩放分量，保留未指定轴的缩放值
+        scale = obj.GetRelScale()
         for axis in axes:
             if axis == "X":
                 scale.x = value
