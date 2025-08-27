@@ -17,9 +17,9 @@ DEFAULT_RECIPIENT = "kysaint@Foxmail.com"
 DEFAULT_SMTP_HOST = "smtp.qq.com"
 DEFAULT_SMTP_PORT = 465
 DEFAULT_SMTP_USER = "kysaint@Foxmail.com"
-# 注意：仓库中已有明文密码字段（风险自负），运行环境优先使用环境变量或命令行参数。
-DEFAULT_SMTP_PASSWORD = "Ky.741953"
-DEFAULT_SMTP_PASS = "vohqlhjgjebibbjg"
+# 从环境变量获取密码，不提供硬编码默认值
+DEFAULT_SMTP_PASSWORD = os.environ.get("DEFAULT_SMTP_PASSWORD")
+DEFAULT_SMTP_PASS = os.environ.get("DEFAULT_SMTP_PASS")
 
 
 def read_title_and_body(txt_path: Path) -> Tuple[str, str]:
