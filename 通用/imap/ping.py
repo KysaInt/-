@@ -83,7 +83,11 @@ def send_notification_email(device_name, new_status, ip):
 def ping_device(ip):
     """Ping设备一次，返回True如果成功"""
     try:
-        result = subprocess.run(['ping', '-n', '1', ip], capture_output=True, text=True, timeout=1)
+        # 根据操作系统选择 ping 参数
+        if os.name == 'nt':  # Windows
+            result = subprocess.run(['ping', '-n', '1', ip], capture_output=True, text=True, timeout=1)
+        else:  # Linux/Unix
+            result = subprocess.run(['ping', '-c', '1', ip], capture_output=True, text=True, timeout=1)
         return result.returncode == 0
     except:
         return False
