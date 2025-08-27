@@ -265,13 +265,11 @@ def rotate_around_axis(obj, axes, value, is_absolute):
         # 采用 HPB（GetRelRot / SetRelRot）方式直接修改对应分量
         rot = obj.GetRelRot()
         radians = math.radians(-value)
-        # 注意：C4D 的数值为 HPB（Heading, Pitch, Bank），rx/ry 映射为 HPB 的不同分量
-        # 将 .r 的映射调整为与 r 保持一致（X/Y 对调）
         for axis in axes:
             if axis == "X":
-                rot.y = radians
-            elif axis == "Y":
                 rot.x = radians
+            elif axis == "Y":
+                rot.y = radians
             elif axis == "Z":
                 rot.z = radians
         obj.SetRelRot(rot)
