@@ -39,20 +39,20 @@ def generate_vibrant_colors(count):
     """生成鲜艳不重复的随机颜色"""
     colors = []
     used_colors = set()
-    
+
     # 预定义的基础色相组合，确保颜色分布均匀
     base_hues = []
     for i in range(count):
         hue = (360.0 / max(count, 8)) * i
         base_hues.append(hue)
-    
+
     # 打乱顺序增加随机性
     random.shuffle(base_hues)
-    
+
     for i in range(count):
         attempts = 0
         max_attempts = 50
-        
+
         while attempts < max_attempts:
             if i < len(base_hues):
                 # 使用预定义色相，添加随机变化
@@ -61,34 +61,34 @@ def generate_vibrant_colors(count):
             else:
                 # 完全随机色相
                 hue = random.uniform(0, 360)
-            
+
             # 确保高饱和度和亮度
             saturation = random.uniform(0.7, 1.0)
             value = random.uniform(0.7, 0.95)
-            
+
             # 转换HSV到RGB
             rgb = hsv_to_rgb(hue, saturation, value)
-            
+
             # 检查颜色相似度
             is_similar = False
             for used_color in used_colors:
                 if color_distance(rgb, used_color) < COLOR_SIMILARITY_THRESHOLD:
                     is_similar = True
                     break
-            
+
             if not is_similar:
                 colors.append(rgb)
                 used_colors.add((round(rgb.x, 2), round(rgb.y, 2), round(rgb.z, 2)))
                 break
-            
+
             attempts += 1
-        
+
         # 如果无法找到足够不同的颜色，使用备用方案
         if len(colors) <= i:
             hue = (360.0 / count) * i
             rgb = hsv_to_rgb(hue, 0.8, 0.9)
             colors.append(rgb)
-    
+
     return colors
 
 def hsv_to_rgb(h, s, v):
@@ -99,7 +99,7 @@ def hsv_to_rgb(h, s, v):
     p = v * (1.0 - s)
     q = v * (1.0 - s * f)
     t = v * (1.0 - s * (1.0 - f))
-    
+
     if i == 0:
         r, g, b = v, t, p
     elif i == 1:
@@ -112,14 +112,14 @@ def hsv_to_rgb(h, s, v):
         r, g, b = t, p, v
     else:
         r, g, b = v, p, q
-    
+
     return c4d.Vector(r, g, b)
 
 def color_distance(color1, color2):
     """计算两个颜色之间的欧几里得距离"""
     if isinstance(color2, tuple):
         color2 = c4d.Vector(color2[0], color2[1], color2[2])
-    
+
     return math.sqrt(
         (color1.x - color2.x) ** 2 +
         (color1.y - color2.y) ** 2 +
@@ -129,28 +129,28 @@ def color_distance(color1, color2):
 def find_vray_materials(doc):
     """查找场景中的所有材质（不再限制为VRay材质）"""
     all_materials = doc.GetMaterials()
-    
+
     print(f" 检测到场景中共有 {len(all_materials)} 个材质")
-    
+
     # 直接返回所有材质，不做任何过滤
     for mat in all_materials:
         mat_type = mat.GetType()
         mat_name = mat.GetName()
         mat_typename = mat.GetTypeName()
-        
+
         print(f" ✅ 识别材质: '{mat_name}' | TypeID: {mat_type} | TypeName: {mat_typename}")
-    
-    print(f" 📊 将处理所有 {len(all_materials)} 个材质")
+
+    print(f"  将处理所有 {len(all_materials)} 个材质")
     return all_materials
 
 def set_material_id_properties(material, mat_id, color):
     """为材质设置ID和颜色属性"""
     try:
         print(f" 正在设置材质: '{material.GetName()}' -> ID: {mat_id}")
-        
+
         # 1. 启用 Material ID
         success_enable = False
-        
+
         # 方法1: 使用 Cinema4D 常量
         try:
             if hasattr(c4d, 'MTLMATERIALID_MATERIAL_ID_ENABLED'):
@@ -159,7 +159,7 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用 C4D 常量启用 Material ID")
         except Exception as e:
             print(f"   ❌ C4D 常量启用失败: {e}")
-        
+
         # 方法2: 通过关键词查找参数
         if not success_enable:
             enable_keys = ['material id', 'matte id', 'matteid', 'enable id', 'id enable']
@@ -171,7 +171,7 @@ def set_material_id_properties(material, mat_id, color):
                     print(f"   ✅ 通过关键词启用 Material ID: {enable_param}")
                 except Exception as e:
                     print(f"   ❌ 关键词启用失败: {e}")
-        
+
         # 方法3: 使用预定义常量作为备用
         if not success_enable:
             try:
@@ -180,10 +180,10 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用备用常量启用 Material ID")
             except Exception as e:
                 print(f"   ❌ 备用常量启用失败: {e}")
-        
+
         # 2. 设置 Material ID 数值
         success_id = False
-        
+
         # 方法1: 使用 MTLMATERIALID_MATERIAL_ID_NUMBER (这是正确的ID字段)
         try:
             if hasattr(c4d, 'MTLMATERIALID_MATERIAL_ID_NUMBER'):
@@ -192,7 +192,7 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用 MATERIAL_ID_NUMBER 设置ID: {mat_id}")
         except Exception as e:
             print(f"   ❌ MATERIAL_ID_NUMBER 设置失败: {e}")
-        
+
         # 方法2: 使用 MTLMATERIALID_MATERIAL_ID
         if not success_id:
             try:
@@ -202,7 +202,7 @@ def set_material_id_properties(material, mat_id, color):
                     print(f"   ✅ 使用 MATERIAL_ID 设置ID: {mat_id}")
             except Exception as e:
                 print(f"   ❌ MATERIAL_ID 设置失败: {e}")
-        
+
         # 方法3: 通过关键词查找ID参数
         if not success_id:
             id_keys = ['material id', 'matte id', 'matteid', 'id number', 'id value']
@@ -214,7 +214,7 @@ def set_material_id_properties(material, mat_id, color):
                     print(f"   ✅ 通过关键词设置ID: {mat_id}")
                 except Exception as e:
                     print(f"   ❌ 关键词ID设置失败: {e}")
-        
+
         # 方法4: 使用备用常量
         if not success_id:
             try:
@@ -223,10 +223,10 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用备用常量设置ID: {mat_id}")
             except Exception as e:
                 print(f"   ❌ 备用常量ID设置失败: {e}")
-        
+
         # 3. 设置 Material ID 颜色
         success_color = False
-        
+
         # 方法1: 使用 MTLMATERIALID_MATERIAL_ID_COLOR_VALUE
         try:
             if hasattr(c4d, 'MTLMATERIALID_MATERIAL_ID_COLOR_VALUE'):
@@ -235,7 +235,7 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用 COLOR_VALUE 设置颜色")
         except Exception as e:
             print(f"   ❌ COLOR_VALUE 设置失败: {e}")
-        
+
         # 方法2: 使用 MTLMATERIALID_MATERIAL_ID_COLOR
         if not success_color:
             try:
@@ -245,7 +245,7 @@ def set_material_id_properties(material, mat_id, color):
                     print(f"   ✅ 使用 MATERIAL_ID_COLOR 设置颜色")
             except Exception as e:
                 print(f"   ❌ MATERIAL_ID_COLOR 设置失败: {e}")
-        
+
         # 方法3: 通过关键词查找颜色参数
         if not success_color:
             color_keys = ['material id color', 'matte id color', 'matteid color', 'id color']
@@ -257,7 +257,7 @@ def set_material_id_properties(material, mat_id, color):
                     print(f"   ✅ 通过关键词设置颜色")
                 except Exception as e:
                     print(f"   ❌ 关键词颜色设置失败: {e}")
-        
+
         # 方法4: 使用备用常量
         if not success_color:
             try:
@@ -266,7 +266,7 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 使用备用常量设置颜色")
             except Exception as e:
                 print(f"   ❌ 备用常量颜色设置失败: {e}")
-        
+
         # 4. 设置其他相关参数
         try:
             # 设置颜色倍增器为1（如果存在）
@@ -275,7 +275,7 @@ def set_material_id_properties(material, mat_id, color):
                 print(f"   ✅ 设置颜色倍增器为1.0")
         except Exception:
             pass
-        
+
         # 5. 刷新材质
         try:
             material.Message(c4d.MSG_UPDATE)
@@ -283,15 +283,15 @@ def set_material_id_properties(material, mat_id, color):
             print(f"   ✅ 材质刷新完成")
         except Exception as e:
             print(f"   ❌ 材质刷新失败: {e}")
-        
+
         # 检查设置结果
         if success_enable and success_id:
-            print(f"   🎉 材质 '{material.GetName()}' 设置成功 - ID: {mat_id}")
+            print(f"    材质 '{material.GetName()}' 设置成功 - ID: {mat_id}")
             return True
         else:
             print(f"   ❌ 材质 '{material.GetName()}' 设置不完整 - Enable: {success_enable}, ID: {success_id}")
             return False
-            
+
     except Exception as e:
         print(f"❌ 设置材质 '{material.GetName()}' 时发生错误: {str(e)}")
         return False
@@ -308,7 +308,7 @@ def find_param_by_keywords(material, keywords):
         return None
 
     matches = []
-    
+
     for d in desc:
         # 有些描述项可能是字典或元组，使用 DESC_NAME 和 DESC_ID 提取
         try:
@@ -331,16 +331,16 @@ def find_param_by_keywords(material, keywords):
                     score = 50   # 开头匹配
                 elif k.lower() in lname:
                     score = 10   # 包含匹配
-                
+
                 matches.append((score, did, name))
-    
+
     # 按评分排序，返回最佳匹配
     if matches:
         matches.sort(key=lambda x: x[0], reverse=True)
         best_match = matches[0]
         print(f"   找到参数匹配: '{best_match[2]}' (score: {best_match[0]})")
         return best_match[1]
-    
+
     return None
 
 def show_detailed_results(materials, success_count, colors):
@@ -348,14 +348,14 @@ def show_detailed_results(materials, success_count, colors):
     print("\n" + "=" * 70)
     print(" 材质ID设置完成 - 详细报告")
     print("=" * 70)
-    
+
     for i, material in enumerate(materials):
         if i < success_count:
             color = colors[i]
             print(f"✅ {i+1:2d}. {material.GetName():<25} | ID: {i+1:2d} | RGB: ({color.x:.2f}, {color.y:.2f}, {color.z:.2f})")
         else:
             print(f"❌ {i+1:2d}. {material.GetName():<25} | 设置失败")
-    
+
     print("=" * 70)
     print(f" 统计信息:")
     print(f"   • 总材质数量: {len(materials)}")
@@ -442,59 +442,59 @@ def dump_material_info(mat):
 def main():
     """主函数 - 一键设置材质ID"""
     print(" 启动材质ID一键设置工具...")
-    
+
     # 获取当前文档
     doc = documents.GetActiveDocument()
     if not doc:
         gui.MessageDialog("❌ 错误：没有活动的文档")
         return
-    
+
     # 添加调试：列出所有材质
     list_all_materials(doc)
-    
+
     print(" 正在扫描场景中的所有材质...")
-    
+
     # 查找所有材质（不再限制为VRay材质）
     materials = find_vray_materials(doc)
-    
+
     if not materials:
         message = "⚠️ 场景中没有找到任何材质\n\n"
         message += "请确保场景中包含材质后再运行脚本。"
         gui.MessageDialog(message)
         return
-    
+
     print(f"✅ 找到 {len(materials)} 个材质")
     print(" 正在生成随机颜色...")
-    
+
     # 生成鲜艳的随机颜色
     colors = generate_vibrant_colors(len(materials))
-    
+
     print(" 开始应用材质ID设置...")
-    
+
     # 开始撤销记录
     doc.StartUndo()
-    
+
     success_count = 0
-    
+
     # 为每个材质设置ID和颜色
     for i, material in enumerate(materials):
         doc.AddUndo(c4d.UNDOTYPE_CHANGE, material)
-        
+
         mat_id = i + 1  # 从1开始编号
         color = colors[i]
-        
+
         if set_material_id_properties(material, mat_id, color):
             success_count += 1
-    
+
     # 结束撤销记录
     doc.EndUndo()
-    
+
     # 刷新场景显示
     c4d.EventAdd()
-    
+
     # 显示详细结果
     show_detailed_results(materials, success_count, colors)
-    
+
     # 显示简要对话框
     if success_count == len(materials):
         icon = ""
@@ -505,37 +505,37 @@ def main():
     else:
         icon = "❌"
         status = "设置失败"
-    
+
     message = f"{icon} 材质ID设置{status}！\n\n"
     message += f" 处理统计：\n"
     message += f"   • 找到材质：{len(materials)} 个\n"
     message += f"   • 成功设置：{success_count} 个\n"
     message += f"   • ID范围：1 - {len(materials)}\n\n"
-    
+
     if success_count > 0:
         message += f"✨ 功能说明：\n"
         message += f"   • 已启用所有材质的Material ID\n"
         message += f"   • 自动分配了连续的ID序号\n"
         message += f"   • 生成了鲜艳不重复的随机颜色\n"
         message += f"   • 可使用Ctrl+Z撤销操作"
-    
+
     gui.MessageDialog(message)
 
 def reset_all_material_ids():
     """重置所有VRay材质的ID设置"""
     print(" 启动VRay材质ID重置工具...")
-    
+
     doc = documents.GetActiveDocument()
     if not doc:
         gui.MessageDialog("❌ 错误：没有活动的文档")
         return
-    
+
     vray_materials = find_vray_materials(doc)
-    
+
     if not vray_materials:
         gui.MessageDialog("⚠️ 场景中没有找到VRay材质")
         return
-    
+
     # 确认对话框
     result = gui.QuestionDialog(
         f" 确定要重置所有VRay材质的ID设置吗？\n\n"
@@ -545,15 +545,15 @@ def reset_all_material_ids():
         f"• 重置颜色为白色\n\n"
         f"此操作可以撤销。"
     )
-    
+
     if not result:
         print("❌ 用户取消了重置操作")
         return
-    
+
     print(f" 正在重置 {len(vray_materials)} 个材质的ID设置...")
-    
+
     doc.StartUndo()
-    
+
     reset_count = 0
     for material in vray_materials:
         doc.AddUndo(c4d.UNDOTYPE_CHANGE, material)
@@ -586,10 +586,10 @@ def reset_all_material_ids():
             print(f"✅ 重置材质: {material.GetName()}")
         except Exception as e:
             print(f"❌ 重置材质 {material.GetName()} 时出错: {str(e)}")
-    
+
     doc.EndUndo()
     c4d.EventAdd()
-    
+
     print(f"✅ 重置完成，共处理 {reset_count} 个材质")
     gui.MessageDialog(f"✅ 重置完成！\n\n已重置 {reset_count} 个材质的ID设置")
 
@@ -597,7 +597,7 @@ def reset_all_material_ids():
 if __name__ == '__main__':
     # 检查是否有Shift键按下来执行重置功能
     import sys
-    
+
     # 支持命令行参数：reset, list, detect
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
