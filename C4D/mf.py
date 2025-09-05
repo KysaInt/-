@@ -11,8 +11,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-FLAG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '⏳')
-
 class C4DRenderMonitor:
     def __init__(self):
         self.c4d_process_names = [
@@ -194,7 +192,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
     
     if valid_intervals:
         max_time = max(valid_intervals)
-        min_time = 0
+        min_time = min(valid_intervals) if valid_intervals else 0
     else:
         max_time = min_time = 0
     
@@ -210,8 +208,8 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
         fill_char = '|'
         empty_char = ' '
     else:
-        fill_char = '█'
-        empty_char = ' '
+        fill_char = '▏'
+        empty_char = '░'  # 使用25%方块填充空部分
     
     for item in parsed_lines:
         if 'original_line' in item:
@@ -227,14 +225,14 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
             if is_special or interval == 0:
                 bar = empty_char * bar_width
             else:
-                if max_time > 0:
-                    ratio = interval / max_time
+                if max_time > min_time:
+                    ratio = (interval - min_time) / (max_time - min_time)
                 else:
-                    ratio = 0.0
+                    ratio = 1.0 if interval > 0 else 0.0
                 
                 ratio = max(0.0, min(1.0, ratio))
                 
-                filled_length = int(bar_width * ratio)
+                filled_length = max(1, int(bar_width * ratio)) if interval > 0 else 0
                 
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
             
