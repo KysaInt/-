@@ -323,30 +323,39 @@ def main_logic(stats):
             if filename.lower().endswith('.png'):
                 name, ext = os.path.splitext(filename)
                 
-                # 分析文件名结构：文件名+序号+.通道名称 或 文件名+序号
-                # 首先查找数字序列
-                match = re.search(r'(\d{1,4})(?:\.([^.]+))?$', name)
+                # 分析文件名结构：文件名.通道名.序号 或 文件名.序号
+                basename = None
+                num = None
+                channel_suffix = None
+                
+                # Try channel format first: basename.channel.num
+                match = re.search(r'(.+?)\.(.+?)\.(\d{4})$', name)
                 if match:
-                    num = match.group(1)
-                    channel_suffix = match.group(2)  # 通道名称（如果存在）
-                    numlen = len(num)
-                    
-                    # 确定基础文件名（去除序号和通道后缀）
-                    if channel_suffix:
-                        basename = name[:-(numlen + len(channel_suffix) + 1)]  # -1 for the dot
+                    basename = match.group(1)
+                    channel_suffix = match.group(2)
+                    num = match.group(3)
+                else:
+                    # Try main format: basename.num
+                    match = re.search(r'(.+?)(\d{4})$', name)
+                    if match:
+                        basename = match.group(1)
+                        num = match.group(2)
+                        channel_suffix = None
                     else:
-                        basename = name[:-numlen]
-                    
-                    # 使用basename作为序列名
+                        # No match, skip
+                        continue
+                
+                if basename and num:
+                    numlen = len(num)
                     seq_name = basename
                     
                     # 如果需要补零，进行重命名
                     if 0 < numlen < 4:
                         newnum = num.zfill(4)
                         if channel_suffix:
-                            newname = f"{basename}{newnum}.{channel_suffix}{ext}"
+                            newname = f"{basename}.{channel_suffix}.{newnum}{ext}"
                         else:
-                            newname = f"{basename}{newnum}{ext}"
+                            newname = f"{basename}.{newnum}{ext}"
                         try:
                             os.rename(os.path.join(base_dir, filename), os.path.join(base_dir, newname))
                             print(f'Renaming "{filename}" to "{newname}"')
@@ -360,10 +369,6 @@ def main_logic(stats):
                     else:
                         # 不需要重命名，直接添加到序列中
                         sequences.setdefault(seq_name, []).append((filename, channel_suffix))
-                else:
-                    # 没有数字结尾，使用整个文件名作为序列名
-                    seq_name = name
-                    sequences.setdefault(seq_name, []).append((filename, None))
 
         # 等待所有重命名操作完成
         time.sleep(0.1)
@@ -383,9 +388,8 @@ def main_logic(stats):
                 
                 # 判断是否为通道图
                 if channel_suffix:
-                    # 通道图：在主文件夹下创建通道子文件夹（文件名+通道）
-                    channel_folder_name = f"{seq}{channel_suffix}"
-                    channel_folder = os.path.join(main_folder, channel_folder_name)
+                    # 通道图：在主文件夹下创建通道子文件夹
+                    channel_folder = os.path.join(main_folder, channel_suffix)
                     os.makedirs(channel_folder, exist_ok=True)
                     dst = os.path.join(channel_folder, filename)
                     
@@ -395,8 +399,10 @@ def main_logic(stats):
                     except Exception:
                         pass
                 else:
-                    # 主文件：直接放入主文件夹，参与计数和时间统计
-                    dst = os.path.join(main_folder, filename)
+                    # 主文件：放入RGB子文件夹，参与计数和时间统计
+                    rgb_folder = os.path.join(main_folder, "RGB")
+                    os.makedirs(rgb_folder, exist_ok=True)
+                    dst = os.path.join(rgb_folder, filename)
                     
                     try:
                         shutil.move(src, dst)
