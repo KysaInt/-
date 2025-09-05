@@ -62,94 +62,6 @@ def main():
         c4d_print("步骤5: 下载mf.py文件...")
         download_success = False
 
-        # 备用mf.py内容
-        backup_mf_content = '''# -*- coding: utf-8 -*-
-"""
-MF.py - 监控脚本
-用于监控C4D工程文件的更改
-"""
-
-import os
-import sys
-import time
-from pathlib import Path
-
-def main():
-    print("=" * 60)
-    print("MF.py 监控脚本已启动")
-    print("=" * 60)
-    print(f"当前工作目录: {os.getcwd()}")
-    print(f"Python版本: {sys.version}")
-    print("=" * 60)
-
-    # 获取上级目录（C4D工程目录）
-    project_dir = Path(os.getcwd()).parent
-    print(f"监控目录: {project_dir}")
-
-    # 监控文件变化
-    monitored_files = ['.c4d', '.obj', '.fbx', '.abc']
-    print(f"监控文件类型: {monitored_files}")
-
-    try:
-        while True:
-            print("\\n" + "=" * 40)
-            print("选择操作:")
-            print("1. 列出工程文件")
-            print("2. 检查文件变化")
-            print("3. 清理临时文件")
-            print("4. 退出")
-            print("=" * 40)
-
-            choice = input("请输入选择 (1-4): ").strip()
-
-            if choice == '1':
-                print("\\n工程文件列表:")
-                for ext in monitored_files:
-                    files = list(project_dir.rglob(f"*{ext}"))
-                    if files:
-                        print(f"  {ext.upper()}文件:")
-                        for f in files[:10]:  # 最多显示10个
-                            print(f"    {f.name}")
-                        if len(files) > 10:
-                            print(f"    ... 还有 {len(files) - 10} 个文件")
-
-            elif choice == '2':
-                print("\\n检查文件变化...")
-                # 这里可以添加文件变化检测逻辑
-                print("文件变化检测功能开发中...")
-
-            elif choice == '3':
-                print("\\n清理临时文件...")
-                temp_files = list(project_dir.rglob("*.tmp")) + list(project_dir.rglob("*.temp"))
-                if temp_files:
-                    print(f"找到 {len(temp_files)} 个临时文件")
-                    for f in temp_files:
-                        try:
-                            f.unlink()
-                            print(f"已删除: {f.name}")
-                        except:
-                            print(f"无法删除: {f.name}")
-                else:
-                    print("未找到临时文件")
-
-            elif choice == '4':
-                print("\\n退出程序...")
-                break
-
-            else:
-                print("\\n无效选择，请重新输入")
-
-    except KeyboardInterrupt:
-        print("\\n\\n程序被用户中断")
-    except Exception as e:
-        print(f"\\n程序出错: {e}")
-
-    print("\\n感谢使用MF.py监控脚本！")
-
-if __name__ == "__main__":
-    main()
-'''
-
         # 尝试下载
         try:
             import urllib.request
@@ -157,7 +69,7 @@ if __name__ == "__main__":
             import ssl
 
             # 设置超时和SSL上下文
-            socket.setdefaulttimeout(30)
+            socket.setdefaulttimeout(60)  # 增加等待时间到60秒
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
@@ -178,7 +90,7 @@ if __name__ == "__main__":
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
 
             # 下载文件
-            with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+            with urllib.request.urlopen(req, context=ssl_context, timeout=60) as response:  # 增加超时到60秒
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
                 block_size = 8192
@@ -205,16 +117,8 @@ if __name__ == "__main__":
 
         except Exception as e:
             c4d_print(f"✗ 下载失败: {e}")
-            c4d_print("将使用备用版本...")
-
-            # 使用备用内容
-            try:
-                with open(mf_path, 'w', encoding='utf-8') as f:
-                    f.write(backup_mf_content)
-                download_success = True
-                c4d_print("✓ 已创建备用mf.py文件")
-            except Exception as backup_error:
-                c4d_print(f"✗ 创建备用文件失败: {backup_error}")
+            c4d_print("无法获取mf.py文件，脚本终止")
+            return
 
         if not download_success:
             c4d_print("无法获取mf.py文件，脚本终止")
