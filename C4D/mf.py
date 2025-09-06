@@ -208,8 +208,8 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
         fill_char = '|'
         empty_char = ' '
     else:
-        fill_char = '▏'
-        empty_char = '░'  # 使用25%方块填充空部分
+        fill_char = '█'
+        empty_char = ' '
     
     for item in parsed_lines:
         if 'original_line' in item:
