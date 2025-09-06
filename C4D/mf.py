@@ -524,3 +524,4 @@ if __name__ == "__main__":
         save_cmd_content_to_log(stats)
         stats['should_exit'] = True
         print("程序已关闭，最终记录已保存")
+        
