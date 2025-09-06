@@ -168,7 +168,7 @@ def main():
             if not launch_success:
                 try:
                     c4d_print("尝试方法1: 直接启动...")
-                    cmd = f'start "MF监控脚本" cmd /k "cd /d "{work_dir}" && {python_cmd} mf.py"'
+                    cmd = f'start "💥" cmd /k "cd /d "{work_dir}" && {python_cmd} mf.py"'
                     os.system(cmd)
                     launch_success = True
                     c4d_print("✓ mf.py脚本已启动")
@@ -180,7 +180,7 @@ def main():
                 try:
                     c4d_print("尝试方法2: subprocess启动...")
                     process = subprocess.Popen(
-                        ['cmd', '/c', 'start', '"MF监控脚本"', 'cmd', '/k',
+                        ['cmd', '/c', 'start', '"💥"', 'cmd', '/k',
                          f'cd /d "{work_dir}" && {python_cmd} mf.py'],
                         shell=True,
                         cwd=work_dir
