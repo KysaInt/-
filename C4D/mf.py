@@ -104,10 +104,7 @@ def format_seconds(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    if h == 0:
-        return f"{m:02d}:{s:02d}"
-    else:
-        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 def open_last_folder(folder_path):
     try:
@@ -232,7 +229,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 
                 ratio = max(0.0, min(1.0, ratio))
                 
-                filled_length = max(1, int(bar_width * ratio)) if interval > 0 else 0
+                filled_length = int(bar_width * ratio) if interval > 0 else 0
                 
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
             
@@ -258,8 +255,12 @@ def main_logic(stats):
         stats['last_log_save'] = current_time
     
     try:
-        is_rendering = False
+        is_rendering = render_monitor.check_render_status()
         render_status_changed = False
+        
+        if render_monitor.last_render_status != (1 if is_rendering else 0):
+            render_status_changed = True
+            render_monitor.last_render_status = 1 if is_rendering else 0
         
         last_move_time = stats.get('last_move_time', None)
         moved_count = stats.get('moved_count', 0)
@@ -406,7 +407,9 @@ def main_logic(stats):
         avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
         dots = '.' * dot_count + ' ' * (3 - dot_count)
         
-        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {dots}"
+        render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
+        
+        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator} {dots}"
         
         os.system('cls')
         enhanced_history = generate_bar_chart_for_history(history, for_log_file=False)
@@ -459,9 +462,10 @@ def save_cmd_content_to_log(stats=None):
             render_monitor = stats.get('render_monitor')
             is_rendering = False
             if render_monitor:
-                is_rendering = False
+                is_rendering = render_monitor.check_render_status()
             
             log_entry += f"程序启动时间: {program_start_str}\n"
+            log_entry += f"当前运行状态: {'🔴渲染中' if is_rendering else '⚪暂停中'}\n"
             log_entry += f"已处理文件数量: {moved_count}\n"
             log_entry += f"程序运行时长: {format_seconds(total_time)}\n"
             log_entry += f"总渲染时长: {format_seconds(total_render_time)}\n"
@@ -524,4 +528,3 @@ if __name__ == "__main__":
         save_cmd_content_to_log(stats)
         stats['should_exit'] = True
         print("程序已关闭，最终记录已保存")
-        
