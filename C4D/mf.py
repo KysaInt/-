@@ -448,7 +448,6 @@ def save_cmd_content_to_log(stats=None):
         if stats:
             moved_count = stats.get('moved_count', 0)
             program_start = stats.get('program_start', time.time())
-            total_render_time = stats.get('total_render_time', 0)
             total_time = time.time() - program_start
             program_start_str = datetime.fromtimestamp(program_start).strftime("%Y-%m-%d %H:%M:%S")
             
@@ -480,7 +479,7 @@ def save_cmd_content_to_log(stats=None):
                 avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
                 
                 render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
-                stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator}"
+                stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator}"
                 log_entry += f"{stat_line}\n"
             else:
                 log_entry += f"暂无文件处理记录\n"
