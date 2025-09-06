@@ -267,7 +267,6 @@ def main_logic(stats):
         dot_count = stats.get('dot_count', 1)
         max_interval = stats.get('max_interval', 0)
         total_interval = stats.get('total_interval', 0)
-        total_render_time = stats.get('total_render_time', 0)
         last_render_check = stats.get('last_render_check', time.time())
         is_first_run = stats.get('is_first_run', True)
         is_second_run = stats.get('is_second_run', False)
@@ -275,8 +274,6 @@ def main_logic(stats):
         move_failed = False
         
         current_time = time.time()
-        if stats.get('was_rendering', False) and is_rendering:
-            total_render_time += current_time - last_render_check
         
         stats['was_rendering'] = is_rendering
         stats['last_render_check'] = current_time
@@ -406,7 +403,7 @@ def main_logic(stats):
         avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
         dots = '.' * dot_count + ' ' * (3 - dot_count)
         
-        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {dots}"
+        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 程序运行时间: {format_seconds(total_time)} | {dots}"
         
         os.system('cls')
         enhanced_history = generate_bar_chart_for_history(history, for_log_file=False)
@@ -417,7 +414,6 @@ def main_logic(stats):
         stats['last_move_time'] = last_move_time
         stats['max_interval'] = max_interval
         stats['total_interval'] = total_interval
-        stats['total_render_time'] = total_render_time
         stats['moved_count'] = moved_count
         stats['program_start'] = program_start
         stats['dot_count'] = dot_count
@@ -464,7 +460,6 @@ def save_cmd_content_to_log(stats=None):
             log_entry += f"程序启动时间: {program_start_str}\n"
             log_entry += f"已处理文件数量: {moved_count}\n"
             log_entry += f"程序运行时长: {format_seconds(total_time)}\n"
-            log_entry += f"总渲染时长: {format_seconds(total_render_time)}\n"
             log_entry += f"{'-'*60}\n"
             
             history = stats.get('history', [])
