@@ -286,7 +286,8 @@ def main_logic(stats):
         sequences = {}
         renamed_files = []
         
-        channel_suffixes = ['alpha', 'zdepth', 'normal', 'roughness', 'metallic', 'specular', 'emission', 'ao', 'displacement', 'bump', 'diffuse', 'reflection', 'refraction']
+        # 常见的通道后缀（大小写不敏感）
+        channel_suffixes = ['alpha', 'zdepth', 'normal', 'roughness', 'metallic', 'specular', 'emission', 'ao', 'displacement', 'bump', 'diffuse', 'reflection', 'refraction', 'atmospheric_effects', 'background', 'bump_normals', 'caustics', 'coat', 'coat_filter', 'coat_glossiness', 'coat_reflection', 'coverage', 'cryptomatte', 'cryptomatte00', 'cryptomatte01', 'cryptomatte02', 'denoiser', 'dl1', 'dl2', 'dl3', 'dr_bucket', 'environment', 'extra_tex', 'global_illumination', 'lighting', 'material_id', 'material_select', 'matte_shadow', 'metalness', 'multi_matte', 'multi_matte_id', 'normals', 'object_id', 'object_select', 'object_select_alpha', 'object_select_filter', 'raw_coat_filter', 'raw_coat_reflection', 'raw_gi', 'raw_lighting', 'raw_reflection', 'raw_refraction', 'raw_shadow', 'raw_sheen_filter', 'raw_sheen_reflection', 'raw_total_light', 'reflection_filter', 'reflection_glossiness', 'reflection_highlight_glossiness', 'reflection_ior', 'refraction_filter', 'refraction_glossiness', 'render_id', 'sampler_info', 'sample_rate', 'self_illumination', 'shadow', 'sheen', 'sheen_filter', 'sheen_glossiness', 'sheen_reflection', 'sss', 'toon', 'toon_lighting', 'toon_specular', 'total_light', 'velocity']
         
         for filename in os.listdir(base_dir):
             if filename.lower().endswith('.png'):
