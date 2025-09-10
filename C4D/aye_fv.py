@@ -161,34 +161,30 @@ def main():
                 c4d_print(f"✗ FV.pyw文件读取失败: {e}")
                 return
 
-            # 多种启动方式
+            # 使用pythonw无窗口启动
             launch_success = False
-
-            # 方法1: 直接启动
-            if not launch_success:
-                try:
-                    c4d_print("尝试方法1: 直接启动...")
-                    cmd = f'start "💥" cmd /k "cd /d "{work_dir}" && {python_cmd} FV.pyw"'
-                    os.system(cmd)
-                    launch_success = True
-                    c4d_print("✓ FV.pyw脚本已启动")
-                except Exception as e:
-                    c4d_print(f"方法1失败: {e}")
-
-            # 方法2: 使用subprocess
-            if not launch_success:
-                try:
-                    c4d_print("尝试方法2: subprocess启动...")
-                    process = subprocess.Popen(
-                        ['cmd', '/c', 'start', '"💥"', 'cmd', '/k',
-                         f'cd /d "{work_dir}" && {python_cmd} FV.pyw'],
-                        shell=True,
-                        cwd=work_dir
-                    )
-                    launch_success = True
-                    c4d_print("✓ FV.pyw脚本已启动")
-                except Exception as e:
-                    c4d_print(f"方法2失败: {e}")
+            
+            try:
+                c4d_print("尝试启动...")
+                # 使用pythonw来执行pyw文件
+                pythonw_cmd = python_cmd.replace('python', 'pythonw')
+                if not pythonw_cmd.endswith('w'):
+                    pythonw_cmd += 'w'
+                
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                process = subprocess.Popen(
+                    [pythonw_cmd, "FV.pyw"],
+                    shell=False,
+                    cwd=work_dir,
+                    startupinfo=startupinfo
+                )
+                launch_success = True
+                c4d_print("✓ FV.pyw脚本已启动（无窗口模式）")
+            except Exception as e:
+                c4d_print(f"启动失败: {e}")
 
             if not launch_success:
                 c4d_print("所有启动方法都失败")
