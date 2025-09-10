@@ -527,16 +527,14 @@ def main_logic(stats):
                         move_failed = True
                         pass
         if is_first_run:
+            stats['first_run_moved'] = stats.get('first_run_moved', 0) + moved_this_round
             if moved_this_round > 0:
-                stats['first_run_moved'] = stats.get('first_run_moved', 0) + moved_this_round
                 is_first_run = False
                 is_second_run = True
-            else:
-                is_first_run = False
-                is_second_run = True
-        elif is_second_run and moved_this_round > 0:
+        elif is_second_run:
             stats['second_run_moved'] = stats.get('second_run_moved', 0) + moved_this_round
-            is_second_run = False
+            if moved_this_round > 0:
+                is_second_run = False
             
         total_time = time.time() - program_start
         first_run_moved = stats.get('first_run_moved', 0)
@@ -557,18 +555,20 @@ def main_logic(stats):
             output_lines.append(line)
         output_lines.append(stat_line)
         
-        # 返回输出内容而不是打印
-        return '\n'.join(output_lines)
+        # 更新状态
         stats['last_move_time'] = last_move_time
         stats['max_interval'] = max_interval
         stats['total_interval'] = total_interval
         stats['total_render_time'] = total_render_time
         stats['moved_count'] = moved_count
         stats['program_start'] = program_start
-        stats['dot_count'] = dot_count
+        stats['dot_count'] = (dot_count + 1) % 4 if dot_count is not None else 1
         stats['is_first_run'] = is_first_run
         stats['is_second_run'] = is_second_run
         stats['history'] = history
+
+        # 返回输出内容
+        return '\n'.join(output_lines)
     except Exception as e:
         error_msg = f"main_logic发生异常: {e}"
         print(error_msg)
