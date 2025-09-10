@@ -147,7 +147,7 @@ class FileManager:
         self.expanded_items = set()
         
         # 主题色系统
-        self.theme_color = "#F5F5F5"  # 默认浅灰色，比白色稍微浅一点
+        self.theme_color = "#B0B0B0"  # 默认深灰色，用于全局序列区分
         
         # 常见的通道后缀（与mf.py保持一致）
         self.channel_suffixes = [
@@ -170,16 +170,21 @@ class FileManager:
         ]
 
         # 界面设置默认值
-        self.viz_font_size = 5  # 默认可视化字体大小
-        self.ui_padding = {"padx": 8, "pady": 4}  # 默认界面间距
-        self.card_padding = {"padx": 10, "pady": 6}  # 默认卡片间距
+        self.viz_font_size = 3  # 默认可视化字体大小
+        self.ui_padding = {"padx": 4, "pady": 2}  # 默认界面间距（极紧凑）
+        self.card_padding = {"padx": 6, "pady": 2}  # 默认卡片间距（极紧凑）
+        self.auto_refresh_enabled = False  # 自动刷新开关，默认关闭
+        
+        # 选中状态管理
+        self.selected_sequence = None  # 当前选中的序列名
+        self.card_backgrounds = {}  # 存储原始背景色用于恢复
 
         self.setup_ui()
 
     def setup_ui(self):
         """设置用户界面"""
         self.root.title("文件查看管理器")
-        self.root.geometry("1000x700")
+        self.root.geometry("900x650")
         self.root.minsize(400, 300)
 
         # 创建菜单栏
@@ -187,7 +192,7 @@ class FileManager:
 
         # 创建主框架
         main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
 
         # 创建全目录统计区域（顶部）
         self.create_overall_stats(main_frame)
@@ -203,6 +208,9 @@ class FileManager:
 
         # 初始扫描
         self.scan_directory()
+
+        # 绑定键盘快捷键
+        self.bind_keyboard_shortcuts()
 
     def create_menu(self):
         """创建菜单栏"""
@@ -227,6 +235,13 @@ class FileManager:
         view_menu.add_command(label="按名称排序", command=self.sort_by_name)
         view_menu.add_separator()
         
+        # 自动刷新开关
+        self.auto_refresh_var = tk.BooleanVar(value=self.auto_refresh_enabled)
+        view_menu.add_checkbutton(label="启用自动刷新 (5秒)", 
+                                 command=self.toggle_auto_refresh,
+                                 variable=self.auto_refresh_var,
+                                 onvalue=True, offvalue=False)
+        
         # 文字大小调整
         view_menu.add_command(label="设置可视化字体大小...", command=self.show_font_size_dialog)
         
@@ -244,7 +259,7 @@ class FileManager:
     def create_toolbar(self, parent):
         """创建工具栏"""
         toolbar = ttk.Frame(parent)
-        toolbar.pack(fill=tk.X, pady=(0, 5))
+        toolbar.pack(fill=tk.X, pady=(0, 3))
 
         # 当前路径显示
         path_frame = ttk.Frame(toolbar)
@@ -256,9 +271,7 @@ class FileManager:
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
         ttk.Button(path_frame, text="选择...", command=self.select_directory).pack(side=tk.LEFT)
-
-        # 刷新按钮
-        ttk.Button(toolbar, text="刷新", command=self.scan_directory).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(path_frame, text="刷新", command=self.scan_directory).pack(side=tk.LEFT, padx=(5, 0))
 
     def setup_tree_view(self, parent):
         """设置卡片式序列视图"""
@@ -271,11 +284,14 @@ class FileManager:
         self.scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=self.canvas.yview)
         self.scrollable_frame = ttk.Frame(self.canvas)
 
-        # 配置滚动
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
+        # 配置滚动 - 使用更可靠的scrollregion更新
+        def update_scrollregion(event=None):
+            self.scrollable_frame.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if bbox:
+                self.canvas.configure(scrollregion=bbox)
+
+        self.scrollable_frame.bind("<Configure>", update_scrollregion)
 
         # 创建窗口，并绑定Canvas宽度变化事件
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
@@ -286,7 +302,8 @@ class FileManager:
 
         # 布局Canvas和滚动条
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
+        # 滚动条初始隐藏，只在需要时显示
+        self.scrollbar.pack_forget()
 
         # 绑定鼠标滚轮事件
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
@@ -303,7 +320,7 @@ class FileManager:
         self.canvas.itemconfig(self.canvas_window, width=canvas_width)
         
         # 更新滚动区域
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.update_scrollregion()
         
         # 延迟刷新可视化内容，提高响应速度（增加到120ms以降低拖动时的运算压力）
         if hasattr(self, '_resize_after_id'):
@@ -312,7 +329,22 @@ class FileManager:
 
     def on_mousewheel(self, event):
         """鼠标滚轮事件处理"""
-        self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        # 获取当前滚动位置
+        current_pos = self.canvas.yview()
+
+        # 计算滚动方向和距离
+        scroll_units = int(-1 * (event.delta / 120))
+
+        # 检查是否会超出边界
+        if scroll_units > 0:  # 向下滚动
+            if current_pos[1] >= 1.0:  # 已经到底部
+                return
+        elif scroll_units < 0:  # 向上滚动
+            if current_pos[0] <= 0.0:  # 已经到顶部
+                return
+
+        # 执行滚动
+        self.canvas.yview_scroll(scroll_units, "units")
 
     def refresh_all_visualizations(self):
         """刷新所有已打开的可视化内容"""
@@ -368,64 +400,82 @@ class FileManager:
         status_color = "#ffffff"  # 统一使用白色
 
         # 创建卡片主框架 - 全宽显示
-        card_frame = tk.Frame(parent, bg="#2d2d2d", relief="raised", bd=1)
-        card_frame.pack(fill=tk.X, padx=8, pady=4)
+        # 根据选中状态设置背景色
+        is_selected = (self.selected_sequence == seq_name)
+        bg_color = "#404040" if is_selected else "#2d2d2d"
+        card_frame = tk.Frame(parent, bg=bg_color, relief="raised", bd=1)
+        card_frame.pack(fill=tk.X, padx=6, pady=2)
+        
+        # 存储原始背景色
+        self.card_backgrounds[seq_name] = bg_color
         
         # 内部容器，提供内边距
-        inner_frame = tk.Frame(card_frame, bg="#2d2d2d")
-        inner_frame.pack(fill=tk.X, padx=12, pady=10)
+        inner_frame = tk.Frame(card_frame, bg=bg_color)
+        inner_frame.pack(fill=tk.X, padx=6, pady=4)
 
         # 卡片头部 - 序列名称和状态
-        header_frame = tk.Frame(inner_frame, bg="#2d2d2d")
+        header_frame = tk.Frame(inner_frame, bg=bg_color)
         header_frame.pack(fill=tk.X)
+
+        # 折叠/展开按钮
+        expand_icon = "▼" if seq_data.get('expanded', True) else "▶"
+        expand_btn = tk.Button(header_frame, text=expand_icon, fg="#cccccc", bg=bg_color, 
+                              font=('Segoe UI', 8), bd=0, padx=2, pady=0,
+                              command=lambda: self.toggle_sequence_expansion(seq_name))
+        expand_btn.pack(side=tk.LEFT, padx=(0, 4))
 
         # 状态图标
         status_label = tk.Label(header_frame, text=status_icon, fg=status_color, 
-                               bg="#2d2d2d", font=('Segoe UI', 14, 'bold'))
-        status_label.pack(side=tk.LEFT, padx=(0, 10))
+                               bg=bg_color, font=('Segoe UI', 12, 'bold'))
+        status_label.pack(side=tk.LEFT, padx=(0, 6))
 
         # 序列名称
         name_label = tk.Label(header_frame, text=seq_name, fg="#ffffff", 
-                             bg="#2d2d2d", font=('Segoe UI', 12, 'bold'))
+                             bg=bg_color, font=('Segoe UI', 10, 'bold'))
         name_label.pack(side=tk.LEFT)
+
+        # 帧范围信息（与序列名称同一行）
+        frame_range_text = f"帧范围: {seq_data['min_frame']:04d}-{seq_data['max_frame']:04d}"
+        frame_range_label = tk.Label(header_frame, text=frame_range_text, fg="#cccccc", 
+                                    bg=bg_color, font=('Segoe UI', 8))
+        frame_range_label.pack(side=tk.LEFT, padx=(15, 0))
+
+        # 统计信息（与序列名称同一行）
+        stats_text = f"总帧: {seq_data['total_frames']} | 现有: {seq_data['existing_count']}"
+        if seq_data['missing_count'] > 0:
+            stats_text += f" | 缺失: {seq_data['missing_count']}"
+        
+        stats_label = tk.Label(header_frame, text=stats_text, fg="#cccccc", 
+                              bg=bg_color, font=('Segoe UI', 8))
+        stats_label.pack(side=tk.LEFT, padx=(15, 0))
 
         # 完成率
         completion_label = tk.Label(header_frame, text=f"{completion_rate:.1f}%", 
-                                   fg="#ffffff", bg="#2d2d2d", font=('Segoe UI', 11, 'bold'))
+                                   fg="#ffffff", bg=bg_color, font=('Segoe UI', 9, 'bold'))
         completion_label.pack(side=tk.RIGHT)
 
-        # 统计信息框架
-        info_frame = tk.Frame(inner_frame, bg="#2d2d2d")
-        info_frame.pack(fill=tk.X, pady=(8, 0))
-
-        # 详细统计信息
-        info_text = (f"帧范围: {seq_data['min_frame']:04d}-{seq_data['max_frame']:04d} | "
-                    f"总帧: {seq_data['total_frames']} | "
-                    f"现有: {seq_data['existing_count']}")
-        
-        if seq_data['missing_count'] > 0:
-            info_text += f" | 缺失: {seq_data['missing_count']}"
-
-        info_label = tk.Label(info_frame, text=info_text, fg="#cccccc", 
-                             bg="#2d2d2d", font=('Segoe UI', 9))
-        info_label.pack(anchor=tk.W)
-
-        # 可视化区域（默认显示）
-        viz_frame = tk.Frame(inner_frame, bg="#404040")
+        # 可视化区域（根据折叠状态显示）
+        is_expanded = seq_data.get('expanded', True)
+        viz_bg_color = "#505050" if is_selected else "#404040"
+        viz_frame = tk.Frame(inner_frame, bg=viz_bg_color)
         viz_var = tk.BooleanVar(value=True)  # 默认为True，表示已显示
         
-        # 显示可视化区域
-        viz_frame.pack(fill=tk.X, pady=(8, 0))
-        
-        # 生成并显示可视化内容
-        self.generate_and_show_visualization(viz_frame, seq_data, inner_frame)
+        # 只有在展开状态下才显示可视化区域
+        if is_expanded:
+            viz_frame.pack(fill=tk.X, pady=(4, 0))
+            # 生成并显示可视化内容
+            self.generate_and_show_visualization(viz_frame, seq_data, inner_frame)
 
-        # 双击打开文件夹功能
+        # 双击打开文件夹功能，单击选中
+        def on_single_click(event):
+            self.select_sequence(seq_name)
+            
         def on_double_click(event):
             self.open_rgb_folder(seq_data)
 
-        # 绑定双击事件到卡片的各个组件
-        for widget in [card_frame, inner_frame, header_frame, status_label, name_label, completion_label, info_frame, info_label]:
+        # 绑定单击和双击事件到卡片的各个组件
+        for widget in [card_frame, inner_frame, header_frame, expand_btn, status_label, name_label, frame_range_label, stats_label, completion_label]:
+            widget.bind('<Button-1>', on_single_click)
             widget.bind('<Double-Button-1>', on_double_click)
 
         # 返回卡片信息字典
@@ -566,10 +616,10 @@ class FileManager:
         
         # 创建卡片主框架
         card_frame = tk.Frame(parent, bg="#2f2f2f", relief="raised", bd=2)  # 创建卡片主框架 - 使用比下方卡片更亮的灰色
-        card_frame.pack(fill=tk.X, padx=8, pady=8)
+        card_frame.pack(fill=tk.X, padx=6, pady=4)
         # 内部容器（使用与卡片一致的浅灰色）
         inner_frame = tk.Frame(card_frame, bg="#2f2f2f")
-        inner_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+        inner_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
         # 卡片头部
         header_frame = tk.Frame(inner_frame, bg="#2f2f2f")
@@ -577,39 +627,35 @@ class FileManager:
 
         # 状态图标
         status_label = tk.Label(header_frame, text="🌐", fg="#ffffff", 
-                               bg="#2f2f2f", font=('Segoe UI', 14, 'bold'))
-        status_label.pack(side=tk.LEFT, padx=(0, 10))
+                               bg="#2f2f2f", font=('Segoe UI', 12, 'bold'))
+        status_label.pack(side=tk.LEFT, padx=(0, 8))
 
         # 全局标题
         name_label = tk.Label(header_frame, text="全局总览", fg="#ffffff", 
-                              bg="#2f2f2f", font=('Segoe UI', 12, 'bold'))
+                              bg="#2f2f2f", font=('Segoe UI', 10, 'bold'))
         name_label.pack(side=tk.LEFT)
+
+        # 全局统计信息（与标题同一行）
+        global_stats_text = (f"总序列: {global_stats['total_sequences']} | "
+                           f"总帧: {global_stats['total_frames']} | "
+                           f"现有: {global_stats['existing_frames']}")
+        
+        if global_stats['missing_frames'] > 0:
+            global_stats_text += f" | 缺失: {global_stats['missing_frames']}"
+
+        # 存储为实例变量以便更新
+        self.global_stats_label = tk.Label(header_frame, text=global_stats_text, fg="#cccccc", 
+                                          bg="#2f2f2f", font=('Segoe UI', 8))
+        self.global_stats_label.pack(side=tk.LEFT, padx=(15, 0))
 
         # 整体完成率
         self.global_completion_label = tk.Label(header_frame, text=f"{global_stats['completion_rate']:.1f}%", 
-                                               fg="#ffffff", bg="#2f2f2f", font=('Segoe UI', 11, 'bold'))
+                                               fg="#ffffff", bg="#2f2f2f", font=('Segoe UI', 9, 'bold'))
         self.global_completion_label.pack(side=tk.RIGHT)
-
-        # 统计信息框架
-        info_frame = tk.Frame(inner_frame, bg="#2f2f2f")
-        info_frame.pack(fill=tk.X, pady=(8, 0))
-
-        # 详细统计信息
-        info_text = (f"总序列: {global_stats['total_sequences']} | "
-                    f"总帧: {global_stats['total_frames']} | "
-                    f"现有: {global_stats['existing_frames']}")
-        
-        if global_stats['missing_frames'] > 0:
-            info_text += f" | 缺失: {global_stats['missing_frames']}"
-
-        # 存储为实例变量以便更新
-        self.global_info_label = tk.Label(info_frame, text=info_text, fg="#cccccc", 
-                             bg="#2f2f2f", font=('Segoe UI', 9))
-        self.global_info_label.pack(anchor=tk.W)
 
         # 全局可视化区域
         viz_frame = tk.Frame(inner_frame, bg="#3a3a3a")  # 稍微不同的背景色（比单列卡片更亮）
-        viz_frame.pack(fill=tk.X, pady=(8, 0))
+        viz_frame.pack(fill=tk.X, pady=(4, 0))
         
         # 生成并显示全局可视化内容
         self.global_viz_frame = viz_frame
@@ -629,7 +675,7 @@ class FileManager:
                 self.global_completion_label.config(text=f"{global_stats['completion_rate']:.1f}%")
             
             # 更新详细统计信息
-            if hasattr(self, 'global_info_label'):
+            if hasattr(self, 'global_stats_label'):
                 info_text = (f"总序列: {global_stats['total_sequences']} | "
                             f"总帧: {global_stats['total_frames']} | "
                             f"现有: {global_stats['existing_frames']}")
@@ -637,7 +683,7 @@ class FileManager:
                 if global_stats['missing_frames'] > 0:
                     info_text += f" | 缺失: {global_stats['missing_frames']}"
                 
-                self.global_info_label.config(text=info_text)
+                self.global_stats_label.config(text=info_text)
                 
         except Exception as e:
             print(f"更新全局概览卡片时出错: {e}")
@@ -759,7 +805,7 @@ class FileManager:
             viz_text_widget = tk.Text(self.global_viz_frame, 
                                     height=max(1, len(all_sequence_data) // chars_per_line + 1),
                                     width=chars_per_line,  # 设置宽度以填满可用空间
-                                    bg="#2d4a2d", fg="#ffffff",
+                                    bg="#404040", fg="#ffffff",
                                     font=('Consolas', self.viz_font_size),
                                     relief="flat", 
                                     borderwidth=0,
@@ -797,7 +843,7 @@ class FileManager:
             viz_text_widget = tk.Text(self.global_viz_frame, 
                                     height=max(1, viz_text.count('\n') + 1),
                                     width=50,  # 默认宽度
-                                    bg="#2d4a2d", fg="#ffffff",
+                                    bg="#404040", fg="#ffffff",
                                     font=('Consolas', self.viz_font_size),
                                     relief="flat", 
                                     borderwidth=0,
@@ -938,21 +984,24 @@ class FileManager:
                 self.global_completion_label.config(text=f"{self.global_stats['completion_rate']:.1f}%")
             
             # 更新全局信息标签
-            if hasattr(self, 'global_info_label'):
+            if hasattr(self, 'global_stats_label'):
                 info_text = (f"总序列: {self.global_stats['total_sequences']} | "
                             f"总帧: {self.global_stats['total_frames']} | "
                             f"现有: {self.global_stats['existing_frames']}")
                 if self.global_stats['missing_frames'] > 0:
                     info_text += f" | 缺失: {self.global_stats['missing_frames']}"
-                self.global_info_label.config(text=info_text)
+                self.global_stats_label.config(text=info_text)
             
             # 重新生成全局可视化
             self.generate_global_visualization()
 
     def scan_directory(self):
         """递归扫描目录中的所有PNG文件，按序列分组"""
+        # 保存当前滚动位置
+        current_scroll_pos = self.canvas.yview()
+
         self.tree_data = {}
-        
+
         # 初始化expanded_items（如果不存在）
         if not hasattr(self, 'expanded_items'):
             self.expanded_items = set()
@@ -973,6 +1022,9 @@ class FileManager:
 
             # 更新全目录统计
             self.update_overall_stats()
+
+            # 恢复滚动位置
+            self.canvas.yview_moveto(current_scroll_pos[0])
 
         except Exception as e:
             messagebox.showerror("错误", f"扫描目录失败：{str(e)}")
@@ -1102,9 +1154,10 @@ class FileManager:
             card_info = self.create_sequence_card(self.scrollable_frame, seq_name, seq_data)
             self.sequence_cards[seq_name] = card_info
 
-        # 更新滚动区域
+        # 更新滚动区域 - 使用更可靠的方法
         self.scrollable_frame.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # 延迟更新scrollregion以确保布局完成
+        self.root.after(10, self.update_scrollregion)
 
     def open_rgb_folder(self, seq_data):
         """打开RGB文件夹"""
@@ -1545,6 +1598,99 @@ class FileManager:
             print(f"主题应用失败: {e}")
             # 备用深色主题
             self.root.configure(bg="#2d2d2d")
+
+    def start_auto_refresh(self):
+        """启动自动刷新功能，每5秒刷新一次"""
+        if not self.auto_refresh_enabled:
+            return
+            
+        def auto_refresh():
+            if self.auto_refresh_enabled and hasattr(self, 'current_path') and self.current_path:
+                self.scan_directory()
+            # 如果自动刷新仍然启用，5秒后再次调用
+            if self.auto_refresh_enabled:
+                self.root.after(5000, auto_refresh)
+
+        # 启动自动刷新
+        self.root.after(5000, auto_refresh)
+
+    def toggle_auto_refresh(self):
+        """切换自动刷新开关"""
+        self.auto_refresh_enabled = not self.auto_refresh_enabled
+        self.auto_refresh_var.set(self.auto_refresh_enabled)
+        
+        if self.auto_refresh_enabled:
+            self.start_auto_refresh()
+            print("自动刷新已启用")
+        else:
+            print("自动刷新已禁用")
+
+    def toggle_sequence_expansion(self, seq_name):
+        """切换序列的折叠/展开状态"""
+        if seq_name in self.tree_data:
+            current_state = self.tree_data[seq_name].get('expanded', True)
+            self.tree_data[seq_name]['expanded'] = not current_state
+            # 重新更新序列列表显示
+            self.update_sequence_list()
+
+    def update_scrollregion(self):
+        """更新Canvas的滚动区域并动态显示/隐藏滚动条"""
+        try:
+            self.scrollable_frame.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if bbox and len(bbox) == 4:
+                self.canvas.configure(scrollregion=bbox)
+                
+                # 获取内容高度和Canvas高度
+                content_height = bbox[3] - bbox[1]
+                canvas_height = self.canvas.winfo_height()
+                
+                # 如果内容高度超过Canvas高度，显示滚动条；否则隐藏
+                if content_height > canvas_height:
+                    if not self.scrollbar.winfo_ismapped():
+                        self.scrollbar.pack(side="right", fill="y")
+                else:
+                    if self.scrollbar.winfo_ismapped():
+                        self.scrollbar.pack_forget()
+        except Exception as e:
+            print(f"更新滚动区域时出错: {e}")
+
+    def bind_keyboard_shortcuts(self):
+        """绑定键盘快捷键"""
+        # 绑定到主窗口
+        self.root.bind('<KeyPress-a>', lambda e: self.expand_all_sequences())
+        self.root.bind('<KeyPress-d>', lambda e: self.collapse_all_sequences())
+        self.root.bind('<KeyPress-o>', lambda e: self.open_selected_sequence())
+        # 确保主窗口可以接收键盘焦点
+        self.root.focus_set()
+
+    def expand_all_sequences(self):
+        """展开所有序列"""
+        for seq_name in self.tree_data:
+            self.tree_data[seq_name]['expanded'] = True
+        self.update_sequence_list()
+
+    def collapse_all_sequences(self):
+        """折叠所有序列"""
+        for seq_name in self.tree_data:
+            self.tree_data[seq_name]['expanded'] = False
+        self.update_sequence_list()
+
+    def open_selected_sequence(self):
+        """打开选中的序列"""
+        if self.selected_sequence and self.selected_sequence in self.tree_data:
+            self.open_rgb_folder(self.tree_data[self.selected_sequence])
+
+    def select_sequence(self, seq_name):
+        """选中指定的序列"""
+        # 如果点击的是已选中的序列，则取消选中
+        if self.selected_sequence == seq_name:
+            self.selected_sequence = None
+        else:
+            self.selected_sequence = seq_name
+        
+        # 重新更新序列列表显示选中状态
+        self.update_sequence_list()
 
     def is_dark_mode(self):
         """检测系统是否启用深色模式"""
