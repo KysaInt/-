@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-C4D脚本管理器按钮 - 下载并启动mf.py
-从GitHub下载mf.py到工程目录的0/文件夹并自动执行
+C4D脚本管理器按钮 - 下载并启动FV.py
+从GitHub下载FV.py到工程目录的0/文件夹并自动执行
 """
 
 import c4d
@@ -21,7 +21,7 @@ def main():
             pass
 
     c4d_print("=" * 60)
-    c4d_print("AYE脚本启动 - 下载并执行mf.py")
+    c4d_print("AYE脚本启动 - 下载并执行FV.py")
     c4d_print("=" * 60)
 
     try:
@@ -49,17 +49,17 @@ def main():
         # 创建目标路径
         c4d_print("步骤4: 准备目标路径...")
         target_folder = os.path.join(doc_path, "0")
-        mf_path = os.path.join(target_folder, "mf.py")
+        FV_path = os.path.join(target_folder, "FV.py")
 
         # 确保目标文件夹存在
         if not os.path.exists(target_folder):
             os.makedirs(target_folder)
             c4d_print(f"✓ 已创建文件夹: {target_folder}")
 
-        c4d_print(f"目标文件路径: {mf_path}")
+        c4d_print(f"目标文件路径: {FV_path}")
 
-        # 下载mf.py文件
-        c4d_print("步骤5: 下载mf.py文件...")
+        # 下载FV.py文件
+        c4d_print("步骤5: 下载FV.py文件...")
         download_success = False
 
         # 尝试下载
@@ -75,7 +75,7 @@ def main():
             ssl_context.verify_mode = ssl.CERT_NONE
 
             # 使用正确的GitHub raw URL
-            url = "https://raw.githubusercontent.com/KysaInt/-/main/C4D/mf.py"
+            url = "https://raw.githubusercontent.com/KysaInt/-/main/C4D/FV.py"
             c4d_print(f"下载地址: {url}")
 
             def show_progress(block_num, block_size, total_size):
@@ -95,7 +95,7 @@ def main():
                 downloaded = 0
                 block_size = 8192
 
-                with open(mf_path, 'wb') as f:
+                with open(FV_path, 'wb') as f:
                     while True:
                         data = response.read(block_size)
                         if not data:
@@ -108,25 +108,25 @@ def main():
                             c4d_print(f"下载进度: {percent}%")
 
             # 验证下载的文件
-            if os.path.exists(mf_path) and os.path.getsize(mf_path) > 100:
+            if os.path.exists(FV_path) and os.path.getsize(FV_path) > 100:
                 download_success = True
-                c4d_print(f"✓ 成功下载mf.py文件: {mf_path}")
-                c4d_print(f"文件大小: {os.path.getsize(mf_path)} 字节")
+                c4d_print(f"✓ 成功下载FV.py文件: {FV_path}")
+                c4d_print(f"文件大小: {os.path.getsize(FV_path)} 字节")
             else:
                 c4d_print("✗ 下载的文件无效或为空")
 
         except Exception as e:
             c4d_print(f"✗ 下载失败: {e}")
-            c4d_print("无法获取mf.py文件，脚本终止")
+            c4d_print("无法获取FV.py文件，脚本终止")
             return
 
         if not download_success:
-            c4d_print("无法获取mf.py文件，脚本终止")
+            c4d_print("无法获取FV.py文件，脚本终止")
             return
 
-        # 启动mf.py脚本
-        c4d_print("步骤6: 启动mf.py脚本...")
-        work_dir = os.path.dirname(mf_path)
+        # 启动FV.py脚本
+        c4d_print("步骤6: 启动FV.py脚本...")
+        work_dir = os.path.dirname(FV_path)
 
         try:
             import subprocess
@@ -147,18 +147,18 @@ def main():
                 python_cmd = "py"
                 c4d_print("使用py命令")
 
-            # 验证mf.py文件
-            if not os.path.exists(mf_path):
-                c4d_print("✗ mf.py文件不存在")
+            # 验证FV.py文件
+            if not os.path.exists(FV_path):
+                c4d_print("✗ FV.py文件不存在")
                 return
 
             # 读取文件内容验证
             try:
-                with open(mf_path, 'r', encoding='utf-8') as f:
+                with open(FV_path, 'r', encoding='utf-8') as f:
                     content = f.read(200)
-                c4d_print("✓ mf.py文件验证通过")
+                c4d_print("✓ FV.py文件验证通过")
             except Exception as e:
-                c4d_print(f"✗ mf.py文件读取失败: {e}")
+                c4d_print(f"✗ FV.py文件读取失败: {e}")
                 return
 
             # 多种启动方式
@@ -168,10 +168,10 @@ def main():
             if not launch_success:
                 try:
                     c4d_print("尝试方法1: 直接启动...")
-                    cmd = f'start "💥" cmd /k "cd /d "{work_dir}" && {python_cmd} mf.py"'
+                    cmd = f'start "💥" cmd /k "cd /d "{work_dir}" && {python_cmd} FV.py"'
                     os.system(cmd)
                     launch_success = True
-                    c4d_print("✓ mf.py脚本已启动")
+                    c4d_print("✓ FV.py脚本已启动")
                 except Exception as e:
                     c4d_print(f"方法1失败: {e}")
 
@@ -181,12 +181,12 @@ def main():
                     c4d_print("尝试方法2: subprocess启动...")
                     process = subprocess.Popen(
                         ['cmd', '/c', 'start', '"💥"', 'cmd', '/k',
-                         f'cd /d "{work_dir}" && {python_cmd} mf.py'],
+                         f'cd /d "{work_dir}" && {python_cmd} FV.py'],
                         shell=True,
                         cwd=work_dir
                     )
                     launch_success = True
-                    c4d_print("✓ mf.py脚本已启动")
+                    c4d_print("✓ FV.py脚本已启动")
                 except Exception as e:
                     c4d_print(f"方法2失败: {e}")
 
@@ -194,7 +194,7 @@ def main():
                 c4d_print("所有启动方法都失败")
                 c4d_print("请手动执行以下命令:")
                 c4d_print(f'cd /d "{work_dir}"')
-                c4d_print(f'{python_cmd} mf.py')
+                c4d_print(f'{python_cmd} FV.py')
 
         except Exception as e:
             c4d_print(f"启动过程出错: {e}")
