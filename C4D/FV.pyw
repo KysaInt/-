@@ -103,7 +103,8 @@ def check_and_install_packages():
             for package in missing_packages:
                 try:
                     print(f"正在安装 {package}...")
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", package],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     print(f"✓ {package} 安装成功")
                 except subprocess.CalledProcessError as e:
                     print(f"✗ {package} 安装失败: {e}")
@@ -2370,8 +2371,17 @@ def main():
     # 隐藏控制台窗口（仅在Windows上有效）
     try:
         if os.name == 'nt':  # Windows系统
-            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
-    except:
+            # 尝试多种方法隐藏控制台窗口
+            import ctypes
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+            
+            # 额外确保：设置窗口为最小化并隐藏
+            ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE = 6
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+    except Exception as e:
+        print(f"隐藏控制台窗口失败: {e}")
         pass  # 如果隐藏失败，继续正常运行
     
     root = tk.Tk()
