@@ -13,6 +13,7 @@ import importlib.util
 from collections import defaultdict
 import math
 import ctypes
+from datetime import datetime
 
 def check_and_install_packages():
     """检查并安装所需的包"""
@@ -285,10 +286,20 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
     valid_intervals = []
     
     for line in history_lines:
-        if line.startswith('"') and '"' in line[1:]:
-            end_quote_pos = line.find('"', 1)
-            filename_part = line[:end_quote_pos + 1]
-            time_part = line[end_quote_pos + 1:]
+        # 处理带时间戳的行
+        if line.startswith('[') and ']' in line:
+            timestamp_end = line.find(']') + 1
+            timestamp = line[:timestamp_end]
+            remaining = line[timestamp_end:].strip()
+            line_to_parse = remaining
+        else:
+            timestamp = ""
+            line_to_parse = line
+        
+        if line_to_parse.startswith('"') and '"' in line_to_parse[1:]:
+            end_quote_pos = line_to_parse.find('"', 1)
+            filename_part = line_to_parse[:end_quote_pos + 1]
+            time_part = line_to_parse[end_quote_pos + 1:]
             
             interval = 0
             is_special = False
@@ -322,7 +333,8 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 'filename': filename_part,
                 'time': time_part,
                 'interval': interval,
-                'is_special': is_special
+                'is_special': is_special,
+                'timestamp': timestamp
             })
         else:
             parsed_lines.append({'original_line': line})
@@ -356,6 +368,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
             time_part = item['time']
             interval = item['interval']
             is_special = item['is_special']
+            timestamp = item.get('timestamp', '')
             
             padding = " " * (max_filename_length - len(filename))
             
@@ -370,7 +383,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
             
-            enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
+            enhanced_lines.append(f"{timestamp}{filename}{padding}|{bar}|{time_part}")
     
     return enhanced_lines
 
@@ -500,11 +513,13 @@ def main_logic(stats):
                         now = time.time()
                         
                         if is_first_run:
-                            history.append(f'"{filename}"[初始文件]')
+                            timestamp = datetime.now().strftime("%H:%M:%S")
+                            history.append(f"[{timestamp}] \"{filename}\"[初始文件]")
                             moved_count += 1
                             moved_this_round += 1
                         elif is_second_run:
-                            history.append(f'"{filename}"[不完整渲染时长]')
+                            timestamp = datetime.now().strftime("%H:%M:%S")
+                            history.append(f"[{timestamp}] \"{filename}\"[不完整渲染时长]")
                             moved_count += 1
                             moved_this_round += 1
                         else:
@@ -513,11 +528,14 @@ def main_logic(stats):
                                 total_interval += interval
                                 if interval > max_interval:
                                     max_interval = interval
-                                history.append(f'"{filename}"{format_seconds(interval)}')
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"{format_seconds(interval)}")
                             elif last_move_time and not is_rendering:
-                                history.append(f'"{filename}"[渲染暂停]')
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"[渲染暂停]")
                             else:
-                                history.append(f'"{filename}"[00:00:00]')
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"[00:00:00]")
                             moved_count += 1
                             moved_this_round += 1
                         
