@@ -13,6 +13,7 @@ import importlib.util
 from collections import defaultdict
 import math
 import ctypes
+from datetime import datetime
 
 def check_and_install_packages():
     """检查并安装所需的包"""
@@ -103,7 +104,8 @@ def check_and_install_packages():
             for package in missing_packages:
                 try:
                     print(f"正在安装 {package}...")
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", package],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     print(f"✓ {package} 安装成功")
                 except subprocess.CalledProcessError as e:
                     print(f"✗ {package} 安装失败: {e}")
@@ -131,11 +133,538 @@ try:
     import winreg
     from PIL import Image, ImageTk, ImageDraw
     import tempfile
+    # mf.py 所需的额外导入
+    import shutil
+    import time
+    import threading
+    import msvcrt
+    import psutil
+    import json
+    from datetime import datetime
+    from pathlib import Path
 except ImportError as e:
     print(f"导入模块失败: {e}")
     print("请确保所有依赖包都已正确安装")
     input("按任意键退出...")
     sys.exit(1)
+
+# 嵌入 mf.py 的代码
+class C4DRenderMonitor:
+    def __init__(self):
+        self.c4d_process_names = [
+            'CINEMA 4D.exe',
+            'Cinema 4D.exe', 
+            'c4d.exe',
+            'Commandline.exe',
+            'TeamRender Client.exe',
+            'TeamRender Server.exe'
+        ]
+        self.is_rendering = False
+        self.last_render_status = -1
+        self.last_check_time = 0
+        self.cached_processes = []
+        self.cache_duration = 0.5
+        
+    def check_c4d_processes(self):
+        current_time = time.time()
+        
+        if current_time - self.last_check_time < self.cache_duration:
+            return self.cached_processes
+        
+        c4d_processes = []
+        
+        try:
+            for process in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+                process_name = process.info['name']
+                if any(c4d_name.lower() in process_name.lower() for c4d_name in self.c4d_process_names):
+                    c4d_processes.append({
+                        'pid': process.info['pid'],
+                        'name': process_name,
+                        'cpu_percent': process.info['cpu_percent'],
+                        'memory': process.info['memory_info'].rss if process.info['memory_info'] else 0
+                    })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+        
+        self.cached_processes = c4d_processes
+        self.last_check_time = current_time
+        
+        return c4d_processes
+    
+    def is_rendering_active(self, processes):
+        if not processes:
+            return False
+        
+        high_cpu_processes = [p for p in processes if p['cpu_percent'] > 20.0]
+        
+        commandline_processes = [p for p in processes if 'commandline' in p['name'].lower()]
+        
+        teamrender_processes = [p for p in processes if 'teamrender' in p['name'].lower()]
+        
+        if commandline_processes or teamrender_processes:
+            return True
+        
+        if high_cpu_processes:
+            return True
+        
+        return False
+    
+    def check_render_queue_files(self):
+        possible_files = [
+            os.path.expanduser("~/AppData/Roaming/Maxon/render_queue.xml"),
+            os.path.expanduser("~/AppData/Roaming/Maxon/queue.dat"),
+            os.path.expanduser("~/Documents/Maxon/render_queue.xml"),
+            "C:\\ProgramData\\Maxon\\render_queue.xml"
+        ]
+        
+        for file_path in possible_files:
+            try:
+                if os.path.exists(file_path):
+                    mtime = os.path.getmtime(file_path)
+                    if time.time() - mtime < 60:
+                        return True
+            except Exception:
+                continue
+        
+        return False
+    
+    def check_render_status(self):
+        processes = self.check_c4d_processes()
+        
+        queue_active = self.check_render_queue_files()
+        
+        process_rendering = self.is_rendering_active(processes)
+        current_rendering = process_rendering or queue_active
+        
+        return current_rendering
+
+def format_seconds(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def open_last_folder(folder_path):
+    try:
+        subprocess.Popen(['explorer', folder_path])
+        print(f"已打开文件夹: {folder_path}")
+    except Exception as e:
+        print(f"打开文件夹失败: {e}")
+
+def keyboard_listener(stats):
+    while True:
+        try:
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'o' or key == b'O':
+                    last_folder = stats.get('last_target_folder', None)
+                    if last_folder and os.path.exists(last_folder):
+                        open_last_folder(last_folder)
+                    else:
+                        print("没有可打开的文件夹记录")
+                elif key == b'q' or key == b'Q':
+                    print("收到退出信号")
+                    stats['should_exit'] = True
+                    break
+                else:
+                    pass
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"键盘监听异常: {e}")
+            break
+
+def generate_bar_chart_for_history(history_lines, for_log_file=False):
+    """生成带柱状图的历史记录显示
+    Args:
+        history_lines: 历史记录行列表
+        for_log_file: 是否用于日志文件（True时使用|和空格，False时使用█）
+    """
+    if not history_lines:
+        return []
+        
+    parsed_lines = []
+    valid_intervals = []
+    
+    for line in history_lines:
+        # 处理带时间戳的行
+        if line.startswith('[') and ']' in line:
+            timestamp_end = line.find(']') + 1
+            timestamp = line[:timestamp_end]
+            remaining = line[timestamp_end:].strip()
+            line_to_parse = remaining
+        else:
+            timestamp = ""
+            line_to_parse = line
+        
+        if line_to_parse.startswith('"') and '"' in line_to_parse[1:]:
+            end_quote_pos = line_to_parse.find('"', 1)
+            filename_part = line_to_parse[:end_quote_pos + 1]
+            time_part = line_to_parse[end_quote_pos + 1:]
+            
+            interval = 0
+            is_special = False
+            
+            if "[初始文件]" in time_part or "[不完整渲染时长]" in time_part or "[渲染暂停]" in time_part:
+                is_special = True
+            elif "[00:00:00]" in time_part:
+                is_special = True
+            else:
+                time_match = re.search(r'\[(\d{1,2}):(\d{1,2}):(\d{1,2})\]', time_part)
+                if time_match:
+                    try:
+                        h, m, s = map(int, time_match.groups())
+                        interval = h * 3600 + m * 60 + s
+                        if interval > 0:
+                            valid_intervals.append(interval)
+                    except:
+                        pass
+                else:
+                    time_match = re.search(r'(\d{1,2}):(\d{1,2}):(\d{1,2})', time_part)
+                    if time_match:
+                        try:
+                            h, m, s = map(int, time_match.groups())
+                            interval = h * 3600 + m * 60 + s
+                            if interval > 0:
+                                valid_intervals.append(interval)
+                        except:
+                            pass
+            
+            parsed_lines.append({
+                'filename': filename_part,
+                'time': time_part,
+                'interval': interval,
+                'is_special': is_special,
+                'timestamp': timestamp
+            })
+        else:
+            parsed_lines.append({'original_line': line})
+    
+    if valid_intervals:
+        max_time = max(valid_intervals)
+        min_time = min(valid_intervals) if valid_intervals else 0
+    else:
+        max_time = min_time = 0
+    
+    max_filename_length = 0
+    for item in parsed_lines:
+        if 'filename' in item:
+            max_filename_length = max(max_filename_length, len(item['filename']))
+    
+    enhanced_lines = []
+    bar_width = 20
+    
+    if for_log_file:
+        fill_char = '|'
+        empty_char = ' '
+    else:
+        fill_char = '█'
+        empty_char = ' '
+    
+    for item in parsed_lines:
+        if 'original_line' in item:
+            enhanced_lines.append(item['original_line'])
+        else:
+            filename = item['filename']
+            time_part = item['time']
+            interval = item['interval']
+            is_special = item['is_special']
+            timestamp = item.get('timestamp', '')
+            
+            padding = " " * (max_filename_length - len(filename))
+            
+            if is_special or interval == 0:
+                bar = empty_char * bar_width
+            else:
+                ratio = interval / max_time if max_time > 0 else 0.0
+                
+                ratio = max(0.0, min(1.0, ratio))
+                
+                filled_length = int(bar_width * ratio) if interval > 0 else 0
+                
+                bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
+            
+            enhanced_lines.append(f"{timestamp}{filename}{padding}|{bar}|{time_part}")
+    
+    return enhanced_lines
+
+def main_logic(stats):
+    folder_path = os.path.dirname(os.path.abspath(__file__))
+    if 'history' not in stats:
+        stats['history'] = []
+    if 'render_monitor' not in stats:
+        stats['render_monitor'] = C4DRenderMonitor()
+    if 'last_log_save' not in stats:
+        stats['last_log_save'] = 0
+    
+    history = stats['history']
+    render_monitor = stats['render_monitor']
+    
+    current_time = time.time()
+    if current_time - stats['last_log_save'] > 1:
+        save_cmd_content_to_log(stats)
+        stats['last_log_save'] = current_time
+    
+    try:
+        is_rendering = render_monitor.check_render_status()
+        render_status_changed = False
+        
+        if render_monitor.last_render_status != (1 if is_rendering else 0):
+            render_status_changed = True
+            render_monitor.last_render_status = 1 if is_rendering else 0
+        
+        last_move_time = stats.get('last_move_time', None)
+        moved_count = stats.get('moved_count', 0)
+        program_start = stats.get('program_start', time.time())
+        dot_count = stats.get('dot_count', 1)
+        max_interval = stats.get('max_interval', 0)
+        total_interval = stats.get('total_interval', 0)
+        total_render_time = stats.get('total_render_time', 0)
+        last_render_check = stats.get('last_render_check', time.time())
+        is_first_run = stats.get('is_first_run', True)
+        is_second_run = stats.get('is_second_run', False)
+        moved_this_round = 0
+        move_failed = False
+        
+        current_time = time.time()
+        if stats.get('was_rendering', False) and is_rendering:
+            total_render_time += current_time - last_render_check
+        
+        stats['was_rendering'] = is_rendering
+        stats['last_render_check'] = current_time
+        
+        base_dir = folder_path
+        sequences = {}
+        renamed_files = []
+        
+        # 常见的通道后缀（大小写不敏感）
+        channel_suffixes = ['alpha', 'zdepth', 'normal', 'roughness', 'metallic', 'specular', 'emission', 'ao', 'displacement', 'bump', 'diffuse', 'reflection', 'refraction', 'atmospheric_effects', 'background', 'bump_normals', 'caustics', 'coat', 'coat_filter', 'coat_glossiness', 'coat_reflection', 'coverage', 'cryptomatte', 'cryptomatte00', 'cryptomatte01', 'cryptomatte02', 'denoiser', 'dl1', 'dl2', 'dl3', 'dr_bucket', 'environment', 'extra_tex', 'global_illumination', 'lighting', 'material_id', 'material_select', 'matte_shadow', 'metalness', 'multi_matte', 'multi_matte_id', 'normals', 'object_id', 'object_select', 'object_select_alpha', 'object_select_filter', 'raw_coat_filter', 'raw_coat_reflection', 'raw_gi', 'raw_lighting', 'raw_reflection', 'raw_refraction', 'raw_shadow', 'raw_sheen_filter', 'raw_sheen_reflection', 'raw_total_light', 'reflection_filter', 'reflection_glossiness', 'reflection_highlight_glossiness', 'reflection_ior', 'refraction_filter', 'refraction_glossiness', 'render_id', 'sampler_info', 'sample_rate', 'self_illumination', 'shadow', 'sheen', 'sheen_filter', 'sheen_glossiness', 'sheen_reflection', 'sss', 'toon', 'toon_lighting', 'toon_specular', 'total_light', 'velocity']
+        
+        for filename in os.listdir(base_dir):
+            if filename.lower().endswith('.png'):
+                name, ext = os.path.splitext(filename)
+                
+                basename = None
+                num = None
+                channel_suffix = None
+                
+                match = re.search(r'(.+?)\.(.+?)\.(\d{4})$', name)
+                if match:
+                    basename = match.group(1)
+                    channel_suffix = match.group(2)
+                    num = match.group(3)
+                else:
+                    match = re.search(r'(.+?)(\d{4})$', name)
+                    if match:
+                        basename = match.group(1)
+                        num = match.group(2)
+                        channel_suffix = None
+                    else:
+                        continue
+                
+                if basename and num:
+                    numlen = len(num)
+                    seq_name = basename
+                    
+                    if 0 < numlen < 4:
+                        newnum = num.zfill(4)
+                        if channel_suffix:
+                            newname = f"{basename}.{channel_suffix}.{newnum}{ext}"
+                        else:
+                            newname = f"{basename}.{newnum}{ext}"
+                        try:
+                            os.rename(os.path.join(base_dir, filename), os.path.join(base_dir, newname))
+                            print(f'Renaming "{filename}" to "{newname}"')
+                            renamed_files.append((newname, channel_suffix))
+                            sequences.setdefault(seq_name, []).append((newname, channel_suffix))
+                        except Exception as e:
+                            print(f"重命名失败: {filename} -> {newname}, 错误: {e}")
+                            sequences.setdefault(seq_name, []).append((filename, channel_suffix))
+                    else:
+                        sequences.setdefault(seq_name, []).append((filename, channel_suffix))
+
+        time.sleep(0.1)
+        
+        for seq, file_info_list in sequences.items():
+            main_folder = os.path.join(base_dir, seq)
+            os.makedirs(main_folder, exist_ok=True)
+            
+            stats['last_target_folder'] = main_folder
+            
+            for file_info in file_info_list:
+                filename, channel_suffix = file_info
+                src = os.path.join(base_dir, filename)
+                
+                if channel_suffix:
+                    channel_folder = os.path.join(main_folder, channel_suffix)
+                    os.makedirs(channel_folder, exist_ok=True)
+                    dst = os.path.join(channel_folder, filename)
+                    
+                    try:
+                        shutil.move(src, dst)
+                    except Exception:
+                        pass
+                else:
+                    rgb_folder = os.path.join(main_folder, "RGB")
+                    os.makedirs(rgb_folder, exist_ok=True)
+                    dst = os.path.join(rgb_folder, filename)
+                    
+                    try:
+                        shutil.move(src, dst)
+                        now = time.time()
+                        
+                        if is_first_run:
+                            timestamp = datetime.now().strftime("%H:%M:%S")
+                            history.append(f"[{timestamp}] \"{filename}\"[初始文件]")
+                            moved_count += 1
+                            moved_this_round += 1
+                        elif is_second_run:
+                            timestamp = datetime.now().strftime("%H:%M:%S")
+                            history.append(f"[{timestamp}] \"{filename}\"[不完整渲染时长]")
+                            moved_count += 1
+                            moved_this_round += 1
+                        else:
+                            if last_move_time and is_rendering:
+                                interval = now - last_move_time
+                                total_interval += interval
+                                if interval > max_interval:
+                                    max_interval = interval
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"{format_seconds(interval)}")
+                            elif last_move_time and not is_rendering:
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"[渲染暂停]")
+                            else:
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                history.append(f"[{timestamp}] \"{filename}\"[00:00:00]")
+                            moved_count += 1
+                            moved_this_round += 1
+                        
+                        if is_rendering:
+                            last_move_time = now
+                    except Exception:
+                        move_failed = True
+                        pass
+        if is_first_run:
+            stats['first_run_moved'] = stats.get('first_run_moved', 0) + moved_this_round
+            if moved_this_round > 0:
+                is_first_run = False
+                is_second_run = True
+        elif is_second_run:
+            stats['second_run_moved'] = stats.get('second_run_moved', 0) + moved_this_round
+            if moved_this_round > 0:
+                is_second_run = False
+            
+        total_time = time.time() - program_start
+        first_run_moved = stats.get('first_run_moved', 0)
+        second_run_moved = stats.get('second_run_moved', 0)
+        effective_moved_count = moved_count - first_run_moved - second_run_moved
+        avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
+        dots = '.' * dot_count + ' ' * (3 - dot_count)
+        
+        render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
+        
+        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator} {dots}"
+        
+        # 在GUI模式下不执行清屏
+        # os.system('cls')
+        enhanced_history = generate_bar_chart_for_history(history, for_log_file=False)
+        output_lines = []
+        for line in enhanced_history:
+            output_lines.append(line)
+        output_lines.append(stat_line)
+        
+        # 更新状态
+        stats['last_move_time'] = last_move_time
+        stats['max_interval'] = max_interval
+        stats['total_interval'] = total_interval
+        stats['total_render_time'] = total_render_time
+        stats['moved_count'] = moved_count
+        stats['program_start'] = program_start
+        stats['dot_count'] = (dot_count + 1) % 4 if dot_count is not None else 1
+        stats['is_first_run'] = is_first_run
+        stats['is_second_run'] = is_second_run
+        stats['history'] = history
+
+        # 返回输出内容
+        return '\n'.join(output_lines)
+    except Exception as e:
+        error_msg = f"main_logic发生异常: {e}"
+        print(error_msg)
+        return error_msg
+
+def get_log_file_path():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    start_time = datetime.fromtimestamp(time.time()).strftime("%m%d_%H%M")
+    log_file_name = f"记录_{start_time}.txt"
+    return os.path.join(script_dir, log_file_name)
+
+def save_cmd_content_to_log(stats=None):
+    try:
+        if not hasattr(save_cmd_content_to_log, 'log_file_path'):
+            save_cmd_content_to_log.log_file_path = get_log_file_path()
+        
+        log_file_path = save_cmd_content_to_log.log_file_path
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        log_entry = f"{'='*60}\n"
+        log_entry += f"C4D文件管理器运行记录\n"
+        log_entry += f"{'='*60}\n"
+        log_entry += f"程序文件: {os.path.basename(__file__)}\n"
+        log_entry += f"最后更新: {current_time}\n"
+        log_entry += f"{'='*60}\n\n"
+        
+        if stats:
+            moved_count = stats.get('moved_count', 0)
+            program_start = stats.get('program_start', time.time())
+            total_render_time = stats.get('total_render_time', 0)
+            total_time = time.time() - program_start
+            program_start_str = datetime.fromtimestamp(program_start).strftime("%Y-%m-%d %H:%M:%S")
+            
+            render_monitor = stats.get('render_monitor')
+            is_rendering = False
+            if render_monitor:
+                is_rendering = render_monitor.check_render_status()
+            
+            log_entry += f"程序启动时间: {program_start_str}\n"
+            log_entry += f"当前运行状态: {'🔴渲染中' if is_rendering else '⚪暂停中'}\n"
+            log_entry += f"已处理文件数量: {moved_count}\n"
+            log_entry += f"程序运行时长: {format_seconds(total_time)}\n"
+            log_entry += f"总渲染时长: {format_seconds(total_render_time)}\n"
+            log_entry += f"{'-'*60}\n"
+            
+            history = stats.get('history', [])
+            if history:
+                log_entry += f"文件处理历史:\n"
+                display_history = history
+                
+                enhanced_history = generate_bar_chart_for_history(display_history, for_log_file=True)
+                for line in enhanced_history:
+                    log_entry += f"{line}\n"
+                
+                log_entry += f"{'-'*60}\n"
+                first_run_moved = stats.get('first_run_moved', 0)
+                second_run_moved = stats.get('second_run_moved', 0)
+                effective_moved_count = moved_count - first_run_moved - second_run_moved
+                total_interval = stats.get('total_interval', 0)
+                max_interval = stats.get('max_interval', 0)
+                avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
+                
+                render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
+                stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染时间: {format_seconds(total_render_time)} | 程序运行时间: {format_seconds(total_time)} | {render_indicator}"
+                log_entry += f"{stat_line}\n"
+            else:
+                log_entry += f"暂无文件处理记录\n"
+        
+        log_entry += f"\n{'='*60}\n"
+        log_entry += f"记录文件: {os.path.basename(log_file_path)}\n"
+        log_entry += f"{'='*60}"
+        
+        with open(log_file_path, 'w', encoding='utf-8') as f:
+            f.write(log_entry)
+            
+    except Exception as e:
+        print(f"保存记录失败: {e}")
 
 class FileManager:
     """文件管理器类"""
@@ -178,6 +707,22 @@ class FileManager:
         # 选中状态管理
         self.selected_sequence = None  # 当前选中的序列名
         self.card_backgrounds = {}  # 存储原始背景色用于恢复
+        
+        # 面板切换管理
+        self.current_panel = 2  # 当前显示的面板：1=文件管理器，2=渲染监控（默认显示监控面板）
+        self.panel_frames = {}  # 存储面板框架
+        
+        # 渲染监控相关
+        self.render_monitor = C4DRenderMonitor()
+        self.monitor_stats = {
+            'last_move_time': None, 
+            'moved_count': 0, 
+            'program_start': time.time(), 
+            'should_exit': False,
+            'render_monitor': self.render_monitor
+        }
+        self.monitor_thread = None
+        self.monitor_running = False
 
         self.setup_ui()
 
@@ -194,14 +739,23 @@ class FileManager:
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
 
-        # 创建全目录统计区域（顶部）
-        self.create_overall_stats(main_frame)
+        # 创建面板容器
+        self.panel_container = ttk.Frame(main_frame)
+        self.panel_container.pack(fill=tk.BOTH, expand=True)
 
-        # 创建工具栏
-        self.create_toolbar(main_frame)
+        # 创建第一个面板：文件管理器（但不立即显示）
+        self.panel_frames[1] = ttk.Frame(self.panel_container)
+        # self.panel_frames[1].pack(fill=tk.BOTH, expand=True)  # 暂时不pack
+        
+        # 在第一个面板中创建文件管理器内容
+        self.setup_file_manager_panel(self.panel_frames[1])
 
-        # 创建序列树形视图（可折叠）
-        self.setup_tree_view(main_frame)
+        # 创建第二个面板：渲染监控（默认显示）
+        self.panel_frames[2] = ttk.Frame(self.panel_container)
+        self.panel_frames[2].pack(fill=tk.BOTH, expand=True)  # 默认显示第二面板
+        
+        # 在第二个面板中创建渲染监控内容
+        self.setup_monitor_panel(self.panel_frames[2])
 
         # 应用主题
         self.apply_theme()
@@ -211,6 +765,117 @@ class FileManager:
 
         # 绑定键盘快捷键
         self.bind_keyboard_shortcuts()
+        
+        # 启动渲染监控
+        self.start_monitor_thread()
+
+    def setup_file_manager_panel(self, parent):
+        """设置文件管理器面板"""
+        # 创建全目录统计区域（顶部）
+        self.create_overall_stats(parent)
+
+        # 创建工具栏
+        self.create_toolbar(parent)
+
+        # 创建序列树形视图（可折叠）
+        self.setup_tree_view(parent)
+
+    def setup_monitor_panel(self, parent):
+        """设置渲染监控面板"""
+        # 创建监控面板标题
+        title_frame = tk.Frame(parent, bg="#2d2d2d")
+        title_frame.pack(fill=tk.X, padx=6, pady=4)
+        
+        title_label = tk.Label(title_frame, text="🎬 C4D 渲染监控", 
+                              fg="#ffffff", bg="#2d2d2d", 
+                              font=('Segoe UI', 12, 'bold'))
+        title_label.pack(side=tk.LEFT)
+        
+        # 面板切换提示
+        switch_label = tk.Label(title_frame, text="按 M 键切换面板", 
+                               fg="#cccccc", bg="#2d2d2d", 
+                               font=('Segoe UI', 8))
+        switch_label.pack(side=tk.RIGHT)
+        
+        # 创建监控输出区域
+        output_frame = tk.Frame(parent, bg="#1e1e1e")
+        output_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        
+        # 创建文本输出区域（不使用滚动条，因为内容会定期刷新）
+        self.monitor_text = tk.Text(output_frame, 
+                                   bg="#1e1e1e", fg="#ffffff",
+                                   font=('Consolas', 9),
+                                   wrap=tk.WORD,
+                                   state=tk.DISABLED)
+        self.monitor_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    def switch_panel(self):
+        """切换面板"""
+        # 隐藏当前面板
+        self.panel_frames[self.current_panel].pack_forget()
+        
+        # 切换到另一个面板
+        self.current_panel = 2 if self.current_panel == 1 else 1
+        self.panel_frames[self.current_panel].pack(fill=tk.BOTH, expand=True)
+        
+        # 更新窗口标题
+        if self.current_panel == 1:
+            self.root.title("文件查看管理器")
+        else:
+            self.root.title("C4D 渲染监控")
+
+    def start_monitor_thread(self):
+        """启动渲染监控线程"""
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            return
+            
+        self.monitor_running = True
+        self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
+        self.monitor_thread.start()
+
+    def monitor_loop(self):
+        """监控循环"""
+        while self.monitor_running:
+            try:
+                # 运行mf.py的主要逻辑，但重定向输出到GUI
+                self.run_monitor_logic()
+                time.sleep(1)
+            except Exception as e:
+                self.append_monitor_text(f"监控异常: {e}\n")
+                time.sleep(1)
+
+    def run_monitor_logic(self):
+        """运行监控逻辑（基于mf.py的main_logic）"""
+        stats = self.monitor_stats
+        
+        try:
+            # 运行mf.py的核心逻辑，获取输出
+            output = main_logic(stats)
+            
+            # 清空之前的输出，准备新的一轮
+            if hasattr(self, 'monitor_text'):
+                self.monitor_text.config(state=tk.NORMAL)
+                self.monitor_text.delete(1.0, tk.END)
+                
+                # 重新写入完整的输出内容
+                self.monitor_text.insert(tk.END, output)
+                self.monitor_text.see(tk.END)  # 自动滚动到底部
+                self.monitor_text.config(state=tk.DISABLED)
+            
+        except Exception as e:
+            if hasattr(self, 'monitor_text'):
+                self.monitor_text.config(state=tk.NORMAL)
+                self.monitor_text.delete(1.0, tk.END)
+                self.monitor_text.insert(tk.END, f"监控逻辑异常: {e}")
+                self.monitor_text.config(state=tk.DISABLED)
+
+    def append_monitor_text(self, text):
+        """向监控文本框追加文本（保留以备将来使用）"""
+        if hasattr(self, 'monitor_text'):
+            self.monitor_text.config(state=tk.NORMAL)
+            self.monitor_text.insert(tk.END, text)
+            self.monitor_text.see(tk.END)  # 自动滚动到底部
+            self.monitor_text.config(state=tk.DISABLED)
 
     def create_menu(self):
         """创建菜单栏"""
@@ -1661,6 +2326,8 @@ class FileManager:
         self.root.bind('<KeyPress-a>', lambda e: self.expand_all_sequences())
         self.root.bind('<KeyPress-d>', lambda e: self.collapse_all_sequences())
         self.root.bind('<KeyPress-o>', lambda e: self.open_selected_sequence())
+        self.root.bind('<KeyPress-m>', lambda e: self.switch_panel())
+        self.root.bind('<KeyPress-M>', lambda e: self.switch_panel())  # 大写M也支持
         # 确保主窗口可以接收键盘焦点
         self.root.focus_set()
 
@@ -1722,8 +2389,17 @@ def main():
     # 隐藏控制台窗口（仅在Windows上有效）
     try:
         if os.name == 'nt':  # Windows系统
-            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
-    except:
+            # 尝试多种方法隐藏控制台窗口
+            import ctypes
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+            
+            # 额外确保：设置窗口为最小化并隐藏
+            ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE = 6
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+    except Exception as e:
+        print(f"隐藏控制台窗口失败: {e}")
         pass  # 如果隐藏失败，继续正常运行
     
     root = tk.Tk()
