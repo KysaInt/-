@@ -243,6 +243,7 @@ class FrameVizWidget(QWidget):
         self.max_frame = max_frame
         self.found_frames = found_frames
         self.total_frames = max_frame - min_frame + 1
+        self.setMinimumHeight(25) # 增加最小高度以获得更好的视觉效果
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -251,25 +252,62 @@ class FrameVizWidget(QWidget):
         width = self.width()
         height = self.height()
         
-        painter.fillRect(self.rect(), QColor("#333"))
+        # 使用稍暗的背景色
+        painter.fillRect(self.rect(), QColor("#2E2E2E"))
 
         if self.total_frames <= 0:
             return
 
-        if self.total_frames <= width: # Draw individual blocks
-            block_width = width / self.total_frames
+        # 颜色定义
+        exist_color = QColor("#4CAF50")
+        missing_color = QColor("#555555")
+        
+        # 增加块之间的间隙
+        gap = 1
+
+        if self.total_frames <= width: # 每个帧至少有一个像素宽度
+            block_width = (width - (self.total_frames - 1) * gap) / self.total_frames
+            if block_width < 1: # 如果加上间隙后宽度不足，则取消间隙
+                gap = 0
+                block_width = width / self.total_frames
+
             for i in range(self.total_frames):
                 frame_num = self.min_frame + i
+                x = i * (block_width + gap)
+                
                 if frame_num in self.found_frames:
-                    painter.fillRect(int(i * block_width), 0, int(block_width) + 1, height, QColor("#4CAF50"))
-        else: # Draw segments
+                    painter.fillRect(int(x), 0, int(block_width), height, exist_color)
+                else:
+                    painter.fillRect(int(x), 0, int(block_width), height, missing_color)
+        else: # 帧数多于像素宽度，进行聚合显示
             for i in range(width):
                 frame_start = self.min_frame + int(i * self.total_frames / width)
                 frame_end = self.min_frame + int((i + 1) * self.total_frames / width)
-                found = any(f in self.found_frames for f in range(frame_start, frame_end))
-                if found:
-                    painter.setPen(QColor("#4CAF50"))
-                    painter.drawPoint(i, height // 2)
+                
+                if frame_start >= frame_end:
+                    continue
+
+                count_in_range = 0
+                for f in range(frame_start, frame_end):
+                    if f in self.found_frames:
+                        count_in_range += 1
+                
+                total_in_range = frame_end - frame_start
+                ratio = count_in_range / total_in_range if total_in_range > 0 else 0
+
+                if ratio == 0:
+                    color = missing_color
+                elif ratio == 1:
+                    color = exist_color
+                else:
+                    # 根据比例混合颜色
+                    r = int(missing_color.red() + (exist_color.red() - missing_color.red()) * ratio)
+                    g = int(missing_color.green() + (exist_color.green() - missing_color.green()) * ratio)
+                    b = int(missing_color.blue() + (exist_color.blue() - missing_color.blue()) * ratio)
+                    color = QColor(r, g, b)
+
+                painter.setPen(color)
+                painter.drawLine(i, 0, i, height)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
