@@ -125,10 +125,19 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
     valid_intervals = []
     
     for line in history_lines:
-        if line.startswith('"') and '"' in line[1:]:
-            end_quote_pos = line.find('"', 1)
-            filename_part = line[:end_quote_pos + 1]
-            time_part = line[end_quote_pos + 1:]
+        # 检查并分离时间戳
+        timestamp_part = ""
+        content_part = line
+        if line.startswith('[') and ']' in line:
+            end_bracket_pos = line.find(']')
+            if end_bracket_pos != -1:
+                timestamp_part = line[:end_bracket_pos + 2] # 包括]和后面的空格
+                content_part = line[end_bracket_pos + 2:]
+
+        if content_part.startswith('"') and '"' in content_part[1:]:
+            end_quote_pos = content_part.find('"', 1)
+            filename_part = content_part[:end_quote_pos + 1]
+            time_part = content_part[end_quote_pos + 1:]
             
             interval = 0
             is_special = False
@@ -159,6 +168,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                             pass
             
             parsed_lines.append({
+                'timestamp': timestamp_part,
                 'filename': filename_part,
                 'time': time_part,
                 'interval': interval,
@@ -187,6 +197,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
         if 'original_line' in item:
             enhanced_lines.append(item['original_line'])
         else:
+            timestamp = item['timestamp']
             filename = item['filename']
             time_part = item['time']
             interval = item['interval']
@@ -202,7 +213,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 filled_length = int(bar_width * ratio) if interval > 0 else 0
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
             
-            enhanced_lines.append(f"{filename}{padding}|{bar}|{time_part}")
+            enhanced_lines.append(f"{timestamp}{filename}{padding}|{bar}|{time_part}")
     
     return enhanced_lines
 
@@ -324,21 +335,22 @@ class Worker(QThread):
                     # 只对主RGB文件进行统计和记录
                     if not channel_suffix:
                         now = time.time()
+                        timestamp_str = datetime.fromtimestamp(now).strftime('%H:%M:%S')
                         
                         if is_first_run:
-                            history.append(f'"{filename}"[初始文件]')
+                            history.append(f'[{timestamp_str}] "{filename}"[初始文件]')
                         elif is_second_run:
-                            history.append(f'"{filename}"[不完整渲染时长]')
+                            history.append(f'[{timestamp_str}] "{filename}"[不完整渲染时长]')
                         else:
                             if last_move_time and is_rendering:
                                 interval = now - last_move_time
                                 total_interval += interval
                                 if interval > max_interval: max_interval = interval
-                                history.append(f'"{filename}" {format_seconds(interval)}')
+                                history.append(f'[{timestamp_str}] "{filename}" {format_seconds(interval)}')
                             elif last_move_time and not is_rendering:
-                                history.append(f'"{filename}" [渲染暂停]')
+                                history.append(f'[{timestamp_str}] "{filename}" [渲染暂停]')
                             else:
-                                history.append(f'"{filename}" [00:00:00]')
+                                history.append(f'[{timestamp_str}] "{filename}" [00:00:00]')
                         
                         moved_count += 1
                         moved_this_round += 1
