@@ -239,35 +239,6 @@ class SequenceViewerWidget(QWidget):
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
 
-        # Collapsible settings box
-        self.settings_box = CollapsibleBox("设置")
-        settings_layout = QVBoxLayout()
-        
-        # Min frame threshold
-        min_frame_layout = QHBoxLayout()
-        min_frame_label = QLabel("最小帧数:")
-        self.min_frame_spinbox = QSpinBox()
-        self.min_frame_spinbox.setRange(1, 1000)
-        self.min_frame_spinbox.setValue(self.min_frame_threshold)
-        self.min_frame_spinbox.valueChanged.connect(self.update_min_threshold)
-        min_frame_layout.addWidget(min_frame_label)
-        min_frame_layout.addWidget(self.min_frame_spinbox)
-        settings_layout.addLayout(min_frame_layout)
-
-        # Max frame threshold
-        max_frame_layout = QHBoxLayout()
-        max_frame_label = QLabel("最大帧数:")
-        self.max_frame_spinbox = QSpinBox()
-        self.max_frame_spinbox.setRange(1, 10000)
-        self.max_frame_spinbox.setValue(self.max_frame_threshold)
-        self.max_frame_spinbox.valueChanged.connect(self.update_max_threshold)
-        max_frame_layout.addWidget(max_frame_label)
-        max_frame_layout.addWidget(self.max_frame_spinbox)
-        settings_layout.addLayout(max_frame_layout)
-
-        self.settings_box.setContentLayout(settings_layout)
-        main_layout.addWidget(self.settings_box)
-
     def path_edited(self):
         new_path = self.path_edit.text()
         if os.path.isdir(new_path):
