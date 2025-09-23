@@ -41,26 +41,25 @@ class CollapsibleBox(QWidget):
         self.update_arrow(False)
 
     def setContentLayout(self, layout):
-        # Destroy the old layout and set the new one
-        old_layout = self.content_area.layout()
-        if old_layout:
-            # Properly dispose of the old layout
+        # Clear the old layout and its widgets
+        if self.content_area.layout() is not None:
+            old_layout = self.content_area.layout()
             while old_layout.count():
                 item = old_layout.takeAt(0)
                 widget = item.widget()
                 if widget:
+                    widget.setParent(None)
                     widget.deleteLater()
             del old_layout
-
-        self.content_area.setLayout(layout)
         
-        # The animation values will be set in the toggle method
-        # based on the content's size hint at that moment.
+        # Set the new layout
+        self.content_area.setLayout(layout)
 
     def toggle(self, checked):
         self.update_arrow(checked)
         
-        content_height = self.content_area.layout().sizeHint().height()
+        # Calculate the content height at the moment of toggling
+        content_height = self.content_area.sizeHint().height()
         
         self.toggle_animation.setStartValue(self.content_area.height())
         if checked:
@@ -250,7 +249,7 @@ class SequenceViewerWidget(QWidget):
         self.min_frame_spinbox = QSpinBox()
         self.min_frame_spinbox.setRange(1, 1000)
         self.min_frame_spinbox.setValue(self.min_frame_threshold)
-        self.min_frame_spinbox.valueChanged.connect(self.update_min_frame_threshold)
+        self.min_frame_spinbox.valueChanged.connect(self.update_min_threshold)
         min_frame_layout.addWidget(min_frame_label)
         min_frame_layout.addWidget(self.min_frame_spinbox)
         settings_layout.addLayout(min_frame_layout)
@@ -261,7 +260,7 @@ class SequenceViewerWidget(QWidget):
         self.max_frame_spinbox = QSpinBox()
         self.max_frame_spinbox.setRange(1, 10000)
         self.max_frame_spinbox.setValue(self.max_frame_threshold)
-        self.max_frame_spinbox.valueChanged.connect(self.update_max_frame_threshold)
+        self.max_frame_spinbox.valueChanged.connect(self.update_max_threshold)
         max_frame_layout.addWidget(max_frame_label)
         max_frame_layout.addWidget(self.max_frame_spinbox)
         settings_layout.addLayout(max_frame_layout)
