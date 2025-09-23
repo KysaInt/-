@@ -6,7 +6,7 @@ import subprocess
 from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog
+    QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QPainter, QColor, QFont
@@ -135,6 +135,26 @@ class SequenceViewerWidget(QWidget):
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
 
+        # Global controls
+        control_frame = QFrame()
+        control_layout = QHBoxLayout(control_frame)
+        
+        control_layout.addWidget(QLabel("宽度:"))
+        self.width_slider = QSlider(Qt.Horizontal)
+        self.width_slider.setRange(1, 30)
+        self.width_slider.setValue(6)
+        self.width_slider.valueChanged.connect(self.update_pixel_width)
+        control_layout.addWidget(self.width_slider)
+
+        control_layout.addWidget(QLabel("高度:"))
+        self.height_slider = QSlider(Qt.Horizontal)
+        self.height_slider.setRange(1, 30)
+        self.height_slider.setValue(6)
+        self.height_slider.valueChanged.connect(self.update_pixel_height)
+        control_layout.addWidget(self.height_slider)
+
+        main_layout.addWidget(control_frame)
+
     def select_directory(self):
         path = QFileDialog.getExistingDirectory(self, "选择目录", self.current_path)
         if path:
@@ -163,12 +183,23 @@ class SequenceViewerWidget(QWidget):
         
         sorted_sequences = sorted(tree_data.items(), key=lambda item: item[0])
 
+        # Store cards to update them later
+        self.cards = []
         for seq_name, data in sorted_sequences:
             if data['frames']: # Only show sequences with frames
                 card = SequenceCard(seq_name, data)
                 self.card_layout.addWidget(card)
+                self.cards.append(card)
         
         self.scan_worker = None
+
+    def update_pixel_width(self, value):
+        for card in getattr(self, 'cards', []):
+            card.viz_widget.set_pixel_width(value)
+
+    def update_pixel_height(self, value):
+        for card in getattr(self, 'cards', []):
+            card.viz_widget.set_pixel_height(value)
 
     def clear_cards(self):
         while self.card_layout.count():
@@ -243,71 +274,79 @@ class FrameVizWidget(QWidget):
         self.max_frame = max_frame
         self.found_frames = found_frames
         self.total_frames = max_frame - min_frame + 1
-        self.setMinimumHeight(25) # 增加最小高度以获得更好的视觉效果
+        
+        # 外观设置
+        self.pixel_width = 6
+        self.pixel_height = 6
+        self.gap = 2
+        self.exist_color = QColor("#4CAF50")
+        self.missing_color = QColor("#555555")
+        self.bg_color = QColor("#2E2E2E")
+
+        # 初始计算一次高度
+        self._update_layout(self.width())
+
+    def set_pixel_width(self, width):
+        self.pixel_width = width
+        self._update_layout(self.width())
+
+    def set_pixel_height(self, height):
+        self.pixel_height = height
+        self._update_layout(self.width())
+
+    def _update_layout(self, width):
+        """根据宽度计算布局和所需高度"""
+        if width <= 0 or self.total_frames <= 0:
+            self.setFixedHeight(self.pixel_height)
+            return
+
+        block_width = self.pixel_width + self.gap
+        block_height = self.pixel_height + self.gap
+        pixels_per_row = max(1, (width + self.gap) // block_width)
+        num_rows = (self.total_frames + pixels_per_row - 1) // pixels_per_row
+        
+        required_height = num_rows * block_height - self.gap
+        
+        # 设置固定高度，这将通知父布局进行调整
+        if self.height() != required_height:
+            self.setFixedHeight(required_height)
+        
+        # 触发重绘
+        self.update()
+
+    def resizeEvent(self, event):
+        """当控件大小改变时，重新计算布局"""
+        super().resizeEvent(event)
+        self._update_layout(event.size().width())
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
         width = self.width()
-        height = self.height()
         
-        # 使用稍暗的背景色
-        painter.fillRect(self.rect(), QColor("#2E2E2E"))
+        # 绘制背景
+        painter.fillRect(self.rect(), self.bg_color)
 
-        if self.total_frames <= 0:
+        if self.total_frames <= 0 or width <= 0:
             return
 
-        # 颜色定义
-        exist_color = QColor("#4CAF50")
-        missing_color = QColor("#555555")
-        
-        # 增加块之间的间隙
-        gap = 1
+        block_width = self.pixel_width + self.gap
+        block_height = self.pixel_height + self.gap
+        pixels_per_row = max(1, (width + self.gap) // block_width)
 
-        if self.total_frames <= width: # 每个帧至少有一个像素宽度
-            block_width = (width - (self.total_frames - 1) * gap) / self.total_frames
-            if block_width < 1: # 如果加上间隙后宽度不足，则取消间隙
-                gap = 0
-                block_width = width / self.total_frames
-
-            for i in range(self.total_frames):
-                frame_num = self.min_frame + i
-                x = i * (block_width + gap)
-                
-                if frame_num in self.found_frames:
-                    painter.fillRect(int(x), 0, int(block_width), height, exist_color)
-                else:
-                    painter.fillRect(int(x), 0, int(block_width), height, missing_color)
-        else: # 帧数多于像素宽度，进行聚合显示
-            for i in range(width):
-                frame_start = self.min_frame + int(i * self.total_frames / width)
-                frame_end = self.min_frame + int((i + 1) * self.total_frames / width)
-                
-                if frame_start >= frame_end:
-                    continue
-
-                count_in_range = 0
-                for f in range(frame_start, frame_end):
-                    if f in self.found_frames:
-                        count_in_range += 1
-                
-                total_in_range = frame_end - frame_start
-                ratio = count_in_range / total_in_range if total_in_range > 0 else 0
-
-                if ratio == 0:
-                    color = missing_color
-                elif ratio == 1:
-                    color = exist_color
-                else:
-                    # 根据比例混合颜色
-                    r = int(missing_color.red() + (exist_color.red() - missing_color.red()) * ratio)
-                    g = int(missing_color.green() + (exist_color.green() - missing_color.green()) * ratio)
-                    b = int(missing_color.blue() + (exist_color.blue() - missing_color.blue()) * ratio)
-                    color = QColor(r, g, b)
-
-                painter.setPen(color)
-                painter.drawLine(i, 0, i, height)
+        for i in range(self.total_frames):
+            frame_num = self.min_frame + i
+            
+            row = i // pixels_per_row
+            col = i % pixels_per_row
+            
+            x = col * block_width
+            y = row * block_height
+            
+            color = self.exist_color if frame_num in self.found_frames else self.missing_color
+            
+            painter.fillRect(x, y, self.pixel_width, self.pixel_height, color)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
