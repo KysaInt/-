@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-C4D脚本管理器按钮 - 下载并启动FV2
+C4D脚本管理器按钮 - 下载并启动AYE
 从GitHub下载FV2文件夹到工程目录并自动执行main.pyw
 """
 
@@ -24,7 +24,7 @@ def main():
             pass
 
     c4d_print("=" * 60)
-    c4d_print("AYE脚本启动 - 下载并执行FV2")
+    c4d_print("AYE脚本启动 - 下载并执行AYE")
     c4d_print("=" * 60)
 
     try:
@@ -51,9 +51,8 @@ def main():
 
         # 创建目标路径
         c4d_print("步骤4: 准备目标路径...")
-        # 目标是工程目录下的 "0/FV2" 文件夹
-        base_folder = os.path.join(doc_path, "0")
-        target_folder = os.path.join(base_folder, "FV2")
+        # 目标是工程目录下的 "AYE" 文件夹
+        target_folder = os.path.join(doc_path, "AYE")
         script_path = os.path.join(target_folder, "main.pyw")
 
         # 确保目标文件夹存在
@@ -64,7 +63,7 @@ def main():
         c4d_print(f"目标文件夹路径: {target_folder}")
 
         # 下载并解压FV2文件夹
-        c4d_print("步骤5: 下载并解压FV2文件夹...")
+        c4d_print("步骤5: 下载并解压AYE文件夹...")
         download_success = False
 
         try:
@@ -93,10 +92,10 @@ def main():
 
             # 从内存中解压zip
             with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
-                c4d_print("正在解压FV2文件夹...")
+                c4d_print("正在解压AYE文件夹...")
                 # 确定zip文件内的源文件夹路径
                 # 通常是 <repo_name>-<branch_name>/path/to/folder
-                source_folder_in_zip = "--main/QT/FV2/"
+                source_folder_in_zip = "--main/QT/AYE/"
                 
                 files_to_extract = [f for f in z.namelist() if f.startswith(source_folder_in_zip) and not f.endswith('/')]
                 if not files_to_extract:
@@ -122,22 +121,22 @@ def main():
             # 验证主脚本文件是否存在
             if os.path.exists(script_path) and os.path.getsize(script_path) > 100:
                 download_success = True
-                c4d_print(f"✓ 成功获取FV2文件夹，主脚本: {script_path}")
+                c4d_print(f"✓ 成功获取AYE文件夹，主脚本: {script_path}")
             else:
                 c4d_print("✗ 下载或解压后，主脚本文件无效或为空")
 
         except Exception as e:
             c4d_print(f"✗ 下载或解压失败: {e}")
-            c4d_print("无法获取FV2文件夹，脚本终止")
+            c4d_print("无法获取AYE文件夹，脚本终止")
             return
 
         if not download_success:
-            c4d_print("无法获取FV2文件夹，脚本终止")
+            c4d_print("无法获取AYE文件夹，脚本终止")
             return
 
         # 启动main.pyw脚本
         c4d_print("步骤6: 启动main.pyw脚本...")
-        work_dir = target_folder # 工作目录是FV2文件夹
+        work_dir = target_folder # 工作目录是AYE文件夹
 
         try:
             import subprocess

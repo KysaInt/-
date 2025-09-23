@@ -8,21 +8,9 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPainter, QColor, QFont
-
-# -*- coding: utf-8 -*-
-import sys
-import os
-import re
-import subprocess
-from collections import defaultdict
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog
-)
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QPainter, QColor, QFont
+from pathlib import Path
 
 class ScanWorker(QThread):
     """Worker thread for scanning files to prevent UI freezing."""
@@ -81,7 +69,9 @@ class ScanWorker(QThread):
 class SequenceViewerWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_path = os.path.dirname(os.path.abspath(__file__))
+        # 设置默认路径为上两级的 '0' 目录
+        self.current_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
+        os.makedirs(self.current_path, exist_ok=True) # 确保目录存在
         self.auto_refresh_enabled = False
         self.scan_worker = None
 

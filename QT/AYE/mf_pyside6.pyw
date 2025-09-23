@@ -247,7 +247,10 @@ class Worker(QThread):
         self.wait()
 
     def main_logic(self):
-        folder_path = os.path.dirname(os.path.abspath(__file__))
+        # 目标目录现在是脚本所在目录的上两级的'0'目录
+        folder_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
+        # 确保目标目录存在
+        os.makedirs(folder_path, exist_ok=True)
         history = self.stats['history']
         render_monitor = self.stats['render_monitor']
         
