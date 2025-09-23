@@ -87,7 +87,9 @@ class RenameWidget(QWidget):
         main_layout.addStretch() # 添加伸缩，使控件集中在顶部
 
         # 设置初始路径
-        self.path_line_edit.setText(os.path.dirname(os.path.abspath(__file__)))
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        default_path = os.path.join(os.path.dirname(current_dir), '0')
+        self.path_line_edit.setText(default_path)
 
     def connect_signals(self):
         self.browse_button.clicked.connect(self.browse_directory)

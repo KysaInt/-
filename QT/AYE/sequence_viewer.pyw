@@ -400,7 +400,7 @@ class FrameVizWidget(QWidget):
         self.pixel_width = 4
         self.pixel_height = 4
         self.gap = 2
-        self.exist_color = self.palette().color(QPalette.Highlight)
+        self.exist_color = QColor("#3498db")  # 使用固定的亮蓝色
         self.missing_color = QColor("#555555")
         self.bg_color = self.palette().color(QPalette.Base)
 
