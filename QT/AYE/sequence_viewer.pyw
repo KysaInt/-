@@ -123,6 +123,30 @@ class SequenceViewerWidget(QWidget):
         toolbar_layout.addWidget(self.refresh_button)
         main_layout.addWidget(toolbar)
 
+        # Global controls
+        control_frame = QFrame()
+        control_layout = QVBoxLayout(control_frame) # Changed to QVBoxLayout
+        
+        width_layout = QHBoxLayout()
+        width_layout.addWidget(QLabel("宽度:"))
+        self.width_slider = QSlider(Qt.Horizontal)
+        self.width_slider.setRange(1, 30)
+        self.width_slider.setValue(6)
+        self.width_slider.valueChanged.connect(self.update_pixel_width)
+        width_layout.addWidget(self.width_slider)
+        control_layout.addLayout(width_layout)
+
+        height_layout = QHBoxLayout()
+        height_layout.addWidget(QLabel("高度:"))
+        self.height_slider = QSlider(Qt.Horizontal)
+        self.height_slider.setRange(1, 30)
+        self.height_slider.setValue(6)
+        self.height_slider.valueChanged.connect(self.update_pixel_height)
+        height_layout.addWidget(self.height_slider)
+        control_layout.addLayout(height_layout)
+
+        main_layout.addWidget(control_frame)
+
         # Scroll Area for cards
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -134,26 +158,6 @@ class SequenceViewerWidget(QWidget):
         
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
-
-        # Global controls
-        control_frame = QFrame()
-        control_layout = QHBoxLayout(control_frame)
-        
-        control_layout.addWidget(QLabel("宽度:"))
-        self.width_slider = QSlider(Qt.Horizontal)
-        self.width_slider.setRange(1, 30)
-        self.width_slider.setValue(6)
-        self.width_slider.valueChanged.connect(self.update_pixel_width)
-        control_layout.addWidget(self.width_slider)
-
-        control_layout.addWidget(QLabel("高度:"))
-        self.height_slider = QSlider(Qt.Horizontal)
-        self.height_slider.setRange(1, 30)
-        self.height_slider.setValue(6)
-        self.height_slider.valueChanged.connect(self.update_pixel_height)
-        control_layout.addWidget(self.height_slider)
-
-        main_layout.addWidget(control_frame)
 
     def select_directory(self):
         path = QFileDialog.getExistingDirectory(self, "选择目录", self.current_path)
@@ -188,6 +192,9 @@ class SequenceViewerWidget(QWidget):
         for seq_name, data in sorted_sequences:
             if data['frames']: # Only show sequences with frames
                 card = SequenceCard(seq_name, data)
+                # Apply current slider values to new cards
+                card.viz_widget.set_pixel_width(self.width_slider.value())
+                card.viz_widget.set_pixel_height(self.height_slider.value())
                 self.card_layout.addWidget(card)
                 self.cards.append(card)
         

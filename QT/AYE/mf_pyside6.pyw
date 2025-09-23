@@ -334,11 +334,11 @@ class Worker(QThread):
                                 interval = now - last_move_time
                                 total_interval += interval
                                 if interval > max_interval: max_interval = interval
-                                history.append(f'"{filename}"{format_seconds(interval)}')
+                                history.append(f'"{filename}" {format_seconds(interval)}')
                             elif last_move_time and not is_rendering:
-                                history.append(f'"{filename}"[渲染暂停]')
+                                history.append(f'"{filename}" [渲染暂停]')
                             else:
-                                history.append(f'"{filename}"[00:00:00]')
+                                history.append(f'"{filename}" [00:00:00]')
                         
                         moved_count += 1
                         moved_this_round += 1
@@ -347,13 +347,9 @@ class Worker(QThread):
                 except Exception as e:
                     self.log_signal.emit(f"移动文件失败: {e}")
 
-        if is_first_run and moved_this_round > 0:
-            self.stats['first_run_moved'] = self.stats.get('first_run_moved', 0) + moved_this_round
-            is_first_run = False
-            is_second_run = True
-        elif is_second_run and moved_this_round > 0:
-            self.stats['second_run_moved'] = self.stats.get('second_run_moved', 0) + moved_this_round
-            is_second_run = False
+        if moved_this_round > 0:
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.log_signal.emit(f"[{timestamp}] 处理了 {moved_this_round} 个文件。")
             
         total_time = time.time() - program_start
         first_run_moved = self.stats.get('first_run_moved', 0)
@@ -406,10 +402,6 @@ class C4DMonitorWidget(QWidget):
         self.open_folder_button = QPushButton("打开最后文件夹")
         self.open_folder_button.clicked.connect(self.open_folder)
         button_layout.addWidget(self.open_folder_button)
-
-        self.quit_button = QPushButton("退出")
-        self.quit_button.clicked.connect(self.close_app)
-        button_layout.addWidget(self.quit_button)
         
         layout.addLayout(button_layout)
 
@@ -425,8 +417,9 @@ class C4DMonitorWidget(QWidget):
         self.status_label.setText(status_text)
 
     def log_message(self, message):
-        # In a real app, you might want to log this to a file or a separate log view
-        print(message)
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.history_view.append(f"[{timestamp}] {message}")
+        self.history_view.moveCursor(QTextCursor.MoveOperation.End)
 
     def open_folder(self):
         last_folder = self.stats.get('last_target_folder')
