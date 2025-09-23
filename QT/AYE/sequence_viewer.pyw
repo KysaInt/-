@@ -44,17 +44,18 @@ class CollapsibleBox(QWidget):
         # Destroy the old layout and set the new one
         old_layout = self.content_area.layout()
         if old_layout:
-            QWidget().setLayout(old_layout) # Reparent the old layout to a temporary widget
+            # Properly dispose of the old layout
+            while old_layout.count():
+                item = old_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+            del old_layout
+
         self.content_area.setLayout(layout)
         
-        collapsed_height = 0
-        content_height = layout.sizeHint().height()
-
-        self.toggle_animation.setStartValue(collapsed_height)
-        self.toggle_animation.setEndValue(content_height)
-        
-        self.toggle_animation.setStartValue(content_height)
-        self.toggle_animation.setEndValue(collapsed_height)
+        # The animation values will be set in the toggle method
+        # based on the content's size hint at that moment.
 
     def toggle(self, checked):
         self.update_arrow(checked)
