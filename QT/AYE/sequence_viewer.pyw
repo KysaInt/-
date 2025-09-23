@@ -130,8 +130,8 @@ class ScanWorker(QThread):
 class SequenceViewerWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 设置默认路径为上两级的 '0' 目录
-        self.current_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
+        # 设置默认路径为父级的 '0' 目录
+        self.current_path = str(Path(os.path.abspath(__file__)).parent / '0')
         os.makedirs(self.current_path, exist_ok=True) # 确保目录存在
         self.auto_refresh_enabled = False
         self.scan_worker = None
@@ -397,12 +397,12 @@ class FrameVizWidget(QWidget):
         self.total_frames = max_frame - min_frame + 1
         
         # 外观设置
-        self.pixel_width = 6
-        self.pixel_height = 6
+        self.pixel_width = 4
+        self.pixel_height = 4
         self.gap = 2
-        self.exist_color = QColor("#4CAF50")
+        self.exist_color = self.palette().color(QPalette.Highlight)
         self.missing_color = QColor("#555555")
-        self.bg_color = QColor("#2E2E2E")
+        self.bg_color = self.palette().color(QPalette.Base)
 
         # 初始计算一次高度
         self._update_layout(self.width())

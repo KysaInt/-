@@ -411,7 +411,7 @@ class C4DMonitorWidget(QWidget):
         layout.addWidget(self.status_label)
 
         button_layout = QHBoxLayout()
-        self.open_folder_button = QPushButton("打开最后文件夹")
+        self.open_folder_button = QPushButton("打开渲染目录")
         self.open_folder_button.clicked.connect(self.open_folder)
         button_layout.addWidget(self.open_folder_button)
         
