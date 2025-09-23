@@ -176,21 +176,31 @@ def main():
             launch_success = False
             
             try:
-                c4d_print("尝试启动...")
-                # 使用pythonw来执行pyw文件
-                pythonw_cmd = python_cmd.replace('python', 'pythonw')
-                if not pythonw_cmd.endswith('w'):
-                    pythonw_cmd += 'w'
+                c4d_print("尝试使用 sys.executable 启动...")
                 
+                # 获取当前C4D环境的python解释器路径
+                python_exe_path = sys.executable
+                c4d_print(f"当前Python解释器: {python_exe_path}")
+
+                # 构造pythonw.exe的路径
+                pythonw_exe_path = python_exe_path.replace("python.exe", "pythonw.exe")
+                if 'pythonw.exe' not in pythonw_exe_path:
+                     # 如果是 py.exe 或其他情况，尝试直接用 pyw
+                    pythonw_exe_path = "pyw"
+                
+                c4d_print(f"尝试使用: {pythonw_exe_path}")
+
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
                 
+                # 使用绝对路径启动
                 process = subprocess.Popen(
-                    [pythonw_cmd, "main.pyw"],
+                    [pythonw_exe_path, "main.pyw"],
                     shell=False,
                     cwd=work_dir,
-                    startupinfo=startupinfo
+                    startupinfo=startupinfo,
+                    creationflags=subprocess.CREATE_NO_WINDOW
                 )
                 launch_success = True
                 c4d_print("✓ main.pyw脚本已启动（无窗口模式）")
@@ -201,7 +211,7 @@ def main():
                 c4d_print("所有启动方法都失败")
                 c4d_print("请手动执行以下命令:")
                 c4d_print(f'cd /d "{work_dir}"')
-                c4d_print(f'{python_cmd} main.pyw')
+                c4d_print(f'py main.pyw')
 
         except Exception as e:
             c4d_print(f"启动过程出错: {e}")
