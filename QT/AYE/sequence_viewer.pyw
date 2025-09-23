@@ -6,11 +6,72 @@ import subprocess
 from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider
+    QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
+    QLineEdit, QSpinBox
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QColor, QFont
 from pathlib import Path
+
+class CollapsibleBox(QWidget):
+    """A collapsible box widget."""
+    def __init__(self, title="", parent=None):
+        super().__init__(parent)
+        
+        self.toggle_button = QPushButton(title)
+        self.toggle_button.setStyleSheet("text-align: left; font-weight: bold;")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+
+        self.content_area = QWidget()
+        self.content_area.setMaximumHeight(0)
+        self.content_area.setMinimumHeight(0)
+        
+        self.toggle_animation = QPropertyAnimation(self.content_area, b"maximumHeight")
+        self.toggle_animation.setDuration(300)
+        self.toggle_animation.setEasingCurve(QEasingCurve.InOutQuart)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.toggle_button)
+        main_layout.addWidget(self.content_area)
+
+        self.toggle_button.clicked.connect(self.toggle)
+        self.update_arrow(False)
+
+    def setContentLayout(self, layout):
+        # Destroy the old layout and set the new one
+        old_layout = self.content_area.layout()
+        if old_layout:
+            QWidget().setLayout(old_layout) # Reparent the old layout to a temporary widget
+        self.content_area.setLayout(layout)
+        
+        collapsed_height = 0
+        content_height = layout.sizeHint().height()
+
+        self.toggle_animation.setStartValue(collapsed_height)
+        self.toggle_animation.setEndValue(content_height)
+        
+        self.toggle_animation.setStartValue(content_height)
+        self.toggle_animation.setEndValue(collapsed_height)
+
+    def toggle(self, checked):
+        self.update_arrow(checked)
+        
+        content_height = self.content_area.layout().sizeHint().height()
+        
+        self.toggle_animation.setStartValue(self.content_area.height())
+        if checked:
+            self.toggle_animation.setEndValue(content_height)
+        else:
+            self.toggle_animation.setEndValue(0)
+        
+        self.toggle_animation.start()
+
+    def update_arrow(self, checked):
+        arrow = "▼" if checked else "►"
+        self.toggle_button.setText(f"{arrow} 设置")
 
 class ScanWorker(QThread):
     """Worker thread for scanning files to prevent UI freezing."""
@@ -74,6 +135,8 @@ class SequenceViewerWidget(QWidget):
         os.makedirs(self.current_path, exist_ok=True) # 确保目录存在
         self.auto_refresh_enabled = False
         self.scan_worker = None
+        self.min_frame_threshold = 5
+        self.max_frame_threshold = 10000
 
         # Common channel suffixes
         self.channel_suffixes = [
@@ -110,42 +173,59 @@ class SequenceViewerWidget(QWidget):
         # Toolbar
         toolbar = QFrame()
         toolbar_layout = QHBoxLayout(toolbar)
-        self.path_label = QLabel(f"当前目录: {self.current_path}")
-        self.path_label.setWordWrap(True)
+        
+        self.path_edit = QLineEdit(self.current_path)
+        self.path_edit.returnPressed.connect(self.path_edited)
+        
         self.select_button = QPushButton("选择目录")
         self.select_button.clicked.connect(self.select_directory)
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.clicked.connect(self.scan_directory)
         
-        toolbar_layout.addWidget(self.path_label)
-        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(QLabel("当前目录:"))
+        toolbar_layout.addWidget(self.path_edit)
         toolbar_layout.addWidget(self.select_button)
         toolbar_layout.addWidget(self.refresh_button)
         main_layout.addWidget(toolbar)
 
-        # Global controls
-        control_frame = QFrame()
-        control_layout = QVBoxLayout(control_frame) # Changed to QVBoxLayout
-        
-        width_layout = QHBoxLayout()
-        width_layout.addWidget(QLabel("宽度:"))
+        # Collapsible settings box
+        self.collapsible_box = CollapsibleBox("设置")
+        settings_layout = QGridLayout() # Use QGridLayout for better alignment
+
+        # Width Slider
+        settings_layout.addWidget(QLabel("宽度:"), 0, 0)
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setRange(1, 30)
         self.width_slider.setValue(6)
         self.width_slider.valueChanged.connect(self.update_pixel_width)
-        width_layout.addWidget(self.width_slider)
-        control_layout.addLayout(width_layout)
+        settings_layout.addWidget(self.width_slider, 0, 1)
 
-        height_layout = QHBoxLayout()
-        height_layout.addWidget(QLabel("高度:"))
+        # Height Slider
+        settings_layout.addWidget(QLabel("高度:"), 1, 0)
         self.height_slider = QSlider(Qt.Horizontal)
         self.height_slider.setRange(1, 30)
         self.height_slider.setValue(6)
         self.height_slider.valueChanged.connect(self.update_pixel_height)
-        height_layout.addWidget(self.height_slider)
-        control_layout.addLayout(height_layout)
+        settings_layout.addWidget(self.height_slider, 1, 1)
 
-        main_layout.addWidget(control_frame)
+        # Min Frames Input
+        settings_layout.addWidget(QLabel("最少帧数:"), 2, 0)
+        self.min_frames_spinbox = QSpinBox()
+        self.min_frames_spinbox.setRange(0, 9999)
+        self.min_frames_spinbox.setValue(self.min_frame_threshold)
+        self.min_frames_spinbox.valueChanged.connect(self.update_min_threshold)
+        settings_layout.addWidget(self.min_frames_spinbox, 2, 1)
+
+        # Max Frames Input
+        settings_layout.addWidget(QLabel("最多帧数:"), 3, 0)
+        self.max_frames_spinbox = QSpinBox()
+        self.max_frames_spinbox.setRange(1, 99999)
+        self.max_frames_spinbox.setValue(self.max_frame_threshold)
+        self.max_frames_spinbox.valueChanged.connect(self.update_max_threshold)
+        settings_layout.addWidget(self.max_frames_spinbox, 3, 1)
+
+        self.collapsible_box.setContentLayout(settings_layout)
+        main_layout.addWidget(self.collapsible_box)
 
         # Scroll Area for cards
         self.scroll_area = QScrollArea()
@@ -159,17 +239,56 @@ class SequenceViewerWidget(QWidget):
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
 
+        # Collapsible settings box
+        self.settings_box = CollapsibleBox("设置")
+        settings_layout = QVBoxLayout()
+        
+        # Min frame threshold
+        min_frame_layout = QHBoxLayout()
+        min_frame_label = QLabel("最小帧数:")
+        self.min_frame_spinbox = QSpinBox()
+        self.min_frame_spinbox.setRange(1, 1000)
+        self.min_frame_spinbox.setValue(self.min_frame_threshold)
+        self.min_frame_spinbox.valueChanged.connect(self.update_min_frame_threshold)
+        min_frame_layout.addWidget(min_frame_label)
+        min_frame_layout.addWidget(self.min_frame_spinbox)
+        settings_layout.addLayout(min_frame_layout)
+
+        # Max frame threshold
+        max_frame_layout = QHBoxLayout()
+        max_frame_label = QLabel("最大帧数:")
+        self.max_frame_spinbox = QSpinBox()
+        self.max_frame_spinbox.setRange(1, 10000)
+        self.max_frame_spinbox.setValue(self.max_frame_threshold)
+        self.max_frame_spinbox.valueChanged.connect(self.update_max_frame_threshold)
+        max_frame_layout.addWidget(max_frame_label)
+        max_frame_layout.addWidget(self.max_frame_spinbox)
+        settings_layout.addLayout(max_frame_layout)
+
+        self.settings_box.setContentLayout(settings_layout)
+        main_layout.addWidget(self.settings_box)
+
+    def path_edited(self):
+        new_path = self.path_edit.text()
+        if os.path.isdir(new_path):
+            self.current_path = new_path
+            self.scan_directory()
+        else:
+            # If path is invalid, revert to the old one
+            self.path_edit.setText(self.current_path)
+
     def select_directory(self):
         path = QFileDialog.getExistingDirectory(self, "选择目录", self.current_path)
         if path:
             self.current_path = path
+            self.path_edit.setText(self.current_path)
             self.scan_directory()
 
     def scan_directory(self):
         if self.scan_worker and self.scan_worker.isRunning():
             return # Don't start a new scan if one is already running
 
-        self.path_label.setText(f"正在扫描: {self.current_path}...")
+        self.path_edit.setText(f"正在扫描: {self.current_path}...")
         self.select_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
 
@@ -181,7 +300,7 @@ class SequenceViewerWidget(QWidget):
         self.scan_worker.start()
 
     def on_scan_complete(self, tree_data):
-        self.path_label.setText(f"当前目录: {self.current_path}")
+        self.path_edit.setText(self.current_path)
         self.select_button.setEnabled(True)
         self.refresh_button.setEnabled(True)
         
@@ -191,6 +310,9 @@ class SequenceViewerWidget(QWidget):
         self.cards = []
         for seq_name, data in sorted_sequences:
             if data['frames']: # Only show sequences with frames
+                frame_count = len(data['frames'])
+                if not (self.min_frame_threshold <= frame_count <= self.max_frame_threshold):
+                    continue
                 card = SequenceCard(seq_name, data)
                 # Apply current slider values to new cards
                 card.viz_widget.set_pixel_width(self.width_slider.value())
@@ -199,6 +321,14 @@ class SequenceViewerWidget(QWidget):
                 self.cards.append(card)
         
         self.scan_worker = None
+
+    def update_min_threshold(self, value):
+        self.min_frame_threshold = value
+        self.scan_directory()
+
+    def update_max_threshold(self, value):
+        self.max_frame_threshold = value
+        self.scan_directory()
 
     def update_pixel_width(self, value):
         for card in getattr(self, 'cards', []):
@@ -221,6 +351,13 @@ class SequenceViewerWidget(QWidget):
             self.refresh_timer.start()
         else:
             self.refresh_timer.stop()
+
+    def showEvent(self, event):
+        """Override showEvent to refresh when the widget is shown."""
+        super().showEvent(event)
+        # We use a QTimer to delay the scan slightly, ensuring the UI is fully visible
+        # and responsive before the scan starts.
+        QTimer.singleShot(100, self.scan_directory)
 
     def closeEvent(self, event):
         if self.scan_worker and self.scan_worker.isRunning():
