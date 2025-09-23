@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
     QLineEdit, QSpinBox
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QColor, QFont
 from pathlib import Path
 
@@ -130,8 +130,8 @@ class ScanWorker(QThread):
 class SequenceViewerWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 设置默认路径为父级的 '0' 目录
-        self.current_path = str(Path(os.path.abspath(__file__)).parent / '0')
+        # 设置默认路径为上两级的 '0' 目录
+        self.current_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
         os.makedirs(self.current_path, exist_ok=True) # 确保目录存在
         self.auto_refresh_enabled = False
         self.scan_worker = None
@@ -397,49 +397,48 @@ class FrameVizWidget(QWidget):
         self.total_frames = max_frame - min_frame + 1
         
         # 外观设置
-        self.pixel_width = 4
-        self.pixel_height = 4
+        self.pixel_width = 6
+        self.pixel_height = 6
         self.gap = 2
-        self.exist_color = QColor("#3498db")  # 使用固定的亮蓝色
+        self.exist_color = QColor("#4CAF50")
         self.missing_color = QColor("#555555")
-        self.bg_color = self.palette().color(QPalette.Base)
+        self.bg_color = QColor("#2E2E2E")
+
+        # 初始计算一次高度
+        self._update_layout(self.width())
 
     def set_pixel_width(self, width):
         self.pixel_width = width
-        self.updateGeometry() # 通知布局系统尺寸提示已更改
-        self.update() # 触发重绘
+        self._update_layout(self.width())
 
     def set_pixel_height(self, height):
         self.pixel_height = height
-        self.updateGeometry() # 通知布局系统尺寸提示已更改
-        self.update() # 触发重绘
+        self._update_layout(self.width())
 
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        """根据宽度计算所需高度"""
+    def _update_layout(self, width):
+        """根据宽度计算布局和所需高度"""
         if width <= 0 or self.total_frames <= 0:
-            return self.pixel_height
+            self.setFixedHeight(self.pixel_height)
+            return
 
         block_width = self.pixel_width + self.gap
         block_height = self.pixel_height + self.gap
         pixels_per_row = max(1, (width + self.gap) // block_width)
         num_rows = (self.total_frames + pixels_per_row - 1) // pixels_per_row
         
-        required_height = num_rows * block_height
-        if num_rows > 0:
-            required_height -= self.gap # 减去最后一行的间隙
-            
-        return required_height
+        required_height = num_rows * block_height - self.gap
+        
+        # 设置固定高度，这将通知父布局进行调整
+        if self.height() != required_height:
+            self.setFixedHeight(required_height)
+        
+        # 触发重绘
+        self.update()
 
-    def sizeHint(self):
-        # 提供一个合理的默认尺寸
-        return self.minimumSizeHint()
-
-    def minimumSizeHint(self):
-        # 最小高度应该是至少一行的高度
-        return QSize(self.pixel_width * 10, self.pixel_height + self.gap)
+    def resizeEvent(self, event):
+        """当控件大小改变时，重新计算布局"""
+        super().resizeEvent(event)
+        self._update_layout(event.size().width())
 
     def paintEvent(self, event):
         painter = QPainter(self)
