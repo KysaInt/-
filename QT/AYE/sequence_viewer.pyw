@@ -196,17 +196,23 @@ class SequenceViewerWidget(QWidget):
         settings_layout.addWidget(QLabel("宽度:"), 0, 0)
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setRange(1, 30)
-        self.width_slider.setValue(6)
+        self.width_slider.setValue(4)
+        self.width_slider_label = QLabel(str(self.width_slider.value()))
+        self.width_slider.valueChanged.connect(self.width_slider_label.setNum)
         self.width_slider.valueChanged.connect(self.update_pixel_width)
         settings_layout.addWidget(self.width_slider, 0, 1)
+        settings_layout.addWidget(self.width_slider_label, 0, 2)
 
         # Height Slider
         settings_layout.addWidget(QLabel("高度:"), 1, 0)
         self.height_slider = QSlider(Qt.Horizontal)
         self.height_slider.setRange(1, 30)
-        self.height_slider.setValue(6)
+        self.height_slider.setValue(4)
+        self.height_slider_label = QLabel(str(self.height_slider.value()))
+        self.height_slider.valueChanged.connect(self.height_slider_label.setNum)
         self.height_slider.valueChanged.connect(self.update_pixel_height)
         settings_layout.addWidget(self.height_slider, 1, 1)
+        settings_layout.addWidget(self.height_slider_label, 1, 2)
 
         # Min Frames Input
         settings_layout.addWidget(QLabel("最少帧数:"), 2, 0)
