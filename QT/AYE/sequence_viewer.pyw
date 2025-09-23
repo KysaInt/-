@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
     QLineEdit, QSpinBox
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize
 from PySide6.QtGui import QPainter, QColor, QFont
 from pathlib import Path
 
@@ -404,41 +404,42 @@ class FrameVizWidget(QWidget):
         self.missing_color = QColor("#555555")
         self.bg_color = self.palette().color(QPalette.Base)
 
-        # 初始计算一次高度
-        self._update_layout(self.width())
-
     def set_pixel_width(self, width):
         self.pixel_width = width
-        self._update_layout(self.width())
+        self.updateGeometry() # 通知布局系统尺寸提示已更改
+        self.update() # 触发重绘
 
     def set_pixel_height(self, height):
         self.pixel_height = height
-        self._update_layout(self.width())
+        self.updateGeometry() # 通知布局系统尺寸提示已更改
+        self.update() # 触发重绘
 
-    def _update_layout(self, width):
-        """根据宽度计算布局和所需高度"""
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        """根据宽度计算所需高度"""
         if width <= 0 or self.total_frames <= 0:
-            self.setFixedHeight(self.pixel_height)
-            return
+            return self.pixel_height
 
         block_width = self.pixel_width + self.gap
         block_height = self.pixel_height + self.gap
         pixels_per_row = max(1, (width + self.gap) // block_width)
         num_rows = (self.total_frames + pixels_per_row - 1) // pixels_per_row
         
-        required_height = num_rows * block_height - self.gap
-        
-        # 设置固定高度，这将通知父布局进行调整
-        if self.height() != required_height:
-            self.setFixedHeight(required_height)
-        
-        # 触发重绘
-        self.update()
+        required_height = num_rows * block_height
+        if num_rows > 0:
+            required_height -= self.gap # 减去最后一行的间隙
+            
+        return required_height
 
-    def resizeEvent(self, event):
-        """当控件大小改变时，重新计算布局"""
-        super().resizeEvent(event)
-        self._update_layout(event.size().width())
+    def sizeHint(self):
+        # 提供一个合理的默认尺寸
+        return self.minimumSizeHint()
+
+    def minimumSizeHint(self):
+        # 最小高度应该是至少一行的高度
+        return QSize(self.pixel_width * 10, self.pixel_height + self.gap)
 
     def paintEvent(self, event):
         painter = QPainter(self)
