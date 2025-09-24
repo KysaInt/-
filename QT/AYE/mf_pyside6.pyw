@@ -124,14 +124,14 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
     parsed_lines = []
     valid_intervals = []
     
+    # First pass: parse and find max values
     for line in history_lines:
-        # 检查并分离时间戳
         timestamp_part = ""
         content_part = line
         if line.startswith('[') and ']' in line:
             end_bracket_pos = line.find(']')
             if end_bracket_pos != -1:
-                timestamp_part = line[:end_bracket_pos + 2] # 包括]和后面的空格
+                timestamp_part = line[:end_bracket_pos + 2]
                 content_part = line[end_bracket_pos + 2:]
 
         if content_part.startswith('"') and '"' in content_part[1:]:
@@ -140,14 +140,11 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             time_part = content_part[end_quote_pos + 1:]
             
             interval = 0
-            is_special = False
-            
-            if "[初始文件]" in time_part or "[不完整渲染时长]" in time_part or "[渲染暂停]" in time_part:
-                is_special = True
-            elif "[00:00:00]" in time_part:
-                is_special = True
-            else:
-                time_match = re.search(r'\[(\d{1,2}):(\d{1,2}):(\d{1,2})\]', time_part)
+            is_special = "[初始文件]" in time_part or "[不完整渲染时长]" in time_part or "[渲染暂停]" in time_part or "[00:00:00]" in time_part
+
+            if not is_special:
+                time_match = re.search(r'\[(\d{1,2}):(\d{1,2}):(\d{1,2})\]', time_part) or \
+                             re.search(r'(\d{1,2}):(\d{1,2}):(\d{1,2})', time_part)
                 if time_match:
                     try:
                         h, m, s = map(int, time_match.groups())
@@ -156,16 +153,6 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
                             valid_intervals.append(interval)
                     except:
                         pass
-                else:
-                    time_match = re.search(r'(\d{1,2}):(\d{1,2}):(\d{1,2})', time_part)
-                    if time_match:
-                        try:
-                            h, m, s = map(int, time_match.groups())
-                            interval = h * 3600 + m * 60 + s
-                            if interval > 0:
-                                valid_intervals.append(interval)
-                        except:
-                            pass
             
             parsed_lines.append({
                 'timestamp': timestamp_part,
@@ -177,20 +164,15 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
         else:
             parsed_lines.append({'original_line': line})
     
-    if valid_intervals:
-        max_time = max(valid_intervals)
-    else:
-        max_time = 0
+    max_time = max(valid_intervals) if valid_intervals else 1
     
-    max_filename_length = 0
-    for item in parsed_lines:
-        if 'filename' in item:
-            # We need to escape HTML special characters from the filename to avoid breaking the layout
-            item['filename'] = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            max_filename_length = max(max_filename_length, len(item['filename']))
-    
+    # Determine a fixed total length for the line (excluding timestamp)
+    # This can be adjusted. Let's try to make it generous.
+    # Example: filename (50) + separator (1) + bar (20) + separator (1) + time (20)
+    fixed_line_length = 100 
+    bar_width = 40
+
     enhanced_lines = []
-    bar_width = 20
     
     fill_char = '█'
     empty_char = ' '
@@ -198,29 +180,57 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
     for item in parsed_lines:
         if 'original_line' in item:
             enhanced_lines.append(item['original_line'])
-        else:
-            timestamp = item['timestamp']
-            filename = item['filename']
-            time_part = item['time']
-            interval = item['interval']
-            is_special = item['is_special']
-            
-            padding = "&nbsp;" * (max_filename_length - len(filename))
-            
-            if is_special or interval == 0:
-                bar = empty_char * bar_width
-            else:
-                ratio = interval / max_time if max_time > 0 else 0.0
-                ratio = max(0.0, min(1.0, ratio))
-                filled_length = int(bar_width * ratio) if interval > 0 else 0
-                bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
+            continue
 
-            if color and not for_log_file:
-                colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
-                colored_bar = f'<span style="color: {color};">{bar}</span>'
-                enhanced_lines.append(f"{colored_timestamp}{filename}{padding}|{colored_bar}|{time_part}")
-            else:
-                enhanced_lines.append(f"{timestamp}{filename}{' ' * (max_filename_length - len(filename))}|{bar}|{time_part}")
+        timestamp = item['timestamp']
+        # Escape HTML characters for safety
+        filename = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        time_part = item['time']
+        interval = item['interval']
+        is_special = item['is_special']
+        
+        # Bar generation
+        if is_special:
+            bar = empty_char * bar_width
+        else:
+            ratio = interval / max_time
+            filled_length = int(bar_width * ratio)
+            bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
+
+        # Constructing the line with fixed padding
+        # The filename part is left-aligned, and the bar is placed after it.
+        # The time part is appended at the end.
+        # We use non-breaking spaces for HTML padding.
+        
+        # Calculate padding needed to align the bars
+        # Let's set a max filename display length to avoid overly long lines
+        max_filename_display = 60
+        display_filename = filename
+        if len(display_filename) > max_filename_display:
+            display_filename = display_filename[:max_filename_display-3] + "..."
+        
+        # Padding after filename to align the bar
+        # The number of characters in filename can vary.
+        # We need to calculate padding based on a fixed position for the bar.
+        # Let's say the bar starts at column 65 (after timestamp)
+        bar_start_column = 65
+        
+        # Length of filename without HTML entities for calculation
+        plain_filename_len = len(item['filename'])
+        
+        padding_len = max(0, bar_start_column - plain_filename_len)
+        padding = "&nbsp;" * padding_len
+
+        if color and not for_log_file:
+            colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
+            colored_bar = f'<span style="color: {color};">{bar}</span>'
+            line_content = f"{filename}{padding}|{colored_bar}| {time_part}"
+            enhanced_lines.append(f"{colored_timestamp}{line_content}")
+        else:
+            # For plain text log
+            padding_plain = " " * padding_len
+            line_content = f"{item['filename']}{padding_plain}|{bar}| {time_part}"
+            enhanced_lines.append(f"{timestamp}{line_content}")
 
     return enhanced_lines
 
@@ -420,6 +430,10 @@ class C4DMonitorWidget(QWidget):
         # Get the highlight color from the current palette
         highlight_color = self.palette().color(QPalette.ColorRole.Highlight).name()
         self.stats['highlight_color'] = highlight_color
+        
+        # Add wheel event for font scaling
+        self.history_view.wheelEvent = self.history_view_wheel_event
+        
         layout.addWidget(self.history_view)
 
         self.status_label = QLabel("正在初始化...")
@@ -432,6 +446,24 @@ class C4DMonitorWidget(QWidget):
         button_layout.addWidget(self.open_folder_button)
         
         layout.addLayout(button_layout)
+
+    def history_view_wheel_event(self, event):
+        if QApplication.keyboardModifiers() == Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            font = self.history_view.font()
+            current_size = font.pointSize()
+            
+            if delta > 0:
+                font.setPointSize(current_size + 1)
+            else:
+                if current_size > 1:
+                    font.setPointSize(current_size - 1)
+            
+            self.history_view.setFont(font)
+            event.accept()
+        else:
+            # Call original wheel event handler
+            QTextEdit.wheelEvent(self.history_view, event)
 
     def start_worker(self):
         self.worker = Worker(self.stats)

@@ -7,12 +7,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-def batch_rename(root_dir, find_str, replace_str):
-    """批量重命名文件和文件夹"""
-    renamed_count = 0
-    # 使用 os.walk 从底层向上遍历，以先重命名文件/子文件夹，再重命名父文件夹
+def batch_replace(root_dir, find_str, replace_str):
+    """批量替换文件和文件夹名称"""
+    replaced_count = 0
+    # 使用 os.walk 从底层向上遍历，以先替换文件/子文件夹，再替换父文件夹
     for dirpath, dirnames, filenames in os.walk(root_dir, topdown=False):
-        # 重命名文件
+        # 替换文件
         for filename in filenames:
             if find_str in filename:
                 old_path = os.path.join(dirpath, filename)
@@ -20,12 +20,12 @@ def batch_rename(root_dir, find_str, replace_str):
                 new_path = os.path.join(dirpath, new_filename)
                 try:
                     os.rename(old_path, new_path)
-                    renamed_count += 1
+                    replaced_count += 1
                 except OSError:
                     # 忽略错误，例如当目标文件已存在时
                     pass
 
-        # 重命名文件夹
+        # 替换文件夹
         for dirname in dirnames:
             if find_str in dirname:
                 old_dir = os.path.join(dirpath, dirname)
@@ -33,13 +33,13 @@ def batch_rename(root_dir, find_str, replace_str):
                 new_dir = os.path.join(dirpath, new_dir_name)
                 try:
                     os.rename(old_dir, new_dir)
-                    renamed_count += 1
+                    replaced_count += 1
                 except OSError:
                     # 忽略错误
                     pass
-    return renamed_count
+    return replaced_count
 
-class RenameWidget(QWidget):
+class ReplaceWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setup_ui()
@@ -80,9 +80,9 @@ class RenameWidget(QWidget):
         main_layout.addLayout(grid_layout)
 
         # 执行按钮
-        self.rename_button = QPushButton("开始重命名")
-        self.rename_button.setMinimumHeight(35)
-        main_layout.addWidget(self.rename_button)
+        self.replace_button = QPushButton("开始替换")
+        self.replace_button.setMinimumHeight(35)
+        main_layout.addWidget(self.replace_button)
 
         main_layout.addStretch() # 添加伸缩，使控件集中在顶部
 
@@ -93,17 +93,17 @@ class RenameWidget(QWidget):
 
     def connect_signals(self):
         self.browse_button.clicked.connect(self.browse_directory)
-        self.rename_button.clicked.connect(self.execute_rename)
+        self.replace_button.clicked.connect(self.execute_replace)
 
     def browse_directory(self):
         current_path = self.path_line_edit.text()
         directory = QFileDialog.getExistingDirectory(
-            self, "选择要重命名的根文件夹", current_path
+            self, "选择要替换的根文件夹", current_path
         )
         if directory:
             self.path_line_edit.setText(directory)
 
-    def execute_rename(self):
+    def execute_replace(self):
         root_dir = self.path_line_edit.text()
         find_str = self.find_line_edit.text()
         replace_str = self.replace_line_edit.text()
@@ -117,17 +117,17 @@ class RenameWidget(QWidget):
             return
 
         try:
-            renamed_count = batch_rename(root_dir, find_str, replace_str)
+            replaced_count = batch_replace(root_dir, find_str, replace_str)
             QMessageBox.information(
-                self, "完成", f"批量重命名完成！\n共处理了 {renamed_count} 个文件和文件夹。"
+                self, "完成", f"批量替换完成！\n共处理了 {replaced_count} 个文件和文件夹。"
             )
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"重命名过程中发生错误：\n{e}")
+            QMessageBox.critical(self, "错误", f"替换过程中发生错误：\n{e}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    widget = RenameWidget()
-    widget.setWindowTitle("批量重命名工具")
+    widget = ReplaceWidget()
+    widget.setWindowTitle("批量替换工具")
     widget.setGeometry(300, 300, 450, 200)
     widget.show()
     sys.exit(app.exec())

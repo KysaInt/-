@@ -196,7 +196,7 @@ class SequenceViewerWidget(QWidget):
         settings_layout.addWidget(QLabel("宽度:"), 0, 0)
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setRange(1, 30)
-        self.width_slider.setValue(4)
+        self.width_slider.setValue(2)
         self.width_slider_label = QLabel(str(self.width_slider.value()))
         self.width_slider.valueChanged.connect(self.width_slider_label.setNum)
         self.width_slider.valueChanged.connect(self.update_pixel_width)
@@ -207,7 +207,7 @@ class SequenceViewerWidget(QWidget):
         settings_layout.addWidget(QLabel("高度:"), 1, 0)
         self.height_slider = QSlider(Qt.Horizontal)
         self.height_slider.setRange(1, 30)
-        self.height_slider.setValue(4)
+        self.height_slider.setValue(2)
         self.height_slider_label = QLabel(str(self.height_slider.value()))
         self.height_slider.valueChanged.connect(self.height_slider_label.setNum)
         self.height_slider.valueChanged.connect(self.update_pixel_height)
@@ -407,9 +407,9 @@ class FrameVizWidget(QWidget):
         self.total_frames = max_frame - min_frame + 1
         
         # 外观设置
-        self.pixel_width = 6
-        self.pixel_height = 6
-        self.gap = 2
+        self.pixel_width = 2
+        self.pixel_height = 2
+        self.gap = 1
         self.exist_color = self.palette().color(QPalette.Highlight)
         self.missing_color = QColor("#555555")
         self.bg_color = QColor("#2E2E2E")
