@@ -166,12 +166,13 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
     
     max_time = max(valid_intervals) if valid_intervals else 1
     
-    # Determine a fixed total length for the line (excluding timestamp)
-    # This can be adjusted. Let's try to make it generous.
-    # Example: filename (50) + separator (1) + bar (20) + separator (1) + time (20)
-    fixed_line_length = 100 
-    bar_width = 40
+    max_filename_length = 0
+    for item in parsed_lines:
+        if 'filename' in item:
+            # 使用 item['filename'] 的原始长度进行计算
+            max_filename_length = max(max_filename_length, len(item['filename']))
 
+    bar_width = 40
     enhanced_lines = []
     
     fill_char = '█'
@@ -184,53 +185,40 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
 
         timestamp = item['timestamp']
         # Escape HTML characters for safety
-        filename = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        filename_html = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         time_part = item['time']
         interval = item['interval']
         is_special = item['is_special']
         
         # Bar generation
-        if is_special:
+        if is_special or interval == 0:
             bar = empty_char * bar_width
         else:
             ratio = interval / max_time
             filled_length = int(bar_width * ratio)
             bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
 
-        # Constructing the line with fixed padding
-        # The filename part is left-aligned, and the bar is placed after it.
-        # The time part is appended at the end.
-        # We use non-breaking spaces for HTML padding.
+        # Calculate padding
+        # 使用 item['filename'] 的原始长度来计算填充
+        padding_len = max(0, max_filename_length - len(item['filename']))
         
-        # Calculate padding needed to align the bars
-        # Let's set a max filename display length to avoid overly long lines
-        max_filename_display = 60
-        display_filename = filename
-        if len(display_filename) > max_filename_display:
-            display_filename = display_filename[:max_filename_display-3] + "..."
-        
-        # Padding after filename to align the bar
-        # The number of characters in filename can vary.
-        # We need to calculate padding based on a fixed position for the bar.
-        # Let's say the bar starts at column 65 (after timestamp)
-        bar_start_column = 65
-        
-        # Length of filename without HTML entities for calculation
-        plain_filename_len = len(item['filename'])
-        
-        padding_len = max(0, bar_start_column - plain_filename_len)
-        padding = "&nbsp;" * padding_len
-
-        if color and not for_log_file:
-            colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
-            colored_bar = f'<span style="color: {color};">{bar}</span>'
-            line_content = f"{filename}{padding}|{colored_bar}| {time_part}"
-            enhanced_lines.append(f"{colored_timestamp}{line_content}")
-        else:
-            # For plain text log
-            padding_plain = " " * padding_len
-            line_content = f"{item['filename']}{padding_plain}|{bar}| {time_part}"
+        if for_log_file:
+            padding = " " * padding_len
+            line_content = f"{item['filename']}{padding}|{bar}| {time_part}"
             enhanced_lines.append(f"{timestamp}{line_content}")
+        else:
+            # For rich text (HTML) in PySide
+            padding = "&nbsp;" * padding_len
+            
+            # Color is applied to timestamp and bar, not the whole line
+            if color:
+                colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
+                colored_bar = f'<span style="color: {color};">{bar}</span>'
+                line_content = f"{filename_html}{padding}|{colored_bar}| {time_part}"
+                enhanced_lines.append(f"{colored_timestamp}{line_content}")
+            else:
+                line_content = f"{filename_html}{padding}|{bar}| {time_part}"
+                enhanced_lines.append(f"{timestamp}{line_content}")
 
     return enhanced_lines
 
