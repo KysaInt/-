@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QSpinBox
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPainter, QColor, QFont
+from PySide6.QtGui import QPainter, QColor, QFont, QPalette
 from pathlib import Path
 
 class CollapsibleBox(QWidget):
@@ -410,7 +410,7 @@ class FrameVizWidget(QWidget):
         self.pixel_width = 6
         self.pixel_height = 6
         self.gap = 2
-        self.exist_color = QColor("#4CAF50")
+        self.exist_color = self.palette().color(QPalette.Highlight)
         self.missing_color = QColor("#555555")
         self.bg_color = QColor("#2E2E2E")
 
