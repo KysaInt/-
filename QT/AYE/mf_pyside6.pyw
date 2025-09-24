@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QHBoxLayout, QSizePolicy
 )
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
-from PySide6.QtGui import QTextCursor, QFontDatabase
+from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette
 
 class C4DRenderMonitor:
     def __init__(self):
@@ -117,16 +117,13 @@ def open_last_folder(folder_path):
     except Exception as e:
         print(f"打开文件夹失败: {e}")
 
-def generate_bar_chart_for_history(history_lines, for_log_file=False):
+def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None):
     if not history_lines:
-        return ""
+        return []
         
     parsed_lines = []
     valid_intervals = []
     
-    # 定义高亮颜色
-    highlight_color = "#00A0E9"
-
     for line in history_lines:
         # 检查并分离时间戳
         timestamp_part = ""
@@ -178,9 +175,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 'is_special': is_special
             })
         else:
-            # 对于非标准行，进行HTML转义以避免解析错误
-            escaped_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            parsed_lines.append({'original_line': escaped_line})
+            parsed_lines.append({'original_line': line})
     
     if valid_intervals:
         max_time = max(valid_intervals)
@@ -190,7 +185,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
     max_filename_length = 0
     for item in parsed_lines:
         if 'filename' in item:
-            # HTML转义文件名中的特殊字符
+            # We need to escape HTML special characters from the filename to avoid breaking the layout
             item['filename'] = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             max_filename_length = max(max_filename_length, len(item['filename']))
     
@@ -210,10 +205,6 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
             interval = item['interval']
             is_special = item['is_special']
             
-            # HTML转义
-            timestamp = timestamp.replace("<", "&lt;").replace(">", "&gt;")
-            time_part = time_part.replace("<", "&lt;").replace(">", "&gt;")
-
             padding = "&nbsp;" * (max_filename_length - len(filename))
             
             if is_special or interval == 0:
@@ -223,14 +214,15 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 ratio = max(0.0, min(1.0, ratio))
                 filled_length = int(bar_width * ratio) if interval > 0 else 0
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
-            
-            # 添加颜色
-            colored_timestamp = f'<font color="{highlight_color}">{timestamp}</font>'
-            colored_bar = f'<font color="{highlight_color}">{bar}</font>'
-            
-            enhanced_lines.append(f"{colored_timestamp}{filename}{padding}|{colored_bar}|{time_part}")
-    
-    return "<br>".join(enhanced_lines)
+
+            if color and not for_log_file:
+                colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
+                colored_bar = f'<span style="color: {color};">{bar}</span>'
+                enhanced_lines.append(f"{colored_timestamp}{filename}{padding}|{colored_bar}|{time_part}")
+            else:
+                enhanced_lines.append(f"{timestamp}{filename}{' ' * (max_filename_length - len(filename))}|{bar}|{time_part}")
+
+    return enhanced_lines
 
 class Worker(QThread):
     update_signal = Signal(str, str)
@@ -393,7 +385,8 @@ class Worker(QThread):
         
         stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染: {format_seconds(total_render_time)} | 运行: {format_seconds(total_time)} | {render_indicator}"
         
-        history_text = generate_bar_chart_for_history(history)
+        highlight_color = self.stats.get('highlight_color', '#FFFFFF')
+        history_text = "\n".join(generate_bar_chart_for_history(history, color=highlight_color))
 
         self.update_signal.emit(history_text, stat_line)
 
@@ -424,6 +417,9 @@ class C4DMonitorWidget(QWidget):
         self.history_view.setReadOnly(True)
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.history_view.setFont(font)
+        # Get the highlight color from the current palette
+        highlight_color = self.palette().color(QPalette.ColorRole.Highlight).name()
+        self.stats['highlight_color'] = highlight_color
         layout.addWidget(self.history_view)
 
         self.status_label = QLabel("正在初始化...")
@@ -444,7 +440,7 @@ class C4DMonitorWidget(QWidget):
         self.worker.start()
 
     def update_ui(self, history_text, status_text):
-        self.history_view.setHtml(history_text)
+        self.history_view.setHtml(history_text.replace('\n', '<br>'))
         self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         self.status_label.setText(status_text)
 
