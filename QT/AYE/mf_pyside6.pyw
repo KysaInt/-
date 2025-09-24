@@ -172,7 +172,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             # 使用 item['filename'] 的原始长度进行计算
             max_filename_length = max(max_filename_length, len(item['filename']))
 
-    bar_width = 40
+    bar_width = 25
     enhanced_lines = []
     
     fill_char = '█'
@@ -194,9 +194,23 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
         if is_special or interval == 0:
             bar = empty_char * bar_width
         else:
-            ratio = interval / max_time
-            filled_length = int(bar_width * ratio)
-            bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
+            blocks = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█']
+            
+            # Calculate the exact width
+            exact_width = (interval / max_time) * bar_width
+            full_blocks_count = int(exact_width)
+            remainder = exact_width - full_blocks_count
+            
+            # Determine the partial block
+            partial_block_index = int(remainder * 8)
+            
+            bar = '█' * full_blocks_count
+            if partial_block_index > 0 and full_blocks_count < bar_width:
+                bar += blocks[partial_block_index - 1]
+            
+            # Pad with empty characters to ensure alignment
+            current_bar_length = len(bar)
+            bar += empty_char * (bar_width - current_bar_length)
 
         # Calculate padding
         # 使用 item['filename'] 的原始长度来计算填充
