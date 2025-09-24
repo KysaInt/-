@@ -23,7 +23,11 @@ class Ui_Widget(object):
     def setupUi(self, Widget):
         if not Widget.objectName():
             Widget.setObjectName(u"Widget")
-        Widget.resize(400, 800)
+        Widget.resize(700, 400)
+        font = QFont()
+        font.setFamilies([u"\u9ed1\u4f53"])
+        font.setPointSize(10)
+        Widget.setFont(font)
         self.horizontalLayout = QHBoxLayout(Widget)
         self.horizontalLayout.setObjectName(u"horizontalLayout")
         self.navigationList = QListWidget(Widget)
@@ -32,11 +36,25 @@ class Ui_Widget(object):
         QListWidgetItem(self.navigationList)
         self.navigationList.setObjectName(u"navigationList")
         self.navigationList.setMaximumSize(QSize(80, 16777215))
+        font1 = QFont()
+        font1.setFamilies([u"\u5fae\u8f6f\u96c5\u9ed1"])
+        font1.setPointSize(9)
+        font1.setBold(False)
+        font1.setItalic(False)
+        font1.setUnderline(False)
+        font1.setKerning(True)
+        font1.setStyleStrategy(QFont.PreferDefault)
+        font1.setHintingPreference(QFont.PreferDefaultHinting)
+        self.navigationList.setFont(font1)
 
         self.horizontalLayout.addWidget(self.navigationList)
 
         self.stackedWidget = QStackedWidget(Widget)
         self.stackedWidget.setObjectName(u"stackedWidget")
+        font2 = QFont()
+        font2.setFamilies([u"\u5fae\u8f6f\u96c5\u9ed1"])
+        font2.setPointSize(9)
+        self.stackedWidget.setFont(font2)
         self.page_1 = QWidget()
         self.page_1.setObjectName(u"page_1")
         self.verticalLayout = QVBoxLayout(self.page_1)
@@ -44,6 +62,11 @@ class Ui_Widget(object):
         self.label_1 = QLabel(self.page_1)
         self.label_1.setObjectName(u"label_1")
         self.label_1.setEnabled(True)
+        font3 = QFont()
+        font3.setFamilies([u"\u5fae\u8f6f\u96c5\u9ed1"])
+        font3.setPointSize(9)
+        font3.setBold(False)
+        self.label_1.setFont(font3)
         self.label_1.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout.addWidget(self.label_1)
@@ -55,6 +78,7 @@ class Ui_Widget(object):
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
         self.label_2 = QLabel(self.page_2)
         self.label_2.setObjectName(u"label_2")
+        self.label_2.setFont(font2)
         self.label_2.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout_2.addWidget(self.label_2)
@@ -66,6 +90,7 @@ class Ui_Widget(object):
         self.verticalLayout_3.setObjectName(u"verticalLayout_3")
         self.label_3 = QLabel(self.page_3)
         self.label_3.setObjectName(u"label_3")
+        self.label_3.setFont(font2)
         self.label_3.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout_3.addWidget(self.label_3)
@@ -78,7 +103,7 @@ class Ui_Widget(object):
         self.retranslateUi(Widget)
         self.navigationList.currentRowChanged.connect(self.stackedWidget.setCurrentIndex)
 
-        self.stackedWidget.setCurrentIndex(2)
+        self.stackedWidget.setCurrentIndex(0)
 
 
         QMetaObject.connectSlotsByName(Widget)

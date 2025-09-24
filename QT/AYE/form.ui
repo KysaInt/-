@@ -6,9 +6,15 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>800</height>
+    <width>700</width>
+    <height>400</height>
    </rect>
+  </property>
+  <property name="font">
+   <font>
+    <family>黑体</family>
+    <pointsize>10</pointsize>
+   </font>
   </property>
   <property name="windowTitle">
    <string>主界面</string>
@@ -21,6 +27,18 @@
        <width>80</width>
        <height>16777215</height>
       </size>
+     </property>
+     <property name="font">
+      <font>
+       <family>微软雅黑</family>
+       <pointsize>9</pointsize>
+       <italic>false</italic>
+       <bold>false</bold>
+       <underline>false</underline>
+       <stylestrategy>PreferDefault</stylestrategy>
+       <kerning>true</kerning>
+       <hintingpreference>PreferDefaultHinting</hintingpreference>
+      </font>
      </property>
      <item>
       <property name="text">
@@ -41,8 +59,14 @@
    </item>
    <item>
     <widget class="QStackedWidget" name="stackedWidget">
+     <property name="font">
+      <font>
+       <family>微软雅黑</family>
+       <pointsize>9</pointsize>
+      </font>
+     </property>
      <property name="currentIndex">
-      <number>2</number>
+      <number>0</number>
      </property>
      <widget class="QWidget" name="page_1">
       <layout class="QVBoxLayout" name="verticalLayout">
@@ -50,6 +74,13 @@
         <widget class="QLabel" name="label_1">
          <property name="enabled">
           <bool>true</bool>
+         </property>
+         <property name="font">
+          <font>
+           <family>微软雅黑</family>
+           <pointsize>9</pointsize>
+           <bold>false</bold>
+          </font>
          </property>
          <property name="text">
           <string>这里是模块一的内容</string>
@@ -65,6 +96,12 @@
       <layout class="QVBoxLayout" name="verticalLayout_2">
        <item>
         <widget class="QLabel" name="label_2">
+         <property name="font">
+          <font>
+           <family>微软雅黑</family>
+           <pointsize>9</pointsize>
+          </font>
+         </property>
          <property name="text">
           <string>这里是模块二的内容</string>
          </property>
@@ -79,6 +116,12 @@
       <layout class="QVBoxLayout" name="verticalLayout_3">
        <item>
         <widget class="QLabel" name="label_3">
+         <property name="font">
+          <font>
+           <family>微软雅黑</family>
+           <pointsize>9</pointsize>
+          </font>
+         </property>
          <property name="text">
           <string>这里是模块三的内容</string>
          </property>
