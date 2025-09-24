@@ -23,7 +23,7 @@ class Ui_Widget(object):
     def setupUi(self, Widget):
         if not Widget.objectName():
             Widget.setObjectName(u"Widget")
-        Widget.resize(800, 600)
+        Widget.resize(400, 800)
         self.horizontalLayout = QHBoxLayout(Widget)
         self.horizontalLayout.setObjectName(u"horizontalLayout")
         self.navigationList = QListWidget(Widget)
@@ -31,7 +31,7 @@ class Ui_Widget(object):
         QListWidgetItem(self.navigationList)
         QListWidgetItem(self.navigationList)
         self.navigationList.setObjectName(u"navigationList")
-        self.navigationList.setMaximumSize(QSize(150, 16777215))
+        self.navigationList.setMaximumSize(QSize(80, 16777215))
 
         self.horizontalLayout.addWidget(self.navigationList)
 
@@ -43,7 +43,8 @@ class Ui_Widget(object):
         self.verticalLayout.setObjectName(u"verticalLayout")
         self.label_1 = QLabel(self.page_1)
         self.label_1.setObjectName(u"label_1")
-        self.label_1.setAlignment(Qt.AlignCenter)
+        self.label_1.setEnabled(True)
+        self.label_1.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout.addWidget(self.label_1)
 
@@ -54,7 +55,7 @@ class Ui_Widget(object):
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
         self.label_2 = QLabel(self.page_2)
         self.label_2.setObjectName(u"label_2")
-        self.label_2.setAlignment(Qt.AlignCenter)
+        self.label_2.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout_2.addWidget(self.label_2)
 
@@ -65,7 +66,7 @@ class Ui_Widget(object):
         self.verticalLayout_3.setObjectName(u"verticalLayout_3")
         self.label_3 = QLabel(self.page_3)
         self.label_3.setObjectName(u"label_3")
-        self.label_3.setAlignment(Qt.AlignCenter)
+        self.label_3.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.verticalLayout_3.addWidget(self.label_3)
 
@@ -77,7 +78,7 @@ class Ui_Widget(object):
         self.retranslateUi(Widget)
         self.navigationList.currentRowChanged.connect(self.stackedWidget.setCurrentIndex)
 
-        self.stackedWidget.setCurrentIndex(0)
+        self.stackedWidget.setCurrentIndex(2)
 
 
         QMetaObject.connectSlotsByName(Widget)

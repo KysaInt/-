@@ -1,5 +1,29 @@
 # This Python file uses the following encoding: utf-8
 import sys
+import os
+import subprocess
+
+def check_and_regenerate_ui():
+    """
+    Checks if the UI file needs to be regenerated from the .ui file and does so.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    ui_file = os.path.join(script_dir, "form.ui")
+    py_file = os.path.join(script_dir, "ui_form.py")
+
+    # Regenerate if the .py file doesn't exist or the .ui file is newer
+    if not os.path.exists(py_file) or os.path.getmtime(ui_file) > os.path.getmtime(py_file):
+        print(f"Regenerating {py_file} from {ui_file}...")
+        try:
+            subprocess.run(["pyside6-uic", ui_file, "-o", py_file], check=True)
+            print("UI file regenerated successfully.")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Error regenerating UI file: {e}")
+            print("Please ensure 'pyside6-uic' is in your system's PATH.")
+            sys.exit(1) # Exit if UI generation fails
+
+# Run the check before importing the UI module
+check_and_regenerate_ui()
 
 from PySide6.QtWidgets import QApplication, QWidget
 
