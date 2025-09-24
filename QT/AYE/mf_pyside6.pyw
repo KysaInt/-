@@ -119,11 +119,14 @@ def open_last_folder(folder_path):
 
 def generate_bar_chart_for_history(history_lines, for_log_file=False):
     if not history_lines:
-        return []
+        return ""
         
     parsed_lines = []
     valid_intervals = []
     
+    # 定义高亮颜色
+    highlight_color = "#00A0E9"
+
     for line in history_lines:
         # 检查并分离时间戳
         timestamp_part = ""
@@ -175,7 +178,9 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 'is_special': is_special
             })
         else:
-            parsed_lines.append({'original_line': line})
+            # 对于非标准行，进行HTML转义以避免解析错误
+            escaped_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            parsed_lines.append({'original_line': escaped_line})
     
     if valid_intervals:
         max_time = max(valid_intervals)
@@ -185,6 +190,8 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
     max_filename_length = 0
     for item in parsed_lines:
         if 'filename' in item:
+            # HTML转义文件名中的特殊字符
+            item['filename'] = item['filename'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             max_filename_length = max(max_filename_length, len(item['filename']))
     
     enhanced_lines = []
@@ -203,7 +210,11 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
             interval = item['interval']
             is_special = item['is_special']
             
-            padding = " " * (max_filename_length - len(filename))
+            # HTML转义
+            timestamp = timestamp.replace("<", "&lt;").replace(">", "&gt;")
+            time_part = time_part.replace("<", "&lt;").replace(">", "&gt;")
+
+            padding = "&nbsp;" * (max_filename_length - len(filename))
             
             if is_special or interval == 0:
                 bar = empty_char * bar_width
@@ -213,9 +224,13 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False):
                 filled_length = int(bar_width * ratio) if interval > 0 else 0
                 bar = fill_char * filled_length + empty_char * (bar_width - filled_length)
             
-            enhanced_lines.append(f"{timestamp}{filename}{padding}|{bar}|{time_part}")
+            # 添加颜色
+            colored_timestamp = f'<font color="{highlight_color}">{timestamp}</font>'
+            colored_bar = f'<font color="{highlight_color}">{bar}</font>'
+            
+            enhanced_lines.append(f"{colored_timestamp}{filename}{padding}|{colored_bar}|{time_part}")
     
-    return enhanced_lines
+    return "<br>".join(enhanced_lines)
 
 class Worker(QThread):
     update_signal = Signal(str, str)
@@ -362,6 +377,11 @@ class Worker(QThread):
         if moved_this_round > 0:
             timestamp = datetime.now().strftime('%H:%M:%S')
             self.log_signal.emit(f"[{timestamp}] 处理了 {moved_this_round} 个文件。")
+            if is_first_run:
+                is_first_run = False
+                is_second_run = True
+            elif is_second_run:
+                is_second_run = False
             
         total_time = time.time() - program_start
         first_run_moved = self.stats.get('first_run_moved', 0)
@@ -373,7 +393,7 @@ class Worker(QThread):
         
         stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染: {format_seconds(total_render_time)} | 运行: {format_seconds(total_time)} | {render_indicator}"
         
-        history_text = "\n".join(generate_bar_chart_for_history(history))
+        history_text = generate_bar_chart_for_history(history)
 
         self.update_signal.emit(history_text, stat_line)
 
@@ -424,7 +444,7 @@ class C4DMonitorWidget(QWidget):
         self.worker.start()
 
     def update_ui(self, history_text, status_text):
-        self.history_view.setPlainText(history_text)
+        self.history_view.setHtml(history_text)
         self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         self.status_label.setText(status_text)
 
