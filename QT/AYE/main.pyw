@@ -26,6 +26,7 @@ def check_and_regenerate_ui():
 check_and_regenerate_ui()
 
 from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QIcon
 
 # Important:
 # You need to run the following command to generate the ui_form.py file
@@ -41,7 +42,7 @@ class Widget(QWidget):
         super().__init__(parent)
         self.ui = Ui_Widget()
         self.ui.setupUi(self)
-        self.setWindowTitle("")
+        self.setWindowTitle("AYE Tools")
 
         # --- Module 1: C4D Monitor ---
         self.c4d_monitor = C4DMonitorWidget(self)
@@ -79,6 +80,13 @@ class Widget(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # 设置应用程序图标
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(script_dir, "icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     widget = Widget()
     widget.show()
     sys.exit(app.exec())
