@@ -34,7 +34,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from ui_form import Ui_Widget
 from mf_pyside6 import C4DMonitorWidget # Import the refactored widget
 from sequence_viewer import SequenceViewerWidget # 导入序列查看器小部件
-from rename_tool import RenameWidget # 导入新的重命名模块
+from rename_tool import ReplaceWidget # 导入新的重命名模块
 
 class Widget(QWidget):
     def __init__(self, parent=None):
@@ -65,8 +65,8 @@ class Widget(QWidget):
         page_2_layout.addWidget(self.sequence_viewer)
         self.ui.navigationList.item(1).setText("序列")
 
-        # --- Module 3: Rename Tool ---
-        self.rename_tool = RenameWidget(self)
+        # --- Module 3: Replace Tool ---
+        self.rename_tool = ReplaceWidget(self)
         page_3_layout = self.ui.page_3.layout()
         while page_3_layout.count():
             item = page_3_layout.takeAt(0)
@@ -74,7 +74,7 @@ class Widget(QWidget):
             if widget is not None:
                 widget.deleteLater()
         page_3_layout.addWidget(self.rename_tool)
-        self.ui.navigationList.item(2).setText("重命名")
+        self.ui.navigationList.item(2).setText("替换")
 
 
 if __name__ == "__main__":
