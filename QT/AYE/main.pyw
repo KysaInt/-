@@ -42,7 +42,7 @@ class Widget(QWidget):
         super().__init__(parent)
         self.ui = Ui_Widget()
         self.ui.setupUi(self)
-        self.setWindowTitle("AYE🔧")
+        self.setWindowTitle("🔧")
 
         # --- Module 1: C4D Monitor ---
         self.c4d_monitor = C4DMonitorWidget(self)
