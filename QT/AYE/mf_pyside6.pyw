@@ -172,11 +172,12 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             # 使用 item['filename'] 的原始长度进行计算
             max_filename_length = max(max_filename_length, len(item['filename']))
 
-    bar_width = 25
+        bar_width = 25
     enhanced_lines = []
     
     fill_char = '█'
-    empty_char = ' '
+    empty_char = '█' # Use the same character for empty, color will differentiate
+    empty_color = '#555555' # Dark gray for the empty part of the bar
     
     for item in parsed_lines:
         if 'original_line' in item:
@@ -191,26 +192,29 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
         is_special = item['is_special']
         
         # Bar generation
+        bar_html = ""
         if is_special or interval == 0:
-            bar = empty_char * bar_width
+            if not for_log_file:
+                bar_html = f'<span style="color: {empty_color};">{empty_char * bar_width}</span>'
+            else:
+                bar_html = ' ' * bar_width # Use spaces for plain text log
         else:
-            blocks = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█']
+            ratio = interval / max_time
+            filled_length = int(bar_width * ratio)
+            empty_length = bar_width - filled_length
             
-            # Calculate the exact width
-            exact_width = (interval / max_time) * bar_width
-            full_blocks_count = int(exact_width)
-            remainder = exact_width - full_blocks_count
-            
-            # Determine the partial block
-            partial_block_index = int(remainder * 8)
-            
-            bar = '█' * full_blocks_count
-            if partial_block_index > 0 and full_blocks_count < bar_width:
-                bar += blocks[partial_block_index - 1]
-            
-            # Pad with empty characters to ensure alignment
-            current_bar_length = len(bar)
-            bar += empty_char * (bar_width - current_bar_length)
+            if not for_log_file:
+                filled_part = ""
+                if filled_length > 0:
+                    filled_part = f'<span style="color: {color};">{fill_char * filled_length}</span>'
+                
+                empty_part = ""
+                if empty_length > 0:
+                    empty_part = f'<span style="color: {empty_color};">{empty_char * empty_length}</span>'
+                
+                bar_html = f"{filled_part}{empty_part}"
+            else:
+                bar_html = (fill_char * filled_length) + (' ' * empty_length)
 
         # Calculate padding
         # 使用 item['filename'] 的原始长度来计算填充
@@ -218,18 +222,16 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
         
         if for_log_file:
             padding = " " * padding_len
-            line_content = f"{item['filename']}{padding}|{bar}| {time_part}"
+            line_content = f"{item['filename']}{padding}|{bar_html}| {time_part}"
             enhanced_lines.append(f"{timestamp}{line_content}")
         else:
             # For rich text (HTML) in PySide
             padding = "&nbsp;" * padding_len
-            bar_html = bar.replace(' ', '&nbsp;')
             
-            # Color is applied to timestamp and bar, not the whole line
+            # Color is now part of bar_html
             if color:
                 colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
-                colored_bar = f'<span style="color: {color};">{bar_html}</span>'
-                line_content = f"{filename_html}{padding}|{colored_bar}| {time_part}"
+                line_content = f"{filename_html}{padding}|{bar_html}| {time_part}"
                 enhanced_lines.append(f"{colored_timestamp}{line_content}")
             else:
                 line_content = f"{filename_html}{padding}|{bar_html}| {time_part}"
