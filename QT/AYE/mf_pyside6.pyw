@@ -209,15 +209,16 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
         else:
             # For rich text (HTML) in PySide
             padding = "&nbsp;" * padding_len
+            bar_html = bar.replace(' ', '&nbsp;')
             
             # Color is applied to timestamp and bar, not the whole line
             if color:
                 colored_timestamp = f'<span style="color: {color};">{timestamp}</span>'
-                colored_bar = f'<span style="color: {color};">{bar}</span>'
+                colored_bar = f'<span style="color: {color};">{bar_html}</span>'
                 line_content = f"{filename_html}{padding}|{colored_bar}| {time_part}"
                 enhanced_lines.append(f"{colored_timestamp}{line_content}")
             else:
-                line_content = f"{filename_html}{padding}|{bar}| {time_part}"
+                line_content = f"{filename_html}{padding}|{bar_html}| {time_part}"
                 enhanced_lines.append(f"{timestamp}{line_content}")
 
     return enhanced_lines
