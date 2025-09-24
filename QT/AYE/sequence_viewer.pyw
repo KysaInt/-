@@ -265,18 +265,21 @@ class SequenceViewerWidget(QWidget):
         if self.scan_worker and self.scan_worker.isRunning():
             return # Don't start a new scan if one is already running
 
-        self.path_edit.setText(f"正在扫描: {self.current_path}...")
+        self.path_edit.setText(self.current_path)
         self.select_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
 
-        # Clear old cards before starting scan
-        self.clear_cards()
+        # Don't clear cards here to avoid flickering.
+        # self.clear_cards()
 
         self.scan_worker = ScanWorker(self.current_path, self.channel_suffixes)
         self.scan_worker.scan_complete.connect(self.on_scan_complete)
         self.scan_worker.start()
 
     def on_scan_complete(self, tree_data):
+        # Clear old cards first, then add new ones. This reduces flicker.
+        self.clear_cards()
+
         self.path_edit.setText(self.current_path)
         self.select_button.setEnabled(True)
         self.refresh_button.setEnabled(True)
@@ -383,10 +386,17 @@ class SequenceCard(QFrame):
         self.viz_widget.setMinimumHeight(20)
         layout.addWidget(self.viz_widget)
 
-        # Path
-        path_label = QLabel(f"<i>{self.data['path']}</i>")
-        path_label.setWordWrap(True)
-        layout.addWidget(path_label)
+    def mouseDoubleClickEvent(self, event):
+        """Opens the sequence folder on double-click."""
+        path = self.data.get('path')
+        if path and os.path.isdir(path):
+            try:
+                # Use os.startfile for a more platform-independent way to open the folder
+                os.startfile(os.path.realpath(path))
+            except Exception as e:
+                print(f"Error opening folder: {e}")
+        super().mouseDoubleClickEvent(event)
+
 
 class FrameVizWidget(QWidget):
     def __init__(self, min_frame, max_frame, found_frames, parent=None):
