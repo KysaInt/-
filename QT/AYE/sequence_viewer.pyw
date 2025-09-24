@@ -19,7 +19,9 @@ class CollapsibleBox(QWidget):
         super().__init__(parent)
         
         self.toggle_button = QPushButton(title)
-        self.toggle_button.setStyleSheet("text-align: left; font-weight: bold;")
+        font = self.toggle_button.font()
+        font.setBold(True)
+        self.toggle_button.setFont(font)
         self.toggle_button.setCheckable(True)
         self.toggle_button.setChecked(False)
 
@@ -410,9 +412,11 @@ class FrameVizWidget(QWidget):
         self.pixel_width = 2
         self.pixel_height = 2
         self.gap = 1
-        self.exist_color = self.palette().color(QPalette.Highlight)
-        self.missing_color = QColor("#555555")
-        self.bg_color = QColor("#2E2E2E")
+        
+        palette = self.palette()
+        self.exist_color = palette.color(QPalette.ColorRole.Highlight)
+        self.missing_color = palette.color(QPalette.ColorRole.Mid)
+        self.bg_color = palette.color(QPalette.ColorRole.Base)
 
         # 初始计算一次高度
         self._update_layout(self.width())
