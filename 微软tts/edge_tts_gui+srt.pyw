@@ -74,6 +74,24 @@ class TTSWorker(QThread):
             self.progress.emit(f"    请确保您的 edge-tts 库是最新版本 (pip install --upgrade edge-tts)")
             return None
 
+    def create_word_boundary_log(self, audio_path, subtitles):
+        """创建包含词边界时间戳的日志文件"""
+        log_path = os.path.splitext(audio_path)[0] + "_word_boundaries.txt"
+        try:
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write(f"词边界日志: {os.path.basename(audio_path)}\n")
+                f.write("========================================\n\n")
+                f.write(f"{'词语':<15} | {'开始时间 (秒)':<20} | {'持续时间 (秒)':<20}\n")
+                f.write(f"{'-'*15} | {'-'*20} | {'-'*20}\n")
+                for sub in subtitles:
+                    offset_s = sub['offset'] / 1_000_000
+                    duration_s = sub['duration'] / 1_000_000
+                    text = sub['text']
+                    f.write(f"{text:<14} | {offset_s:<20.6f} | {duration_s:<20.6f}\n")
+            self.progress.emit(f"    ✓ [{self.voice}] 词边界日志已保存到 {os.path.basename(log_path)}")
+        except Exception as e:
+            self.progress.emit(f"    ✗ [{self.voice}] 创建词边界日志失败: {e}")
+
     async def main_task(self):
         dir_path = os.path.dirname(os.path.abspath(__file__))
         files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
@@ -99,6 +117,10 @@ class TTSWorker(QThread):
                 output_path = os.path.join(dir_path, output_file)
                 
                 subtitles = await self.tts_async(text, self.voice, output_path)
+
+                if subtitles:
+                    # 新增：创建词边界日志
+                    self.create_word_boundary_log(output_path, subtitles)
 
                 if self.generate_srt and subtitles:
                     processed_subs = self._process_subtitles(subtitles)
