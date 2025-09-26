@@ -165,6 +165,8 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             parsed_lines.append({'original_line': line})
     
     max_time = max(valid_intervals) if valid_intervals else 1
+    min_time = min(valid_intervals) if valid_intervals else 0
+    range_time = max_time - min_time if valid_intervals and max_time > min_time else 1
     
     max_filename_length = 0
     for item in parsed_lines:
@@ -199,7 +201,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             else:
                 bar_html = ' ' * bar_width # Use spaces for plain text log
         else:
-            ratio = interval / max_time
+            ratio = (interval - min_time) / range_time if range_time > 0 else 0
             filled_length = int(bar_width * ratio)
             empty_length = bar_width - filled_length
             
