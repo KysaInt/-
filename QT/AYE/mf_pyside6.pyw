@@ -201,7 +201,7 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             else:
                 bar_html = ' ' * bar_width # Use spaces for plain text log
         else:
-            ratio = (interval - min_time) / range_time if range_time > 0 else 0
+            ratio = interval / max_time if max_time > 0 else 0
             filled_length = int(bar_width * ratio)
             empty_length = bar_width - filled_length
             
