@@ -735,330 +735,86 @@ class TTSApp(QWidget):
             self._handle_star_click(item)
 
     def _handle_checkbox_click(self, item):
-        """处理复选框点击"""
-        item_text = item.text(2)
-        if not item_text:
-            return
-
-        # 检查是否在星标列表中
+        """处理复选框点击（仅同步复选框，不影响星标）"""
+        state = item.checkState(0)
+        # 递归同步所有子项复选框
+        self._set_checkbox_recursive(item, state)
+        # 如果是星标列表项，主列表同步
         parent = item.parent()
         is_in_starred_list = parent and parent.text(2).startswith("★ 星标列表")
-
         if is_in_starred_list:
-            # 星标列表中的复选框点击 - 同步到主列表
-            self._sync_checkbox_from_starred_to_main(item)
+            self._update_main_list_checkboxes_from_starred(item, state)
         else:
-            # 主列表中的复选框点击 - 同步到星标列表
             self._sync_checkbox_from_main_to_starred(item)
 
     def _handle_star_click(self, item):
-        """处理星标点击"""
         voice_name = None
         for name, it in self.voice_items.items():
             if it == item:
                 voice_name = name
                 break
-        
-        # 检查是否是星标列表内的项目
         if voice_name and voice_name.startswith("starred_"):
-            # 从星标列表中移除
             actual_voice_name = voice_name.replace("starred_", "")
             if actual_voice_name in self.starred_voices:
                 self.starred_voices.remove(actual_voice_name)
-                # 更新原始项的星标显示和复选框状态
                 original_item = self.voice_items.get(actual_voice_name)
                 if original_item:
                     original_item.setText(1, "☆")
-                    original_item.setCheckState(0, Qt.Unchecked)
+                self._set_star_recursive(item, "☆")  # 递归取消所有子项星标
+                self._update_parent_star_state(item)
                 self.update_starred_list()
         elif voice_name and not voice_name.startswith("starred_"):
-            # 语音层级的星标切换
             if voice_name in self.starred_voices:
                 self.starred_voices.remove(voice_name)
                 item.setText(1, "☆")
-                item.setCheckState(0, Qt.Unchecked)
+                self._set_star_recursive(item, "☆")
+                self._update_parent_star_state(item)
             else:
                 self.starred_voices.add(voice_name)
                 item.setText(1, "★")
-                item.setCheckState(0, Qt.Checked)
+                self._set_star_recursive(item, "★")
+                self._update_parent_star_state(item)
             self.update_starred_list()
         else:
-            # 处理洲和语言层级的星标切换
-            item_text = item.text(2)
-            if item_text:
-                # 检查是否在星标列表中
-                parent = item.parent()
-                if parent and parent.text(2).startswith("★ 星标列表"):
-                    # 星标列表中的洲或语言层级
-                    if item.text(1) == "★":
-                        item.setText(1, "☆")
-                        item.setCheckState(0, Qt.Unchecked)
-                        # 递归取消所有子项的星标和复选框
-                        self._set_star_recursive(item, "☆")
-                        self._set_checkbox_recursive(item, Qt.Unchecked)
-                        # 更新主列表中的对应项
-                        self._update_main_list_stars_from_starred(item, "☆")
-                        self._update_main_list_checkboxes_from_starred(item, Qt.Unchecked)
-                    else:
-                        item.setText(1, "★")
-                        item.setCheckState(0, Qt.Checked)
-                        # 递归设置所有子项的星标和复选框
-                        self._set_star_recursive(item, "★")
-                        self._set_checkbox_recursive(item, Qt.Checked)
-                        # 更新主列表中的对应项
-                        self._update_main_list_stars_from_starred(item, "★")
-                        self._update_main_list_checkboxes_from_starred(item, Qt.Checked)
-                else:
-                    # 主列表中的洲或语言层级
-                    if item.text(1) == "★":
-                        item.setText(1, "☆")
-                        item.setCheckState(0, Qt.Unchecked)
-                        # 递归取消所有子项的星标和复选框
-                        self._set_star_recursive(item, "☆")
-                        self._set_checkbox_recursive(item, Qt.Unchecked)
-                        # 更新starred_voices集合
-                        self._update_starred_voices_from_item(item)
-                        # 刷新星标列表
-                        self.update_starred_list()
-                    else:
-                        item.setText(1, "★")
-                        item.setCheckState(0, Qt.Checked)
-                        # 递归设置所有子项的星标和复选框
-                        self._set_star_recursive(item, "★")
-                        self._set_checkbox_recursive(item, Qt.Checked)
-                        # 如果是洲或语言层级，需要更新starred_voices集合
-                        self._update_starred_voices_from_item(item)
-                        # 刷新星标列表
-                        self.update_starred_list()
+            # 洲/语言层级星标递归影响所有子项
+            if item.text(1) == "★":
+                item.setText(1, "☆")
+                self._set_star_recursive(item, "☆")
+                self._update_parent_star_state(item)
+            else:
+                item.setText(1, "★")
+                self._set_star_recursive(item, "★")
+                self._update_parent_star_state(item)
+            self.update_starred_list()
 
     def _set_star_recursive(self, item, star_symbol):
-        """递归设置所有子项的星标"""
         for i in range(item.childCount()):
             child = item.child(i)
             child.setText(1, star_symbol)
-            # 递归处理子项的子项
             self._set_star_recursive(child, star_symbol)
-
-    def _set_checkbox_recursive(self, item, check_state):
-        """递归设置所有子项的复选框状态"""
-        for i in range(item.childCount()):
-            child = item.child(i)
-            child.setCheckState(0, check_state)
-            # 递归处理子项的子项
-            self._set_checkbox_recursive(child, check_state)
-
-    def _sync_checkbox_from_starred_to_main(self, starred_item):
-        """从星标列表同步复选框状态到主列表"""
-        item_text = starred_item.text(2)
-        check_state = starred_item.checkState(0)
-        
-        # 查找主列表中的对应项并同步
-        root = self.voice_tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            continent_item = root.child(i)
-            if continent_item.text(2) == item_text:
-                # 找到对应的洲项
-                continent_item.setCheckState(0, check_state)
-                self._set_checkbox_recursive(continent_item, check_state)
-                return
-            elif continent_item.text(2).startswith("★ 星标列表"):
-                continue  # 跳过星标列表
-            else:
-                # 检查洲下的语言项
-                for j in range(continent_item.childCount()):
-                    lang_item = continent_item.child(j)
-                    if lang_item.text(2) == item_text:
-                        # 找到对应的语言项
-                        lang_item.setCheckState(0, check_state)
-                        self._set_checkbox_recursive(lang_item, check_state)
-                        return
-
-    def _sync_checkbox_from_main_to_starred(self, main_item):
-        """从主列表同步复选框状态到星标列表"""
-        item_text = main_item.text(2)
-        check_state = main_item.checkState(0)
-        
-        # 查找星标列表中的对应项并同步
-        root = self.voice_tree.invisibleRootItem()
-        starred_root = None
-        for i in range(root.childCount()):
-            item = root.child(i)
-            if item.text(2).startswith("★ 星标列表"):
-                starred_root = item
-                break
-        
-        if starred_root:
-            # 递归查找星标列表中的对应项
-            self._find_and_sync_starred_item(starred_root, item_text, check_state)
-
-    def _find_and_sync_starred_item(self, item, target_text, check_state):
-        """递归查找并同步星标列表中的项"""
-        if item.text(2) == target_text:
-            item.setCheckState(0, check_state)
-            self._set_checkbox_recursive(item, check_state)
-            return True
-        
-        for i in range(item.childCount()):
-            if self._find_and_sync_starred_item(item.child(i), target_text, check_state):
-                return True
-        return False
-
-    def _update_main_list_checkboxes_from_starred(self, starred_item, check_state):
-        """根据星标列表中的项更新主列表中的复选框状态"""
-        item_text = starred_item.text(2)
-        
-        # 查找主列表中的对应项
-        root = self.voice_tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            continent_item = root.child(i)
-            if continent_item.text(2) == item_text:
-                # 找到对应的洲项
-                continent_item.setCheckState(0, check_state)
-                self._set_checkbox_recursive(continent_item, check_state)
-                return
-            elif continent_item.text(2).startswith("★ 星标列表"):
-                continue  # 跳过星标列表
-            else:
-                # 检查洲下的语言项
-                for j in range(continent_item.childCount()):
-                    lang_item = continent_item.child(j)
-                    if lang_item.text(2) == item_text:
-                        # 找到对应的语言项
-                        lang_item.setCheckState(0, check_state)
-                        self._set_checkbox_recursive(lang_item, check_state)
-                        return
-
-    def _update_starred_voices_from_item(self, item):
-        """根据项的状态更新starred_voices集合"""
-        star_symbol = item.text(1)
-        is_starred = (star_symbol == "★")
-        
-        # 递归处理所有子项
-        self._update_starred_voices_recursive(item, is_starred)
-
-    def _update_starred_voices_recursive(self, item, is_starred):
-        """递归更新starred_voices集合"""
-        for i in range(item.childCount()):
-            child = item.child(i)
-            # 检查是否是语音项（有voice_name的项）
+            # 递归更新starred_voices集合
             voice_name = None
             for name, it in self.voice_items.items():
                 if it == child:
                     voice_name = name
                     break
-            
             if voice_name and not voice_name.startswith("starred_"):
-                if is_starred:
-                    if voice_name not in self.starred_voices:
-                        self.starred_voices.add(voice_name)
+                if star_symbol == "★":
+                    self.starred_voices.add(voice_name)
                 else:
-                    if voice_name in self.starred_voices:
-                        self.starred_voices.remove(voice_name)
-            
-            # 递归处理子项
-            self._update_starred_voices_recursive(child, is_starred)
+                    self.starred_voices.discard(voice_name)
 
-    def _update_main_list_stars_from_starred(self, starred_item, star_symbol):
-        """根据星标列表中的项更新主列表中的对应项"""
-        item_text = starred_item.text(2)
-        
-        # 查找主列表中的对应项
-        root = self.voice_tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            continent_item = root.child(i)
-            if continent_item.text(2) == item_text:
-                # 找到对应的洲项
-                continent_item.setText(1, star_symbol)
-                self._set_star_recursive(continent_item, star_symbol)
-                return
-            elif continent_item.text(2).startswith("★ 星标列表"):
-                continue  # 跳过星标列表
-            else:
-                # 检查洲下的语言项
-                for j in range(continent_item.childCount()):
-                    lang_item = continent_item.child(j)
-                    if lang_item.text(2) == item_text:
-                        # 找到对应的语言项
-                        lang_item.setText(1, star_symbol)
-                        self._set_star_recursive(lang_item, star_symbol)
-                        return
-
-    def update_starred_list(self):
-        # 清除旧的星标列表
-        root = self.voice_tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            item = root.child(i)
-            if item.text(2).startswith("★ 星标列表"):
-                root.removeChild(item)
-                break
-        
-        if self.starred_voices:
-            # 将星标列表插入到第一个位置
-            starred_item = QTreeWidgetItem()
-            starred_item.setText(0, "")
-            starred_item.setText(1, "")
-            starred_item.setText(2, "★ 星标列表")
-            starred_item.setText(3, "")
-            starred_item.setText(4, "")
-            starred_item.setText(5, "")
-            starred_item.setFlags(starred_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-            starred_item.setCheckState(0, Qt.Unchecked)
-            
-            root.insertChild(0, starred_item)  # 插入到第一个位置
-            
-            # 按照洲-语言的方式组织星标列表
-            starred_by_continent = defaultdict(lambda: defaultdict(list))
-            
-            for voice in self.starred_voices:
-                if voice in self.voice_items:
-                    original_item = self.voice_items[voice]
-                    # 从原始项的父级结构中获取洲、语言信息
-                    lang_item = original_item.parent()
-                    if lang_item:
-                        continent_item = lang_item.parent()
-                        if continent_item:
-                            continent = continent_item.text(2)  # 名称在第2列
-                            lang_code = lang_item.text(2).split(' (')[0]  # 提取语言代码，如"zh-CN"
-                            starred_by_continent[continent][lang_code].append((voice, original_item))
-            
-            # 创建星标列表的树形结构
-            for continent in sorted(starred_by_continent.keys()):
-                continent_starred = QTreeWidgetItem(starred_item, ["", "", continent, "", "", ""])
-                continent_starred.setFlags(continent_starred.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-                continent_starred.setCheckState(0, Qt.Unchecked)
-                
-                for lang_code in sorted(starred_by_continent[continent].keys()):
-                    # 获取对应的语言显示名称
-                    lang_display = ""
-                    for j in range(root.childCount()):
-                        cont_item = root.child(j)
-                        if cont_item.text(2) == continent:
-                            for k in range(cont_item.childCount()):
-                                lang_item = cont_item.child(k)
-                                if lang_item.text(2).startswith(lang_code):
-                                    lang_display = lang_item.text(2)
-                                    break
-                            break
-                    
-                    if lang_display:
-                        lang_starred = QTreeWidgetItem(continent_starred, ["", "", lang_display, "", "", ""])
-                        lang_starred.setFlags(lang_starred.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-                        lang_starred.setCheckState(0, Qt.Unchecked)
-                        
-                        for voice, original_item in sorted(starred_by_continent[continent][lang_code], key=lambda x: x[0]):
-                            # 复制项到星标列表
-                            child = QTreeWidgetItem(lang_starred, [
-                                "",
-                                "★",
-                                original_item.text(2),
-                                original_item.text(3),
-                                original_item.text(4),
-                                original_item.text(5)
-                            ])
-                            child.setFlags(child.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-                            child.setCheckState(0, Qt.Unchecked)
-                            # 关联到原始项
-                            self.voice_items[f"starred_{voice}"] = child
+    def _update_parent_star_state(self, item):
+        parent = item.parent()
+        if not parent:
+            return
+        all_starred = all(parent.child(i).text(1) == "★" for i in range(parent.childCount()))
+        if all_starred:
+            parent.setText(1, "★")
+        else:
+            parent.setText(1, "☆")
+        # 递归向上更新
+        self._update_parent_star_state(parent)
 
     def get_selected_voices(self):
         selected = []
