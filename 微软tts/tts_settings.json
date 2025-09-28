@@ -4,8 +4,5 @@
   "extra_line_output": true,
   "line_length": 30,
   "subtitle_rule": "rule_3",
-  "selected_voices": [],
-  "starred_voices": [
-    "wuu-CN-YunzheNeural"
-  ]
+  "selected_voices": []
 }
