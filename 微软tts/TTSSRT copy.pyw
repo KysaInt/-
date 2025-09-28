@@ -516,22 +516,19 @@ class TTSApp(QWidget):
         self.layout = QVBoxLayout(self)
 
         self.label_voice = QLabel("选择语音模型 (可多选):")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索语音模型...")
+        self.search_input.textChanged.connect(self.filter_voices)
         self.voice_tree = QTreeWidget()
-        self.voice_tree.setHeaderLabels(["⭐", "名称", "性别", "类别", "个性"])
+        self.voice_tree.setHeaderLabels(["名称", "性别", "类别", "个性", "收藏"])
         self.voice_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.voice_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.voice_tree.setSortingEnabled(True)
         header = self.voice_tree.header()
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
-        self.voice_tree.sortByColumn(1, Qt.AscendingOrder)  # 按名称排序
+        self.voice_tree.sortByColumn(0, Qt.AscendingOrder)
         self.voice_items = {}
-        self.starred_voices = set()  # 存储星标标记的语音模型
-        
-        # 连接星标点击事件
-        self.voice_tree.itemClicked.connect(self.handle_item_clicked)
-        # 连接复选框状态变化事件
-        self.voice_tree.itemChanged.connect(self.handle_item_changed)
+        self.favorite_checkboxes = {}
         self.populate_voices()
 
         # 标点转换功能
@@ -577,6 +574,12 @@ class TTSApp(QWidget):
         self.options_layout.addWidget(self.subtitle_rule_combo)
         self.options_layout.addWidget(self.line_length_label)
         self.options_layout.addWidget(self.line_length_input)
+        
+        self.select_favorites_button = QPushButton("选择收藏")
+        self.select_favorites_button.setToolTip("选择所有收藏的语音模型")
+        self.select_favorites_button.clicked.connect(self.select_favorite_voices)
+        self.options_layout.addWidget(self.select_favorites_button)
+        
         self.options_layout.addStretch()
         
         self.start_button = QPushButton("开始转换")
@@ -594,6 +597,7 @@ class TTSApp(QWidget):
         self.log_view.setReadOnly(True)
 
         self.layout.addWidget(self.label_voice)
+        self.layout.addWidget(self.search_input)
         self.layout.addWidget(self.voice_tree)
         self.layout.addLayout(self.punctuation_layout)
         self.layout.addLayout(self.options_layout)
@@ -604,146 +608,6 @@ class TTSApp(QWidget):
 
         self._loading_settings = False
         self.load_settings()
-        
-    def handle_item_clicked(self, item, column):
-        # 只处理星标列点击
-        if column != 0:
-            return
-            
-        # 检查是否有父节点，没有父节点的是根节点（默认列表或星标列表）
-        if not item.parent() or item.parent() == self.voice_tree.invisibleRootItem():
-            return
-            
-        # 检查是否是第三级节点（语音名称节点），只有第三级节点能够标星
-        if item.parent() and item.parent().parent() and item.parent().parent().parent():
-            is_voice_item = True
-        else:
-            is_voice_item = False
-            
-        # 只处理语音项的星标点击
-        if not is_voice_item:
-            return
-            
-        voice_name = item.text(1)  # 语音名称在第二列
-        if not voice_name:
-            return
-            
-        # 切换星标状态
-        is_starred = not item.data(0, Qt.UserRole)
-        item.setData(0, Qt.UserRole, is_starred)
-        
-        # 更新显示
-        item.setText(0, "★" if is_starred else "☆")
-        
-        # 更新星标集合
-        if is_starred:
-            self.starred_voices.add(voice_name)
-            self.add_to_starred_list(item)
-        else:
-            self.starred_voices.discard(voice_name)
-            self.remove_from_starred_list(voice_name)
-            
-        # 保存设置
-        self.save_settings()
-        
-    def add_to_starred_list(self, default_item):
-        """将一个语音模型添加到星标列表"""
-        voice_name = default_item.text(1)
-        
-        # 检查是否已经存在于星标列表
-        for i in range(self.starred_list.childCount()):
-            if self.starred_list.child(i).text(1) == voice_name:
-                return  # 已存在，不重复添加
-                
-        # 复制项目属性到星标列表
-        starred_item = QTreeWidgetItem(self.starred_list)
-        for col in range(default_item.columnCount()):
-            starred_item.setText(col, default_item.text(col))
-            
-        # 设置复选框状态同步
-        starred_item.setFlags(starred_item.flags() | Qt.ItemIsUserCheckable)
-        starred_item.setCheckState(0, default_item.checkState(0))
-        starred_item.setData(0, Qt.UserRole, True)  # 标记为已星标
-        
-        # 保存引用以便同步
-        self.voice_items[voice_name + "_starred"] = starred_item
-        
-    def remove_from_starred_list(self, voice_name):
-        """从星标列表中移除一个语音模型"""
-        for i in range(self.starred_list.childCount()):
-            item = self.starred_list.child(i)
-            if item.text(1) == voice_name:
-                self.starred_list.removeChild(item)
-                if voice_name + "_starred" in self.voice_items:
-                    del self.voice_items[voice_name + "_starred"]
-                break
-                
-    def handle_item_changed(self, item, column):
-        """处理项目状态变化，主要是复选框状态"""
-        if column != 0 or item.parent() is None:
-            return
-            
-        # 如果是语音项（第三级节点）
-        if item.parent() and item.parent().parent():
-            voice_name = item.text(1)
-            
-            # 如果是默认列表中的项目
-            if self.is_in_default_list(item) and voice_name in self.starred_voices:
-                # 同步到星标列表
-                self.sync_to_starred_list(voice_name, item.checkState(0))
-            # 如果是星标列表中的项目
-            elif self.is_in_starred_list(item):
-                # 同步到默认列表
-                self.sync_to_default_list(voice_name, item.checkState(0))
-    
-    def is_in_default_list(self, item):
-        """检查项目是否在默认列表中"""
-        parent = item
-        while parent.parent():
-            parent = parent.parent()
-        return parent == self.default_list
-        
-    def is_in_starred_list(self, item):
-        """检查项目是否在星标列表中"""
-        parent = item
-        while parent.parent():
-            parent = parent.parent()
-        return parent == self.starred_list
-    
-    def sync_to_starred_list(self, voice_name, check_state):
-        """同步选中状态到星标列表"""
-        # 查找星标列表中的对应项
-        for i in range(self.starred_list.childCount()):
-            item = self.starred_list.child(i)
-            if item.text(1) == voice_name:
-                if item.checkState(0) != check_state:
-                    # 暂时断开信号连接，避免循环调用
-                    self.voice_tree.itemChanged.disconnect(self.handle_item_changed)
-                    item.setCheckState(0, check_state)
-                    self.voice_tree.itemChanged.connect(self.handle_item_changed)
-                break
-                
-    def sync_to_default_list(self, voice_name, check_state):
-        """同步选中状态到默认列表"""
-        # 在默认列表中查找对应的语音项
-        default_item = self.find_voice_item_in_default_list(voice_name)
-        if default_item and default_item.checkState(0) != check_state:
-            # 暂时断开信号连接，避免循环调用
-            self.voice_tree.itemChanged.disconnect(self.handle_item_changed)
-            default_item.setCheckState(0, check_state)
-            self.voice_tree.itemChanged.connect(self.handle_item_changed)
-    
-    def find_voice_item_in_default_list(self, voice_name):
-        """在默认列表中查找特定语音项"""
-        for i in range(self.default_list.childCount()):
-            region_item = self.default_list.child(i)
-            for j in range(region_item.childCount()):
-                lang_item = region_item.child(j)
-                for k in range(lang_item.childCount()):
-                    voice_item = lang_item.child(k)
-                    if voice_item.text(1) == voice_name:
-                        return voice_item
-        return None
 
         self.log_view.append("===============================")
         self.log_view.append(" 微软 Edge TTS 文本转语音助手")
@@ -753,6 +617,9 @@ class TTSApp(QWidget):
         self.log_view.append("3. 点击“开始转换”按钮启动")
         self.log_view.append("4. 可选：勾选“同步生成 SRT 字幕文件”并调整参数")
         self.log_view.append("")
+
+    def get_settings_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts_settings.json")
 
     def update_option_states(self, *_):
         default_output_enabled = self.default_output_checkbox.isChecked()
@@ -781,17 +648,6 @@ class TTSApp(QWidget):
         try:
             self.voice_tree.clear()
             self.voice_items.clear()
-            
-            # 创建默认列表作为根节点
-            self.default_list = QTreeWidgetItem(self.voice_tree, ["", "默认列表"])
-            self.default_list.setFlags(self.default_list.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-            self.default_list.setCheckState(0, Qt.Unchecked)
-            
-            # 创建星标列表作为根节点
-            self.starred_list = QTreeWidgetItem(self.voice_tree, ["", "⭐ 星标列表"])
-            self.starred_list.setFlags(self.starred_list.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-            self.starred_list.setCheckState(0, Qt.Unchecked)
-            self.starred_list.setExpanded(True)  # 默认展开星标列表
 
             # 语言代码到中文名称的映射
             language_names = {
@@ -892,73 +748,101 @@ class TTSApp(QWidget):
 
             # 按区域和语言创建树形结构
             for region, lang_map in sorted(voices_by_region_lang.items()):
-                region_item = QTreeWidgetItem(self.default_list, ["", region])
+                region_item = QTreeWidgetItem(self.voice_tree, [region])
                 region_item.setFlags(region_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
                 region_item.setCheckState(0, Qt.Unchecked)
 
                 for lang_display, voice_rows in sorted(lang_map.items()):
-                    lang_item = QTreeWidgetItem(region_item, ["", lang_display])
+                    lang_item = QTreeWidgetItem(region_item, [lang_display])
                     lang_item.setFlags(lang_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
                     lang_item.setCheckState(0, Qt.Unchecked)
 
                     for parts in sorted(voice_rows, key=lambda row: row[0]):
-                        # 插入星标按钮和语音信息
-                        voice_data = ["☆"] + parts[:4]  # 使用☆表示未标记状态
-                        child = QTreeWidgetItem(lang_item, voice_data)
+                        child = QTreeWidgetItem(lang_item, parts[:4])
                         child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                         child.setCheckState(0, Qt.Unchecked)
-                        # 保存对应的星标状态
-                        child.setData(0, Qt.UserRole, False)  # 默认未标星
                         self.voice_items[parts[0]] = child
+                        
+                        # 添加收藏checkbox
+                        favorite_checkbox = QCheckBox()
+                        favorite_checkbox.setToolTip("标记为收藏")
+                        favorite_checkbox.stateChanged.connect(lambda state, voice=parts[0]: self.toggle_favorite(voice, state))
+                        self.voice_tree.setItemWidget(child, 4, favorite_checkbox)
+                        self.favorite_checkboxes[parts[0]] = favorite_checkbox
 
-            # 默认展开默认列表和中文区域项目
-            self.default_list.setExpanded(True)
-            for i in range(self.default_list.childCount()):
-                item = self.default_list.child(i)
-                if item.text(1) == "亚洲":
+            # 默认展开中文区域项目
+            for i in range(self.voice_tree.topLevelItemCount()):
+                item = self.voice_tree.topLevelItem(i)
+                if item.text(0) == "亚洲":
                     item.setExpanded(True)
                     # 展开亚洲区域内的中文语言
                     for j in range(item.childCount()):
                         lang_item = item.child(j)
-                        if 'zh' in lang_item.text(1).lower():
+                        if 'zh' in lang_item.text(0).lower():
                             lang_item.setExpanded(True)
 
         except Exception as e:
             self.log_view.append(f"获取语音模型列表失败: {e}")
             # 提供备用选项
-            fallback_region = QTreeWidgetItem(self.default_list, ["", "亚洲"])
+            fallback_region = QTreeWidgetItem(self.voice_tree, ["亚洲"])
             fallback_region.setFlags(fallback_region.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
             fallback_region.setCheckState(0, Qt.Unchecked)
             
-            fallback_lang = QTreeWidgetItem(fallback_region, ["", "zh-CN (中文)"])
+            fallback_lang = QTreeWidgetItem(fallback_region, ["zh-CN (中文)"])
             fallback_lang.setFlags(fallback_lang.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
             fallback_lang.setCheckState(0, Qt.Unchecked)
             
             for voice in ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-YunjianNeural"]:
-                child = QTreeWidgetItem(fallback_lang, ["☆", voice, "", "", ""])
+                child = QTreeWidgetItem(fallback_lang, [voice, "", "", ""])
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.Unchecked)
-                child.setData(0, Qt.UserRole, False)  # 默认未标星
                 self.voice_items[voice] = child
+                
+                # 添加收藏checkbox
+                favorite_checkbox = QCheckBox()
+                favorite_checkbox.setToolTip("标记为收藏")
+                favorite_checkbox.stateChanged.connect(lambda state, voice=voice: self.toggle_favorite(voice, state))
+                self.voice_tree.setItemWidget(child, 4, favorite_checkbox)
+                self.favorite_checkboxes[voice] = favorite_checkbox
 
-    def get_selected_voices(self):
+    def filter_voices(self, text):
+        text = text.lower().strip()
+        root = self.voice_tree.invisibleRootItem()
+        
+        def filter_item(item):
+            if item.childCount() == 0:  # 叶子节点（语音模型）
+                visible = text in item.text(0).lower() or not text
+                item.setHidden(not visible)
+                return visible
+            else:  # 父节点（区域或语言）
+                has_visible_child = False
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    if filter_item(child):
+                        has_visible_child = True
+                item.setHidden(not has_visible_child and bool(text))
+                return has_visible_child
+        
+        for i in range(root.childCount()):
+            filter_item(root.child(i))
         selected = []
-        # 我们只需要检查默认列表中的选择项
-        default_list = self.default_list
-        for i in range(default_list.childCount()):
-            region_item = default_list.child(i)
+        root = self.voice_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            region_item = root.child(i)
             for j in range(region_item.childCount()):
                 lang_item = region_item.child(j)
                 for k in range(lang_item.childCount()):
                     voice_item = lang_item.child(k)
                     if voice_item.checkState(0) == Qt.Checked:
-                        selected.append(voice_item.text(1))
+                        selected.append(voice_item.text(0))
             # 兼容回退节点
             if region_item.childCount() == 0 and region_item.checkState(0) == Qt.Checked:
                 selected.append(region_item.text(0))
         return selected
 
-    def get_settings_path(self) -> str:
+    def toggle_favorite(self, voice, state):
+        # 收藏状态改变时保存设置
+        self.save_settings()
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts_settings.json")
 
     def load_settings(self) -> None:
@@ -989,12 +873,11 @@ class TTSApp(QWidget):
             if index != -1:
                 self.subtitle_rule_combo.setCurrentIndex(index)
 
-            # 加载星标语音
-            self.starred_voices = set(data.get("starred_voices", []))
-            
-            # 加载选中的语音
             selected_voices = data.get("selected_voices", [])
             self.apply_saved_voice_selection(selected_voices)
+            
+            favorite_voices = data.get("favorite_voices", [])
+            self.apply_saved_favorites(favorite_voices)
         finally:
             self._loading_settings = False
             self.update_option_states()
@@ -1015,7 +898,7 @@ class TTSApp(QWidget):
             "line_length": max(5, min(120, line_length)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
-            "starred_voices": list(self.starred_voices),  # 保存星标语音列表
+            "favorite_voices": self.get_favorite_voices(),
         }
 
         try:
@@ -1024,61 +907,77 @@ class TTSApp(QWidget):
         except OSError as exc:
             self.log_view.append(f"⚠ 保存设置失败: {exc}")
 
-    def apply_saved_voice_selection(self, voices: list[str]) -> None:
-        # 先全部清空复选框
-        self.clear_all_checkboxes()
+    def get_favorite_voices(self):
+        favorites = []
+        for voice, checkbox in self.favorite_checkboxes.items():
+            if checkbox.isChecked():
+                favorites.append(voice)
+        return favorites
 
-        # 设置选中状态
+    def get_selected_voices(self):
+        selected = []
+        root = self.voice_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            region_item = root.child(i)
+            for j in range(region_item.childCount()):
+                lang_item = region_item.child(j)
+                for k in range(lang_item.childCount()):
+                    voice_item = lang_item.child(k)
+                    if voice_item.checkState(0) == Qt.Checked:
+                        selected.append(voice_item.text(0))
+        return selected
+
+    def apply_saved_voice_selection(self, voices: list[str]) -> None:
+        # 先全部清空
+        root = self.voice_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            lang_item = root.child(i)
+            lang_item.setCheckState(0, Qt.Unchecked)
+            for j in range(lang_item.childCount()):
+                gender_item = lang_item.child(j)
+                gender_item.setCheckState(0, Qt.Unchecked)
+                for k in range(gender_item.childCount()):
+                    voice_item = gender_item.child(k)
+                    voice_item.setCheckState(0, Qt.Unchecked)
+
         for voice in voices:
             item = self.voice_items.get(voice)
             if item is not None:
                 item.setCheckState(0, Qt.Checked)
-                
-        # 应用星标
-        self.apply_saved_starred_voices()
-        
-    def clear_all_checkboxes(self):
-        """清空所有复选框状态"""
-        # 清除默认列表中的复选框
-        for i in range(self.default_list.childCount()):
-            region_item = self.default_list.child(i)
-            region_item.setCheckState(0, Qt.Unchecked)
-            for j in range(region_item.childCount()):
-                lang_item = region_item.child(j)
-                lang_item.setCheckState(0, Qt.Unchecked)
-                for k in range(lang_item.childCount()):
-                    voice_item = lang_item.child(k)
-                    voice_item.setCheckState(0, Qt.Unchecked)
-        
-        # 清除星标列表中的复选框
-        for i in range(self.starred_list.childCount()):
-            item = self.starred_list.child(i)
-            item.setCheckState(0, Qt.Unchecked)
-            
-    def apply_saved_starred_voices(self):
-        """应用已保存的星标语音"""
-        # 断开信号连接，避免触发事件
-        self.voice_tree.itemClicked.disconnect(self.handle_item_clicked)
-        
-        # 清空当前星标列表
-        self.starred_list.takeChildren()
-        
-        # 对默认列表中的每个语音项设置星标状态
-        for voice_name in self.starred_voices:
-            item = self.voice_items.get(voice_name)
-            if item is not None:
-                # 设置星标状态
-                item.setText(0, "★")
-                item.setData(0, Qt.UserRole, True)
-                # 添加到星标列表
-                self.add_to_starred_list(item)
-                
-        # 恢复信号连接
-        self.voice_tree.itemClicked.connect(self.handle_item_clicked)
+
+    def apply_saved_favorites(self, voices: list[str]) -> None:
+        for voice in voices:
+            checkbox = self.favorite_checkboxes.get(voice)
+            if checkbox is not None:
+                checkbox.setChecked(True)
 
     def closeEvent(self, event):
         self.save_settings()
         super().closeEvent(event)
+
+    def select_favorite_voices(self):
+        favorites = self.get_favorite_voices()
+        if not favorites:
+            self.log_view.append("没有收藏的语音模型。")
+            return
+        
+        # 取消所有选择
+        root = self.voice_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            region_item = root.child(i)
+            for j in range(region_item.childCount()):
+                lang_item = region_item.child(j)
+                for k in range(lang_item.childCount()):
+                    voice_item = lang_item.child(k)
+                    voice_item.setCheckState(0, Qt.Unchecked)
+        
+        # 选择收藏的
+        for voice in favorites:
+            item = self.voice_items.get(voice)
+            if item is not None:
+                item.setCheckState(0, Qt.Checked)
+        
+        self.log_view.append(f"已选择 {len(favorites)} 个收藏的语音模型。")
 
     def start_tts(self):
         selected_voices = self.get_selected_voices()

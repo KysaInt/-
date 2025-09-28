@@ -1,0 +1,37 @@
+{
+  "default_output": false,
+  "srt_enabled": false,
+  "extra_line_output": true,
+  "line_length": 28,
+  "subtitle_rule": "rule_3",
+  "selected_voices": [
+    "en-US-AnaNeural",
+    "en-US-AvaNeural",
+    "en-US-CoraMultilingualNeural",
+    "en-US-EmmaNeural",
+    "en-US-JaneNeural",
+    "en-US-LolaMultilingualNeural",
+    "ja-JP-AoiNeural",
+    "ja-JP-MayuNeural",
+    "ja-JP-NanamiNeural",
+    "ja-JP-ShioriNeural",
+    "zh-CN-YunyiMultilingualNeural",
+    "zh-CN-XiaoxiaoMultilingualNeural",
+    "zh-HK-HiuGaaiNeural",
+    "zh-HK-HiuMaanNeural",
+    "zh-TW-HsiaoChenNeural",
+    "zh-TW-HsiaoYuNeural"
+  ],
+  "favorite_voices": [
+    "ja-JP-AoiNeural",
+    "ja-JP-MayuNeural",
+    "ja-JP-NanamiNeural",
+    "ja-JP-ShioriNeural",
+    "zh-CN-XiaoxiaoMultilingualNeural",
+    "zh-CN-YunyiMultilingualNeural",
+    "zh-HK-HiuGaaiNeural",
+    "zh-HK-HiuMaanNeural",
+    "zh-TW-HsiaoChenNeural",
+    "zh-TW-HsiaoYuNeural"
+  ]
+}
