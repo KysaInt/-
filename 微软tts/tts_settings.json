@@ -1,8 +1,0 @@
-{
-  "default_output": true,
-  "srt_enabled": true,
-  "extra_line_output": true,
-  "line_length": 30,
-  "subtitle_rule": "rule_3",
-  "selected_voices": []
-}
