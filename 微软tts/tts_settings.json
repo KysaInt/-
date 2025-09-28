@@ -1,13 +1,11 @@
 {
   "default_output": true,
-  "srt_enabled": false,
-  "convert_punctuation": true,
-  "extra_line_output": false,
-  "line_length": 15,
-  "subtitle_rule": "rule_1",
-  "selected_voices": [
-    "zh-TW-HsiaoChenNeural",
-    "zh-TW-HsiaoYuNeural",
-    "zh-TW-YunJheNeural"
+  "srt_enabled": true,
+  "extra_line_output": true,
+  "line_length": 30,
+  "subtitle_rule": "rule_3",
+  "selected_voices": [],
+  "starred_voices": [
+    "wuu-CN-YunzheNeural"
   ]
 }
