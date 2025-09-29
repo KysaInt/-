@@ -1,7 +1,7 @@
 {
   "hotkey": "ctrl+alt+t",
   "checked_voices": [
-    "zh-TW-HsiaoChenNeural"
+    "zh-HK-HiuMaanNeural"
   ],
   "output_device_id": 4,
   "monitor_device_id": -1
