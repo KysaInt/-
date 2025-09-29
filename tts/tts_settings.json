@@ -1,5 +1,5 @@
 {
-  "default_output": false,
+  "default_output": true,
   "srt_enabled": false,
   "extra_line_output": true,
   "line_length": 28,
