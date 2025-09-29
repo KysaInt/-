@@ -322,6 +322,49 @@ class Worker(QThread):
         
         base_dir = folder_path
         sequences = {}
+
+        # ------- 预处理：检测需要为通道文件补齐 '_' 的情况 -------
+        # 收集：主序列模式(可能末尾被自动插入 '_') 与 通道序列模式 的原始文件名
+        # 主序列当前匹配风格： name = <core>[_]? + 4位数字
+        # 通道： <core>.<channel>.<4位数字>
+        # 规则：如果发现存在  core_0001.png  且 同时存在  core.<channel>.0001.png
+        #       则将后者批量重命名为  core_.<channel>.0001.png  (为所有帧与通道补齐 '_')
+        try:
+            png_files = [f for f in os.listdir(base_dir) if f.lower().endswith('.png')]
+            # 1. 先找出所有主序列(含下划线)  core_0001.png  => 记录 core_ 与 core
+            main_with_underscore_cores = set()
+            core_frame_map = {}
+            for fname in png_files:
+                name_no_ext = fname[:-4]
+                m_main = re.match(r'(.+?)(_)?(\d{4})$', name_no_ext)
+                if m_main:
+                    core, us, frame = m_main.groups()
+                    if us == '_':
+                        main_with_underscore_cores.add(core)  # 记录未含下划线的逻辑 core 名
+                        core_frame_map.setdefault(core, set()).add(frame)
+
+            if main_with_underscore_cores:
+                # 2. 找对应通道： core.<channel>.0001 但尚未加 '_'
+                for fname in png_files:
+                    name_no_ext = fname[:-4]
+                    m_chan = re.match(r'(.+?)\.(.+?)\.(\d{4})$', name_no_ext)
+                    if not m_chan:
+                        continue
+                    core, channel, frame = m_chan.groups()
+                    if core in main_with_underscore_cores:
+                        # 需要重命名为 core_ .channel.frame.png
+                        new_name = f"{core}_.{channel}.{frame}.png"
+                        if new_name != fname:
+                            src = os.path.join(base_dir, fname)
+                            dst = os.path.join(base_dir, new_name)
+                            # 避免覆盖（正常不应存在同名），若已存在则跳过
+                            if not os.path.exists(dst):
+                                try:
+                                    os.rename(src, dst)
+                                except Exception as e:
+                                    self.log_signal.emit(f"重命名通道文件失败: {fname} -> {new_name}: {e}")
+        except Exception as e:
+            self.log_signal.emit(f"预处理补齐下划线阶段异常: {e}")
         
         for filename in os.listdir(base_dir):
             if filename.lower().endswith('.png'):
@@ -336,6 +379,9 @@ class Worker(QThread):
                     match = re.search(r'(.+?)(\d{4})$', name)
                     if match:
                         basename, num = match.groups()
+                        # 若 basename 末尾是常见分隔符，则去掉（避免生成 core_ 与 core 的双目录）
+                        if basename and basename[-1] in ('_', '-', '.', ' '):
+                            basename = basename[:-1]
                         channel_suffix = None
                     else:
                         continue
