@@ -1,0 +1,8 @@
+{
+  "hotkey": "\\+v",
+  "checked_voices": [
+    "zh-TW-HsiaoYuNeural"
+  ],
+  "output_device_id": 4,
+  "monitor_device_id": -1
+}
