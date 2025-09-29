@@ -414,7 +414,17 @@ class Worker(QThread):
         stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染: {format_seconds(total_render_time)} | 运行: {format_seconds(total_time)} | {render_indicator}"
         
         highlight_color = self.stats.get('highlight_color', '#FFFFFF')
-        history_text = "\n".join(generate_bar_chart_for_history(history, color=highlight_color))
+        fill_char = self.stats.get('fill_char', '█')
+        bar_width = self.stats.get('bar_width', 25)
+        global_scale = self.stats.get('global_scale', 1.0)
+        history_text = "\n".join(generate_bar_chart_for_history(
+            history,
+            color=highlight_color,
+            bar_width=bar_width,
+            fill_char=fill_char,
+            empty_char=fill_char,
+            global_scale=global_scale
+        ))
 
         self.update_signal.emit(history_text, stat_line)
 
@@ -495,19 +505,11 @@ class C4DMonitorWidget(QWidget):
         grid = QGridLayout()
         grid.setContentsMargins(6, 6, 6, 6)
         row = 0
-
-        # 填充字符
-        grid.addWidget(QLabel("填充字符:"), row, 0)
+        # 单一字符（用于填充和空白，通过颜色区分）
+        grid.addWidget(QLabel("条形字符:"), row, 0)
         self.fill_char_edit = QLineEdit('█')
         self.fill_char_edit.setMaxLength(2)
         grid.addWidget(self.fill_char_edit, row, 1)
-        row += 1
-
-        # 空白字符
-        grid.addWidget(QLabel("空白字符:"), row, 0)
-        self.empty_char_edit = QLineEdit('█')
-        self.empty_char_edit.setMaxLength(2)
-        grid.addWidget(self.empty_char_edit, row, 1)
         row += 1
 
         # 总宽度
@@ -544,9 +546,13 @@ class C4DMonitorWidget(QWidget):
         self.settings_box.setContentLayout(grid)
         parent_layout.addWidget(self.settings_box)
 
+        # 初始写入 stats
+        self.stats['fill_char'] = (self.fill_char_edit.text() or '█')[0]
+        self.stats['bar_width'] = self.bar_width_spin.value()
+        self.stats['global_scale'] = self.scale_slider.value() / 100.0
+
         # 信号连接
         self.fill_char_edit.textChanged.connect(self._settings_changed)
-        self.empty_char_edit.textChanged.connect(self._settings_changed)
         self.bar_width_spin.valueChanged.connect(self._settings_changed)
         self.scale_slider.valueChanged.connect(self._scale_changed)
         self.font_scale_slider.valueChanged.connect(self._font_scale_changed)
@@ -568,15 +574,18 @@ class C4DMonitorWidget(QWidget):
         history = self.stats.get('history', [])
         highlight_color = self.stats.get('highlight_color', '#FFFFFF')
         fill_char = (self.fill_char_edit.text() or '█')[0]
-        empty_char = (self.empty_char_edit.text() or '█')[0]
         bar_width = self.bar_width_spin.value()
         scale = self.scale_slider.value() / 100.0
+        # 写入 stats 供线程使用
+        self.stats['fill_char'] = fill_char
+        self.stats['bar_width'] = bar_width
+        self.stats['global_scale'] = scale
         history_text = "\n".join(generate_bar_chart_for_history(
             history,
             color=highlight_color,
             bar_width=bar_width,
             fill_char=fill_char,
-            empty_char=empty_char,
+            empty_char=fill_char,  # 同字符不同颜色
             global_scale=scale
         ))
         # 保持滚动位置逻辑
@@ -678,7 +687,14 @@ class C4DMonitorWidget(QWidget):
                 if lines:
                     self.stats['history'].extend(lines)
                     self._loaded_history_count = len(self.stats['history'])
-                    history_text = "\n".join(generate_bar_chart_for_history(self.stats['history'], color=self.stats.get('highlight_color','#FFFFFF')))
+                    history_text = "\n".join(generate_bar_chart_for_history(
+                        self.stats['history'],
+                        color=self.stats.get('highlight_color','#FFFFFF'),
+                        bar_width=self.stats.get('bar_width',25),
+                        fill_char=self.stats.get('fill_char','█'),
+                        empty_char=self.stats.get('fill_char','█'),
+                        global_scale=self.stats.get('global_scale',1.0)
+                    ))
                     self._suppress_scroll_signal = True
                     self.history_view.setHtml(history_text.replace('\n', '<br>'))
                     self.history_view.moveCursor(QTextCursor.MoveOperation.End)
