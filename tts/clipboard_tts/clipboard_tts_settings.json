@@ -1,8 +1,8 @@
 {
-  "hotkey": "ctrl+alt+t",
-  "checked_voices": [
-    "zh-HK-HiuMaanNeural"
-  ],
-  "output_device_id": 4,
-  "monitor_device_id": -1
+  "hotkey": "ctrl+alt+v",
+  "checked_voices": [],
+  "output_device_id": 5,
+  "monitor_device_id": -1,
+  "output_dir_enabled": false,
+  "output_dir_path": "C:\\Users\\KYSAINT\\OneDrive\\-\\tts\\clipboard_tts\\output"
 }

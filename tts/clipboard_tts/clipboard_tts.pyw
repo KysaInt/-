@@ -13,11 +13,45 @@ from collections import defaultdict
 from datetime import datetime
 import threading
 
+# ---- 可调参数 / Troubleshooting 开关 ----
+# 默认改为“顺序”合成，避免一次性并发大量不同区域语音可能触发服务端速率/连接限制。
+# 如果你确认网络稳定且需要并发，可将 PARALLEL_TTS 设为 True，并调节 MAX_PARALLEL_TTS。
+PARALLEL_TTS = False           # False = 严格顺序处理；True = 限制并发
+MAX_PARALLEL_TTS = 2           # 并发模式下的最大同时 TTS 数（不要设太大）
+DETAILED_TTS_ERROR = True      # 输出更详细的异常堆栈，帮助排查“收不到语音”问题
+
+# ---- 全局日志与崩溃捕获 ----
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+CRASH_LOG = os.path.join(LOG_DIR, "clipboard_tts_crash.log")
+RUNTIME_LOG = os.path.join(LOG_DIR, "clipboard_tts_runtime.log")
+
+def _append_log(path, text):
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+    except Exception:
+        pass
+
+def init_global_error_logging():
+    def handle_exception(exc_type, exc_value, exc_tb):
+        import traceback as _tb
+        details = ''.join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        _append_log(CRASH_LOG, f"UNCAUGHT: {details}")
+        # 继续默认打印（若有控制台）
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    def handle_unraisable(unraisable):
+        _append_log(CRASH_LOG, f"UNRAISABLE: {unraisable.exctype} {unraisable.exc_value} attr={getattr(unraisable.object, '__class__', type(unraisable.object))}")
+    sys.excepthook = handle_exception
+    if hasattr(sys, 'unraisablehook'):
+        sys.unraisablehook = handle_unraisable
+    _append_log(RUNTIME_LOG, "程序启动，已安装全局异常钩子。")
+
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
-    QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QCheckBox, QComboBox
+    QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QCheckBox, QComboBox,
+    QLineEdit, QFileDialog, QFrame
 )
-from PySide6.QtCore import QThread, Signal, Qt, QTimer
+from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QDesktopServices, QTextCursor
 from PySide6.QtCore import QUrl
 
@@ -53,6 +87,52 @@ numpy = ensure_package("numpy")
 print("numpy imported")
 soundfile = ensure_package("soundfile", "soundfile")
 print("soundfile imported")
+
+# --- 折叠面板组件 ---
+class CollapsibleBox(QWidget):
+    def __init__(self, title="设置", parent=None):
+        super().__init__(parent)
+        self.toggle_button = QPushButton(title)
+        font = self.toggle_button.font()
+        font.setBold(True)
+        self.toggle_button.setFont(font)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+        self.content_area = QWidget()
+        self.content_area.setMaximumHeight(0)
+        self.content_area.setMinimumHeight(0)
+        self.anim = QPropertyAnimation(self.content_area, b"maximumHeight", self)
+        self.anim.setDuration(260)
+        self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(0)
+        lay.setContentsMargins(0,0,0,0)
+        lay.addWidget(self.toggle_button)
+        lay.addWidget(self.content_area)
+        self.toggle_button.clicked.connect(self._on_toggle)
+        self._update_title(False)
+
+    def setContentLayout(self, layout):
+        old = self.content_area.layout()
+        if old:
+            while old.count():
+                item = old.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.setParent(None)
+        self.content_area.setLayout(layout)
+
+    def _on_toggle(self, checked):
+        target = self.content_area.layout().sizeHint().height() if checked else 0
+        self.anim.stop()
+        self.anim.setStartValue(self.content_area.maximumHeight())
+        self.anim.setEndValue(target)
+        self.anim.start()
+        self._update_title(checked)
+
+    def _update_title(self, expanded):
+        arrow = "▼" if expanded else "►"
+        self.toggle_button.setText(f"{arrow} 设置")
 
 # --- Edge API key / Auth 刷新逻辑 ---
 # 说明: 部分情况下 edge-tts 内部使用的鉴权参数 (例如 X-Timestamp / authorization token)
@@ -146,12 +226,16 @@ class TTSWorker(QThread):
     finished = Signal(str, str)  # voice, mp3_path
     error = Signal(str, str)
 
-    def __init__(self, voice: str, text: str, parent=None):
+    def __init__(self, voice: str, text: str, parent=None,
+                 custom_output_dir: str | None = None,
+                 use_custom_naming: bool = False):
         super().__init__(parent)
         self.voice = voice
         self.text = text
         self.output_ext = ".mp3"
-        self.output_dir = tempfile.gettempdir()
+        # 如果启用自定义目录则使用之，否则临时目录
+        self.output_dir = custom_output_dir or tempfile.gettempdir()
+        self.use_custom_naming = use_custom_naming and bool(custom_output_dir)
 
     async def tts_async(self):
         if not self.text.strip():
@@ -161,17 +245,46 @@ class TTSWorker(QThread):
         last_error = None
         while attempt < 2:  # 最多重试1次（总共2次尝试）
             try:
+                if DETAILED_TTS_ERROR:
+                    print(f"[DEBUG] 开始合成 voice={self.voice} attempt={attempt+1}")
                 communicate = edge_tts.Communicate(self.text, self.voice)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_text = re.sub(r'[\\/:*?"<>|]', '_', self.text[:20].strip())
-                file_name = f"tts_{timestamp}_{safe_text}{self.output_ext}"
-                output_path = os.path.join(self.output_dir, file_name)
+                if self.use_custom_naming:
+                    # 文件名 = 文本内容 + (语音模型名称)
+                    # 为避免过长与非法字符：截断 + 哈希
+                    raw_text = self.text.strip().replace('\n', ' ')
+                    sanitized = re.sub(r'[\\/:*?"<>|]', '_', raw_text)
+                    max_len = 80  # 控制主体长度，超过则截断并加哈希区分
+                    if len(sanitized) > max_len:
+                        h = hashlib.sha1(sanitized.encode('utf-8')).hexdigest()[:8]
+                        sanitized = sanitized[:max_len] + '_' + h
+                    base_name = f"{sanitized}({self.voice})"
+                    file_name = base_name + self.output_ext
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    output_path = os.path.join(self.output_dir, file_name)
+                    # 如果已存在，添加序号
+                    if os.path.exists(output_path):
+                        counter = 1
+                        while True:
+                            alt = os.path.join(self.output_dir, f"{base_name}_{counter}{self.output_ext}")
+                            if not os.path.exists(alt):
+                                output_path = alt
+                                break
+                            counter += 1
+                else:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_text = re.sub(r'[\\/:*?"<>|]', '_', self.text[:20].strip())
+                    file_name = f"tts_{timestamp}_{safe_text}{self.output_ext}"
+                    output_path = os.path.join(self.output_dir, file_name)
 
                 await communicate.save(output_path)
+                if DETAILED_TTS_ERROR:
+                    print(f"[DEBUG] 合成成功 voice={self.voice} path={output_path}")
                 self.finished.emit(self.voice, output_path)
                 return
             except Exception as e:
                 err_text = str(e)
+                if DETAILED_TTS_ERROR:
+                    print(f"[DEBUG][ERROR] voice={self.voice} attempt={attempt+1} error={err_text}\n{traceback.format_exc()}")
                 last_error = err_text
                 if '401' in err_text or 'Unauthorized' in err_text:
                     # 刷新密钥后重试一次
@@ -181,6 +294,9 @@ class TTSWorker(QThread):
                         pass
                     attempt += 1
                     continue
+                # 某些地区/新语音可能暂时不可用或返回空流；提示用户稍后再试
+                if 'empty audio' in err_text.lower() or 'no audio' in err_text.lower():
+                    last_error += " | 可能是该语音暂时不可用或区域限制，稍后重试。"
                 else:
                     break
         self.error.emit(self.voice, f"语音转换失败: {last_error}")
@@ -254,6 +370,8 @@ class ClipboardTTSApp(QWidget):
         super().__init__()
         self.setWindowTitle("剪贴板语音助手")
         self.setGeometry(100, 100, 550, 700)
+        # 记录启动
+        _append_log(RUNTIME_LOG, "构造 ClipboardTTSApp")
 
         # 启动即刷新一次 Edge TTS 鉴权
         try:
@@ -345,8 +463,48 @@ class ClipboardTTSApp(QWidget):
 
         self.layout.addWidget(self.label_voice)
         self.layout.addWidget(self.voice_tree)
-        self.layout.addLayout(self.hotkey_layout)
-        self.layout.addWidget(self.audio_group)
+        # --- 输出目录设置控件（后面塞进折叠面板） ---
+        self.output_dir_checkbox = QCheckBox("修改地址")
+        self.output_dir_label = QLabel("MP3 输出目录:")
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("未启用，使用临时目录")
+        self.output_dir_edit.setEnabled(False)
+        self.output_dir_browse = QPushButton("浏览")
+        self.output_dir_browse.setEnabled(False)
+        self.output_dir_open = QPushButton("打开")
+        self.output_dir_open.setEnabled(False)
+
+        # ---- 组装折叠设置面板 ----
+        self.settings_box = CollapsibleBox("设置")
+        settings_layout = QVBoxLayout()
+        settings_layout.setContentsMargins(8,8,8,8)
+        # 热键
+        hotkey_frame = QFrame()
+        hotkey_lay = QHBoxLayout(hotkey_frame)
+        hotkey_lay.setContentsMargins(0,0,0,0)
+        hotkey_lay.addLayout(self.hotkey_layout)
+        settings_layout.addWidget(QLabel("快捷键与转换:"))
+        settings_layout.addWidget(hotkey_frame)
+        # 音频设备
+        audio_frame = QFrame()
+        af_lay = QVBoxLayout(audio_frame)
+        af_lay.setContentsMargins(0,0,0,0)
+        af_lay.addWidget(self.audio_group)
+        settings_layout.addWidget(QLabel("音频设备:"))
+        settings_layout.addWidget(audio_frame)
+        # 输出目录
+        outdir_frame = QFrame()
+        of_lay = QHBoxLayout(outdir_frame)
+        of_lay.setContentsMargins(0,0,0,0)
+        of_lay.addWidget(self.output_dir_checkbox)
+        of_lay.addWidget(self.output_dir_label)
+        of_lay.addWidget(self.output_dir_edit, 1)
+        of_lay.addWidget(self.output_dir_browse)
+        of_lay.addWidget(self.output_dir_open)
+        settings_layout.addWidget(QLabel("输出目录:"))
+        settings_layout.addWidget(outdir_frame)
+        self.settings_box.setContentLayout(settings_layout)
+        self.layout.addWidget(self.settings_box)
         self.layout.addWidget(self.log_view)
 
         # --- 连接信号和槽 ---
@@ -357,10 +515,22 @@ class ClipboardTTSApp(QWidget):
         self.output_device_combo.currentIndexChanged.connect(self.save_settings)
         self.monitor_device_combo.currentIndexChanged.connect(self.save_settings)
         self.refresh_devices_button.clicked.connect(self.refresh_audio_devices)
+        self.output_dir_checkbox.toggled.connect(self.on_output_dir_toggled)
+        self.output_dir_browse.clicked.connect(self.browse_output_dir)
+        self.output_dir_open.clicked.connect(self.open_output_dir)
+        self.output_dir_edit.textChanged.connect(self.save_settings)
 
         self._loading_settings = False
         self.active_workers = []
+        # 队列 / 并发控制
+        self.voice_queue = []         # 待处理语音队列
+        self.running_workers = 0      # 当前运行中的 worker 数
+        self.parallel_tts = PARALLEL_TTS
+        self.max_parallel = MAX_PARALLEL_TTS
         self.audio_player = None
+        # 输出目录设置变量
+        self.output_dir_enabled = False
+        self.output_dir_path = ""
 
         self.refresh_audio_devices(is_initial_load=True) # 初始加载
         self.load_settings()
@@ -612,10 +782,18 @@ class ClipboardTTSApp(QWidget):
             self.log("未设置快捷键，监听器未启动。")
             return
         try:
-            keyboard.add_hotkey(self.hotkey_string, lambda: self.trigger_conversion("hotkey"))
+            # 包一层捕获，防止内部抛异常导致进程退出
+            def _safe_trigger():
+                try:
+                    self.trigger_conversion("hotkey")
+                except Exception as e:
+                    self.log(f"热键触发异常: {e}")
+                    _append_log(CRASH_LOG, f"HOTKEY ERROR: {e}\n{traceback.format_exc()}")
+            keyboard.add_hotkey(self.hotkey_string, _safe_trigger)
             self.log(f"快捷键 '{self.hotkey_string}' 已激活。")
         except Exception as exc:
             self.log(f"设置快捷键失败: {exc}")
+            _append_log(CRASH_LOG, f"设置快捷键失败: {exc}\n{traceback.format_exc()}")
 
     def trigger_conversion(self, source: str):
         now = time.time()
@@ -663,13 +841,38 @@ class ClipboardTTSApp(QWidget):
         self.log(f"收到转换请求 ({source})，内容: \"{preview_line}...\"")
 
         self.convert_button.setEnabled(False)
-        for voice in voices:
-            self.log(f"[{voice}] 已加入转换队列。")
-            worker = TTSWorker(voice, clean_text, self)
-            self.active_workers.append(worker)
-            worker.finished.connect(self.on_worker_finished)
-            worker.error.connect(self.on_worker_error)
-            worker.start()
+        # 构建队列
+        self.voice_queue = list(voices)
+        self.source_text = clean_text  # 保存文本
+        if self.parallel_tts:
+            # 启动最多 max_parallel 个
+            for _ in range(min(self.max_parallel, len(self.voice_queue))):
+                self._start_next_voice()
+        else:
+            # 严格顺序
+            self._start_next_voice()
+
+    def _start_next_voice(self):
+        if not self.voice_queue:
+            return
+        if self.parallel_tts and self.running_workers >= self.max_parallel:
+            return
+        voice = self.voice_queue.pop(0)
+        self.log(f"[{voice}] 开始转换...")
+        custom_dir = None
+        use_custom_naming = False
+        if self.output_dir_enabled:
+            # 若未手动填写路径，初始化为脚本同级 output
+            if not self.output_dir_path:
+                self.output_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
+            custom_dir = self.output_dir_path
+            use_custom_naming = True
+        worker = TTSWorker(voice, self.source_text, self, custom_output_dir=custom_dir, use_custom_naming=use_custom_naming)
+        self.active_workers.append(worker)
+        self.running_workers += 1
+        worker.finished.connect(self.on_worker_finished)
+        worker.error.connect(self.on_worker_error)
+        worker.start()
 
     def on_worker_finished(self, voice: str, mp3_path: str):
         worker = self.sender()
@@ -706,6 +909,10 @@ class ClipboardTTSApp(QWidget):
     def _cleanup_worker(self, worker):
         if worker in self.active_workers:
             self.active_workers.remove(worker)
+            self.running_workers = max(0, self.running_workers - 1)
+        # 顺序 / 限流 继续启动下一个
+        if self.voice_queue:
+            self._start_next_voice()
         if not self.active_workers:
             self.convert_button.setEnabled(True)
             # 释放转换状态
@@ -724,6 +931,8 @@ class ClipboardTTSApp(QWidget):
             "checked_voices": self.get_checked_voices(),
             "output_device_id": self.output_device_combo.currentData(),
             "monitor_device_id": self.monitor_device_combo.currentData(),
+            "output_dir_enabled": self.output_dir_enabled,
+            "output_dir_path": self.output_dir_path,
         }
         try:
             with open(self.get_settings_path(), "w", encoding="utf-8") as f:
@@ -763,11 +972,52 @@ class ClipboardTTSApp(QWidget):
                 if combo_index != -1:
                     self.monitor_device_combo.setCurrentIndex(combo_index)
 
+            self.output_dir_enabled = bool(settings.get("output_dir_enabled"))
+            self.output_dir_checkbox.setChecked(self.output_dir_enabled)
+            self.output_dir_path = settings.get("output_dir_path") or ""
+            self.apply_output_dir_state()
+
         finally:
             # 使用QTimer确保在UI更新后再重置标志
             QTimer.singleShot(0, lambda: setattr(self, '_loading_settings', False))
 
         self.setup_hotkey_listener()
+
+    # --- 输出目录相关 ---
+    def on_output_dir_toggled(self, checked: bool):
+        self.output_dir_enabled = checked
+        if checked and not self.output_dir_path:
+            self.output_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
+        self.apply_output_dir_state()
+        self.save_settings()
+
+    def apply_output_dir_state(self):
+        enabled = self.output_dir_enabled
+        self.output_dir_edit.setEnabled(enabled)
+        self.output_dir_browse.setEnabled(enabled)
+        self.output_dir_open.setEnabled(enabled)
+        if enabled:
+            self.output_dir_edit.setText(self.output_dir_path)
+        else:
+            self.output_dir_edit.clear()
+
+    def browse_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择输出目录", self.output_dir_path or os.path.dirname(os.path.abspath(__file__)))
+        if directory:
+            self.output_dir_path = directory
+            self.output_dir_edit.setText(directory)
+            self.save_settings()
+            self.log(f"已选择输出目录: {directory}")
+
+    def open_output_dir(self):
+        if not self.output_dir_path:
+            self.log("未设置输出目录。")
+            return
+        try:
+            os.makedirs(self.output_dir_path, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir_path))
+        except Exception as e:
+            self.log(f"打开目录失败: {e}")
 
     def apply_voice_checks(self, voices):
         target = set(voices or [])
@@ -816,6 +1066,11 @@ class ClipboardTTSApp(QWidget):
 
 if __name__ == "__main__":
     import traceback
+    # 初始化全局异常日志
+    try:
+        init_global_error_logging()
+    except Exception:
+        pass
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
@@ -826,8 +1081,12 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
         window = ClipboardTTSApp()
         window.show()
-        sys.exit(app.exec())
+        rc = app.exec()
+        _append_log(RUNTIME_LOG, f"QApplication 退出 rc={rc}")
+        sys.exit(rc)
     except Exception as e:
-        print(f"Error starting application: {e}")
+        err = f"启动异常: {e}"
+        print(err)
         traceback.print_exc()
+        _append_log(CRASH_LOG, err + "\n" + traceback.format_exc())
         input("Press Enter to exit...")
