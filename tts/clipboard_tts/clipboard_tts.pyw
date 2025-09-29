@@ -8,6 +8,7 @@ import re
 import tempfile
 import time # 导入 time 模块
 import hashlib
+import traceback
 from collections import defaultdict
 from datetime import datetime
 import threading
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QCheckBox, QComboBox
 )
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QTextCursor
 from PySide6.QtCore import QUrl
 
 # --- 自动依赖安装 ---
@@ -53,6 +54,45 @@ print("numpy imported")
 soundfile = ensure_package("soundfile", "soundfile")
 print("soundfile imported")
 
+# --- Edge API key / Auth 刷新逻辑 ---
+# 说明: 部分情况下 edge-tts 内部使用的鉴权参数 (例如 X-Timestamp / authorization token)
+# 在长时间运行或者网络环境变化后可能失效，导致 401。这里通过重新创建 VoicesManager
+# 或 Communicate 之前刷新，强制 edge_tts 内部重新获取配置。虽然 edge-tts 本身会自动处理，
+# 但根据实际需求增加显式刷新机制。
+
+_EDGE_REFRESH_LOCK = threading.Lock()
+_LAST_EDGE_REFRESH_TS = 0
+_EDGE_REFRESH_INTERVAL = 30  # 秒; 避免频繁刷新，可根据需要调整
+
+def refresh_edge_tts_key(force: bool = True):
+    """强制通过 VoicesManager.create() 触发 edge_tts 内部重新协商参数/密钥。
+    返回 True 表示成功，False 表示失败。
+    """
+    global _LAST_EDGE_REFRESH_TS
+    with _EDGE_REFRESH_LOCK:
+        now = time.time()
+        if not force and (now - _LAST_EDGE_REFRESH_TS) < _EDGE_REFRESH_INTERVAL:
+            return True
+        try:
+            async def _do():
+                try:
+                    # 创建一次即可; 结果不使用，只为触发内部请求
+                    await edge_tts.VoicesManager.create()
+                except Exception as inner_e:
+                    raise inner_e
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_do())
+            _LAST_EDGE_REFRESH_TS = now
+            print("Edge TTS 鉴权参数刷新成功")
+            return True
+        except Exception as e:
+            print(f"刷新 Edge TTS 鉴权参数失败: {e}\n{traceback.format_exc()}")
+            return False
+
 
 VBCABLE_INSTALL_URL = "https://vb-audio.com/Cable/"
 VIRTUAL_CABLE_NAMES = ["CABLE Input", "VB-Audio Virtual Cable"]
@@ -81,7 +121,20 @@ def load_voice_list():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        return loop.run_until_complete(_inner())
+        try:
+            return loop.run_until_complete(_inner())
+        except Exception as e:
+            # 如果遇到 401/Unauthorized，尝试刷新后再重试一次
+            if '401' in str(e) or 'Unauthorized' in str(e):
+                print("首次加载语音列表发生 401，尝试刷新鉴权后重试一次…")
+                try:
+                    refresh_edge_tts_key(force=True)
+                    return loop.run_until_complete(_inner())
+                except Exception as e2:
+                    print(f"重试仍失败: {e2}")
+                    return []
+            else:
+                raise
     except Exception as e:
         print(f"Error in load_voice_list: {e}")
         return []
@@ -104,18 +157,33 @@ class TTSWorker(QThread):
         if not self.text.strip():
             self.error.emit(self.voice, "剪贴板内容为空。")
             return
+        attempt = 0
+        last_error = None
+        while attempt < 2:  # 最多重试1次（总共2次尝试）
+            try:
+                communicate = edge_tts.Communicate(self.text, self.voice)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_text = re.sub(r'[\\/:*?"<>|]', '_', self.text[:20].strip())
+                file_name = f"tts_{timestamp}_{safe_text}{self.output_ext}"
+                output_path = os.path.join(self.output_dir, file_name)
 
-        try:
-            communicate = edge_tts.Communicate(self.text, self.voice)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_text = re.sub(r'[\\/:*?"<>|]', '_', self.text[:20].strip())
-            file_name = f"tts_{timestamp}_{safe_text}{self.output_ext}"
-            output_path = os.path.join(self.output_dir, file_name)
-
-            await communicate.save(output_path)
-            self.finished.emit(self.voice, output_path)
-        except Exception as e:
-            self.error.emit(self.voice, f"语音转换失败: {e}")
+                await communicate.save(output_path)
+                self.finished.emit(self.voice, output_path)
+                return
+            except Exception as e:
+                err_text = str(e)
+                last_error = err_text
+                if '401' in err_text or 'Unauthorized' in err_text:
+                    # 刷新密钥后重试一次
+                    try:
+                        refresh_edge_tts_key(force=True)
+                    except Exception:
+                        pass
+                    attempt += 1
+                    continue
+                else:
+                    break
+        self.error.emit(self.voice, f"语音转换失败: {last_error}")
 
     def run(self):
         try:
@@ -187,6 +255,15 @@ class ClipboardTTSApp(QWidget):
         self.setWindowTitle("剪贴板语音助手")
         self.setGeometry(100, 100, 550, 700)
 
+        # 启动即刷新一次 Edge TTS 鉴权
+        try:
+            if refresh_edge_tts_key(force=True):
+                print("启动时已刷新 Edge TTS key")
+            else:
+                print("启动时刷新 Edge TTS key 失败")
+        except Exception as e:
+            print(f"启动刷新 Edge TTS key 异常: {e}")
+
         self.layout = QVBoxLayout(self)
         self.hotkey_string = None
         self.last_hotkey_trigger_time = 0  # 上次热键触发时间
@@ -224,10 +301,12 @@ class ClipboardTTSApp(QWidget):
         self.current_hotkey_label = QLabel("未设置")
         self.record_hotkey_button = QPushButton("录制快捷键")
         self.convert_button = QPushButton("立即转换")
+        self.refresh_key_button = QPushButton("刷新鉴权")
         self.hotkey_layout.addWidget(self.hotkey_label)
         self.hotkey_layout.addWidget(self.current_hotkey_label, 1)
         self.hotkey_layout.addWidget(self.record_hotkey_button)
         self.hotkey_layout.addWidget(self.convert_button)
+        self.hotkey_layout.addWidget(self.refresh_key_button)
 
         # --- 音频设备控制界面 ---
         self.audio_group = QWidget()
@@ -273,6 +352,7 @@ class ClipboardTTSApp(QWidget):
         # --- 连接信号和槽 ---
         self.record_hotkey_button.clicked.connect(self.start_hotkey_recording)
         self.convert_button.clicked.connect(lambda: self.trigger_conversion("button"))
+        self.refresh_key_button.clicked.connect(self.manual_refresh_edge_auth)
         self.voice_tree.itemChanged.connect(self.on_voice_item_changed)
         self.output_device_combo.currentIndexChanged.connect(self.save_settings)
         self.monitor_device_combo.currentIndexChanged.connect(self.save_settings)
@@ -292,6 +372,11 @@ class ClipboardTTSApp(QWidget):
 
     def log(self, message):
         self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        # 自动滚动到末尾
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_view.setTextCursor(cursor)
+        self.log_view.ensureCursorVisible()
 
     def populate_voices(self):
         """构建三层（区域 -> 语言 -> 语音）树结构，参考 TTSSRT.pyw。"""
@@ -701,6 +786,32 @@ class ClipboardTTSApp(QWidget):
             self.audio_player.wait()
         sounddevice.stop()
         super().closeEvent(event)
+
+    # --- 手动刷新 Edge TTS 鉴权 ---
+    def manual_refresh_edge_auth(self):
+        self.refresh_key_button.setEnabled(False)
+        self.refresh_key_button.setText("刷新中...")
+        self.log("正在刷新 Edge TTS 鉴权参数...")
+
+        def _worker():
+            success = False
+            try:
+                success = refresh_edge_tts_key(force=True)
+            except Exception as e:
+                print(f"手动刷新线程异常: {e}\n{traceback.format_exc()}")
+                success = False
+            finally:
+                # 回主线程更新（无论成功与否都恢复按钮）
+                QTimer.singleShot(0, lambda: self._after_manual_refresh(success))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _after_manual_refresh(self, success: bool):
+        if success:
+            self.log("Edge TTS 鉴权刷新成功。")
+        else:
+            self.log("Edge TTS 鉴权刷新失败，查看控制台或网络。")
+        self.refresh_key_button.setEnabled(True)
+        self.refresh_key_button.setText("刷新鉴权")
 
 
 if __name__ == "__main__":
