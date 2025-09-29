@@ -423,8 +423,18 @@ class C4DMonitorWidget(QWidget):
             'program_start': time.time(),
             'should_exit': False
         }
+        # 日志相关变量
+        self.log_file_path = Path(os.path.abspath(__file__)).with_name('render_history.log')
+        self._loaded_history_count = 0  # 已载入的历史行数量
+
+        # 周期性保存日志（防止异常退出丢失）
+        self._periodic_save_timer = QTimer(self)
+        self._periodic_save_timer.timeout.connect(self.save_history)
+        self._periodic_save_timer.start(30000)  # 30 秒保存一次
 
         self.init_ui()
+        # 需要在 init_ui 之后才有 highlight_color，所以此处再加载历史
+        self.load_history()
         self.start_worker()
 
     def init_ui(self):
@@ -442,6 +452,15 @@ class C4DMonitorWidget(QWidget):
         self.history_view.wheelEvent = self.history_view_wheel_event
         
         layout.addWidget(self.history_view)
+
+        # 自动滚动相关状态
+        self.auto_scroll_enabled = True  # 当前是否允许自动跟随底部
+        self._suppress_scroll_signal = False  # 内部程序性滚动时屏蔽 valueChanged 信号
+        self._auto_scroll_reenable_timer = QTimer(self)
+        self._auto_scroll_reenable_timer.setSingleShot(True)
+        self._auto_scroll_reenable_timer.timeout.connect(self._reenable_auto_scroll)
+        # 监听滚动条变化（用户滚动）
+        self.history_view.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
 
         self.status_label = QLabel("正在初始化...")
         self.status_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -479,14 +498,46 @@ class C4DMonitorWidget(QWidget):
         self.worker.start()
 
     def update_ui(self, history_text, status_text):
+        # 根据是否允许自动滚动决定是否保持当前相对位置
+        sb = self.history_view.verticalScrollBar()
+        if not self.auto_scroll_enabled:
+            old_max = sb.maximum()
+            old_value = sb.value()
+            distance_from_bottom = old_max - old_value
+        else:
+            distance_from_bottom = 0
+
+        self._suppress_scroll_signal = True
         self.history_view.setHtml(history_text.replace('\n', '<br>'))
-        self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+        if self.auto_scroll_enabled:
+            self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            # 恢复相对位置
+            new_max = sb.maximum()
+            target = max(0, new_max - distance_from_bottom)
+            sb.setValue(target)
+        self._suppress_scroll_signal = False
         self.status_label.setText(status_text)
 
     def log_message(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
+        sb = self.history_view.verticalScrollBar()
+        if not self.auto_scroll_enabled:
+            old_max = sb.maximum()
+            old_value = sb.value()
+            distance_from_bottom = old_max - old_value
+        else:
+            distance_from_bottom = 0
+
+        self._suppress_scroll_signal = True
         self.history_view.append(f"[{timestamp}] {message}")
-        self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+        if self.auto_scroll_enabled:
+            self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            new_max = sb.maximum()
+            target = max(0, new_max - distance_from_bottom)
+            sb.setValue(target)
+        self._suppress_scroll_signal = False
 
     def open_folder(self):
         last_folder = self.stats.get('last_target_folder')
@@ -504,9 +555,60 @@ class C4DMonitorWidget(QWidget):
             self.worker.stop()
 
     def closeEvent(self, event):
+        # 先停止线程，确保 history 不再变化
         self.worker.stop()
-        # Here you would also save the final log, similar to the original script
+        # 保存新的 history 行到日志文件
+        self.save_history()
         super().closeEvent(event)
+
+    # -------------------- 日志持久化 --------------------
+    def load_history(self):
+        if self.log_file_path.exists():
+            try:
+                with open(self.log_file_path, 'r', encoding='utf-8') as f:
+                    lines = [line.rstrip('\n') for line in f if line.strip()]
+                if lines:
+                    self.stats['history'].extend(lines)
+                    self._loaded_history_count = len(self.stats['history'])
+                    # 立即刷新界面显示过去的历史
+                    history_text = "\n".join(generate_bar_chart_for_history(self.stats['history'], color=self.stats.get('highlight_color','#FFFFFF')))
+                    self._suppress_scroll_signal = True
+                    self.history_view.setHtml(history_text.replace('\n', '<br>'))
+                    self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+                    self._suppress_scroll_signal = False
+            except Exception as e:
+                # 读取失败不阻塞程序
+                print(f"读取历史日志失败: {e}")
+
+    def save_history(self):
+        try:
+            new_lines = self.stats['history'][self._loaded_history_count:]
+            if not new_lines:
+                return
+            with open(self.log_file_path, 'a', encoding='utf-8') as f:
+                for line in new_lines:
+                    f.write(line + '\n')
+            self._loaded_history_count = len(self.stats['history'])
+        except Exception as e:
+            print(f"保存日志失败: {e}")
+
+    # -------------------- 自动滚动逻辑 --------------------
+    def _on_user_scroll(self):
+        if self._suppress_scroll_signal:
+            return
+        # 用户主动滚动，关闭自动跟随并启动 10 秒计时
+        self.auto_scroll_enabled = False
+        self._auto_scroll_reenable_timer.start(10000)  # 10 秒
+
+    def _reenable_auto_scroll(self):
+        # 时间到，恢复自动滚动并跳到底部
+        self.auto_scroll_enabled = True
+        self.scroll_to_bottom()
+
+    def scroll_to_bottom(self):
+        self._suppress_scroll_signal = True
+        self.history_view.moveCursor(QTextCursor.MoveOperation.End)
+        self._suppress_scroll_signal = False
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
