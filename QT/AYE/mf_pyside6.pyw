@@ -11,9 +11,9 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTextEdit,
-    QLabel, QPushButton, QHBoxLayout, QSizePolicy
+    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame
 )
-from PySide6.QtCore import QThread, Signal, Qt, QTimer
+from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette
 
 class C4DRenderMonitor:
@@ -117,7 +117,16 @@ def open_last_folder(folder_path):
     except Exception as e:
         print(f"打开文件夹失败: {e}")
 
-def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None):
+def generate_bar_chart_for_history(
+    history_lines,
+    for_log_file: bool = False,
+    color: str | None = None,
+    *,
+    bar_width: int = 25,
+    fill_char: str = '█',
+    empty_char: str = '█',  # 使用相同字符由颜色区分
+    global_scale: float = 1.0
+):
     if not history_lines:
         return []
         
@@ -171,14 +180,11 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
     max_filename_length = 0
     for item in parsed_lines:
         if 'filename' in item:
-            # 使用 item['filename'] 的原始长度进行计算
             max_filename_length = max(max_filename_length, len(item['filename']))
-
-        bar_width = 25
+    bar_width = max(1, bar_width)
     enhanced_lines = []
     
-    fill_char = '█'
-    empty_char = '█' # Use the same character for empty, color will differentiate
+    # fill_char 与 empty_char 通过参数传入
     empty_color = '#555555' # Dark gray for the empty part of the bar
     
     for item in parsed_lines:
@@ -201,19 +207,24 @@ def generate_bar_chart_for_history(history_lines, for_log_file=False, color=None
             else:
                 bar_html = ' ' * bar_width # Use spaces for plain text log
         else:
-            ratio = interval / max_time if max_time > 0 else 0
-            filled_length = int(bar_width * ratio)
+            base = max_time if max_time > 0 else 1
+            scaled_interval = interval * (global_scale if global_scale > 0 else 1.0)
+            ratio = scaled_interval / base
+            raw = bar_width * ratio
+            # 使用向下取整(允许显示为0长度)，保证比例真实；极小值不被强制放大
+            filled_length = int(raw)
+            filled_length = max(0, min(filled_length, bar_width))
             empty_length = bar_width - filled_length
             
             if not for_log_file:
                 filled_part = ""
                 if filled_length > 0:
                     filled_part = f'<span style="color: {color};">{fill_char * filled_length}</span>'
-                
+
                 empty_part = ""
                 if empty_length > 0:
                     empty_part = f'<span style="color: {empty_color};">{empty_char * empty_length}</span>'
-                
+
                 bar_html = f"{filled_part}{empty_part}"
             else:
                 bar_html = (fill_char * filled_length) + (' ' * empty_length)
@@ -439,56 +450,157 @@ class C4DMonitorWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        # ---- 固定文本行 + 右侧按钮（同一行） ----
+        header_layout = QHBoxLayout()
+        self.fixed_line_label = QLabel("正在初始化...")
+        self.fixed_line_label.setObjectName("fixedLineLabel")
+        self.fixed_line_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header_layout.addWidget(self.fixed_line_label, 1)
+        self.open_folder_button = QPushButton("打开")
+        self.open_folder_button.setToolTip("打开最近目标渲染目录")
+        self.open_folder_button.clicked.connect(self.open_folder)
+        self.open_folder_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        header_layout.addWidget(self.open_folder_button)
+        layout.addLayout(header_layout)
 
+        # ---- 设置折叠框 ----
+        # 需要先创建 history_view 供设置面板读取字体大小，但暂不添加到布局
         self.history_view = QTextEdit()
         self.history_view.setReadOnly(True)
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.history_view.setFont(font)
-        # Get the highlight color from the current palette
+        # 主题高亮色作为条形颜色
         highlight_color = self.palette().color(QPalette.ColorRole.Highlight).name()
         self.stats['highlight_color'] = highlight_color
-        
-        # Add wheel event for font scaling
+        # Ctrl+滚轮缩放字号
         self.history_view.wheelEvent = self.history_view_wheel_event
-        
-        layout.addWidget(self.history_view)
 
-        # 自动滚动相关状态
-        self.auto_scroll_enabled = True  # 当前是否允许自动跟随底部
-        self._suppress_scroll_signal = False  # 内部程序性滚动时屏蔽 valueChanged 信号
+        self._init_settings_panel(layout)
+
+        # ---- 主文本窗口置于最底部并可伸展 ----
+        self.history_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.history_view, 1)
+
+        # 自动滚动相关状态（放在创建后）
+        self.auto_scroll_enabled = True
+        self._suppress_scroll_signal = False
         self._auto_scroll_reenable_timer = QTimer(self)
         self._auto_scroll_reenable_timer.setSingleShot(True)
         self._auto_scroll_reenable_timer.timeout.connect(self._reenable_auto_scroll)
-        # 监听滚动条变化（用户滚动）
         self.history_view.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
 
-        self.status_label = QLabel("正在初始化...")
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        layout.addWidget(self.status_label)
+    # ---------------- 设置面板实现 ----------------
+    def _init_settings_panel(self, parent_layout: QVBoxLayout):
+        self.settings_box = CollapsibleBox("设置")
+        grid = QGridLayout()
+        grid.setContentsMargins(6, 6, 6, 6)
+        row = 0
 
-        button_layout = QHBoxLayout()
-        self.open_folder_button = QPushButton("打开渲染目录")
-        self.open_folder_button.clicked.connect(self.open_folder)
-        button_layout.addWidget(self.open_folder_button)
-        
-        layout.addLayout(button_layout)
+        # 填充字符
+        grid.addWidget(QLabel("填充字符:"), row, 0)
+        self.fill_char_edit = QLineEdit('█')
+        self.fill_char_edit.setMaxLength(2)
+        grid.addWidget(self.fill_char_edit, row, 1)
+        row += 1
 
+        # 空白字符
+        grid.addWidget(QLabel("空白字符:"), row, 0)
+        self.empty_char_edit = QLineEdit('█')
+        self.empty_char_edit.setMaxLength(2)
+        grid.addWidget(self.empty_char_edit, row, 1)
+        row += 1
+
+        # 总宽度
+        grid.addWidget(QLabel("总宽度:"), row, 0)
+        self.bar_width_spin = QSpinBox()
+        self.bar_width_spin.setRange(5, 200)
+        self.bar_width_spin.setValue(25)
+        grid.addWidget(self.bar_width_spin, row, 1)
+        row += 1
+
+        # 全局缩放
+        grid.addWidget(QLabel("全局缩放:"), row, 0)
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setRange(10, 300)  # 表示 0.1 - 3.0
+        self.scale_slider.setValue(100)
+        grid.addWidget(self.scale_slider, row, 1)
+        self.scale_label = QLabel("1.0x")
+        grid.addWidget(self.scale_label, row, 2)
+        row += 1
+
+        # 字号缩放（影响 QTextEdit 字体）
+        grid.addWidget(QLabel("文字缩放:"), row, 0)
+        self.font_scale_slider = QSlider(Qt.Horizontal)
+        self.font_scale_slider.setRange(5, 40)
+        # 记当前字号
+        self._base_font_point_size = self.history_view.font().pointSize()
+        self.font_scale_slider.setValue(self._base_font_point_size)
+        grid.addWidget(self.font_scale_slider, row, 1)
+        self.font_scale_label = QLabel(str(self._base_font_point_size))
+        grid.addWidget(self.font_scale_label, row, 2)
+        row += 1
+
+
+        self.settings_box.setContentLayout(grid)
+        parent_layout.addWidget(self.settings_box)
+
+        # 信号连接
+        self.fill_char_edit.textChanged.connect(self._settings_changed)
+        self.empty_char_edit.textChanged.connect(self._settings_changed)
+        self.bar_width_spin.valueChanged.connect(self._settings_changed)
+        self.scale_slider.valueChanged.connect(self._scale_changed)
+        self.font_scale_slider.valueChanged.connect(self._font_scale_changed)
+    # 已移除最小非零块设置，保留其余信号
+
+    def _font_scale_changed(self, val):
+        self.font_scale_label.setText(str(val))
+        font = self.history_view.font()
+        font.setPointSize(val)
+        self.history_view.setFont(font)
+
+    def _scale_changed(self, val):
+        scale = val / 100.0
+        self.scale_label.setText(f"{scale:.2f}x")
+        self._settings_changed()
+
+    def _settings_changed(self, *args):
+        # 重新渲染当前 history
+        history = self.stats.get('history', [])
+        highlight_color = self.stats.get('highlight_color', '#FFFFFF')
+        fill_char = (self.fill_char_edit.text() or '█')[0]
+        empty_char = (self.empty_char_edit.text() or '█')[0]
+        bar_width = self.bar_width_spin.value()
+        scale = self.scale_slider.value() / 100.0
+        history_text = "\n".join(generate_bar_chart_for_history(
+            history,
+            color=highlight_color,
+            bar_width=bar_width,
+            fill_char=fill_char,
+            empty_char=empty_char,
+            global_scale=scale
+        ))
+        # 保持滚动位置逻辑
+        sb = self.history_view.verticalScrollBar()
+        at_bottom = sb.value() == sb.maximum()
+        self.history_view.setHtml(history_text.replace('\n','<br>'))
+        if at_bottom:
+            self.history_view.moveCursor(QTextCursor.End)
+
+    # ---------------- 视图与线程逻辑（原误放在 CollapsibleBox 内） ----------------
     def history_view_wheel_event(self, event):
+        """支持 Ctrl+滚轮 调整字体大小。"""
         if QApplication.keyboardModifiers() == Qt.ControlModifier:
             delta = event.angleDelta().y()
             font = self.history_view.font()
             current_size = font.pointSize()
-            
             if delta > 0:
                 font.setPointSize(current_size + 1)
             else:
                 if current_size > 1:
                     font.setPointSize(current_size - 1)
-            
             self.history_view.setFont(font)
             event.accept()
         else:
-            # Call original wheel event handler
             QTextEdit.wheelEvent(self.history_view, event)
 
     def start_worker(self):
@@ -498,7 +610,6 @@ class C4DMonitorWidget(QWidget):
         self.worker.start()
 
     def update_ui(self, history_text, status_text):
-        # 根据是否允许自动滚动决定是否保持当前相对位置
         sb = self.history_view.verticalScrollBar()
         if not self.auto_scroll_enabled:
             old_max = sb.maximum()
@@ -512,12 +623,12 @@ class C4DMonitorWidget(QWidget):
         if self.auto_scroll_enabled:
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
-            # 恢复相对位置
             new_max = sb.maximum()
             target = max(0, new_max - distance_from_bottom)
             sb.setValue(target)
         self._suppress_scroll_signal = False
-        self.status_label.setText(status_text)
+        # 更新固定行文本内容（虽然名为固定行，但可显示动态统计）
+        self.fixed_line_label.setText(status_text)
 
     def log_message(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -547,17 +658,14 @@ class C4DMonitorWidget(QWidget):
             self.log_message("没有可打开的文件夹记录")
 
     def close_app(self):
-        # If running standalone, this will close the app. If embedded, it does nothing.
         if self.parent() is None or isinstance(self.window(), QMainWindow):
              QApplication.instance().quit()
         else:
-            # If embedded, maybe just stop the worker
             self.worker.stop()
 
     def closeEvent(self, event):
-        # 先停止线程，确保 history 不再变化
-        self.worker.stop()
-        # 保存新的 history 行到日志文件
+        if hasattr(self, 'worker'):
+            self.worker.stop()
         self.save_history()
         super().closeEvent(event)
 
@@ -570,14 +678,12 @@ class C4DMonitorWidget(QWidget):
                 if lines:
                     self.stats['history'].extend(lines)
                     self._loaded_history_count = len(self.stats['history'])
-                    # 立即刷新界面显示过去的历史
                     history_text = "\n".join(generate_bar_chart_for_history(self.stats['history'], color=self.stats.get('highlight_color','#FFFFFF')))
                     self._suppress_scroll_signal = True
                     self.history_view.setHtml(history_text.replace('\n', '<br>'))
                     self.history_view.moveCursor(QTextCursor.MoveOperation.End)
                     self._suppress_scroll_signal = False
             except Exception as e:
-                # 读取失败不阻塞程序
                 print(f"读取历史日志失败: {e}")
 
     def save_history(self):
@@ -596,12 +702,10 @@ class C4DMonitorWidget(QWidget):
     def _on_user_scroll(self):
         if self._suppress_scroll_signal:
             return
-        # 用户主动滚动，关闭自动跟随并启动 10 秒计时
         self.auto_scroll_enabled = False
-        self._auto_scroll_reenable_timer.start(10000)  # 10 秒
+        self._auto_scroll_reenable_timer.start(10000)
 
     def _reenable_auto_scroll(self):
-        # 时间到，恢复自动滚动并跳到底部
         self.auto_scroll_enabled = True
         self.scroll_to_bottom()
 
@@ -609,6 +713,57 @@ class C4DMonitorWidget(QWidget):
         self._suppress_scroll_signal = True
         self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         self._suppress_scroll_signal = False
+
+class CollapsibleBox(QWidget):
+    def __init__(self, title="", parent=None):
+        super().__init__(parent)
+        self.toggle_button = QPushButton(title)
+        font = self.toggle_button.font()
+        font.setBold(True)
+        self.toggle_button.setFont(font)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+
+        self.content_area = QFrame()
+        self.content_area.setFrameShape(QFrame.StyledPanel)
+        self.content_area.setMaximumHeight(0)
+        self.content_area.setMinimumHeight(0)
+
+        self.toggle_animation = QPropertyAnimation(self.content_area, b"maximumHeight")
+        self.toggle_animation.setDuration(250)
+        self.toggle_animation.setEasingCurve(QEasingCurve.InOutCubic)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0,0,0,0)
+        lay.addWidget(self.toggle_button)
+        lay.addWidget(self.content_area)
+
+        self.toggle_button.clicked.connect(self._on_toggled)
+        self._update_arrow(False)
+
+    def setContentLayout(self, layout):
+        # 清除旧 layout
+        old = self.content_area.layout()
+        if old is not None:
+            while old.count():
+                it = old.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.setParent(None)
+        self.content_area.setLayout(layout)
+        self.content_area.setMaximumHeight(0)
+
+    def _on_toggled(self, checked: bool):
+        self._update_arrow(checked)
+        content_height = self.content_area.layout().sizeHint().height() if self.content_area.layout() else 0
+        self.toggle_animation.stop()
+        self.toggle_animation.setStartValue(self.content_area.maximumHeight())
+        self.toggle_animation.setEndValue(content_height if checked else 0)
+        self.toggle_animation.start()
+
+    def _update_arrow(self, expanded: bool):
+        arrow = '▼' if expanded else '►'
+        self.toggle_button.setText(f"{arrow} 设置")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
