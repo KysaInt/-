@@ -4,7 +4,6 @@ import shutil
 import re
 import time
 import subprocess
-import psutil
 import json
 from datetime import datetime
 from pathlib import Path
@@ -16,94 +15,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette
 
-class C4DRenderMonitor:
-    def __init__(self):
-        self.c4d_process_names = [
-            'CINEMA 4D.exe',
-            'Cinema 4D.exe', 
-            'c4d.exe',
-            'Commandline.exe',
-            'TeamRender Client.exe',
-            'TeamRender Server.exe'
-        ]
-        self.is_rendering = False
-        self.last_render_status = -1
-        self.last_check_time = 0
-        self.cached_processes = []
-        self.cache_duration = 0.5
-        
-    def check_c4d_processes(self):
-        current_time = time.time()
-        
-        if current_time - self.last_check_time < self.cache_duration:
-            return self.cached_processes
-        
-        c4d_processes = []
-        
-        try:
-            for process in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
-                process_name = process.info['name']
-                if any(c4d_name.lower() in process_name.lower() for c4d_name in self.c4d_process_names):
-                    c4d_processes.append({
-                        'pid': process.info['pid'],
-                        'name': process_name,
-                        'cpu_percent': process.info['cpu_percent'],
-                        'memory': process.info['memory_info'].rss if process.info['memory_info'] else 0
-                    })
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-        
-        self.cached_processes = c4d_processes
-        self.last_check_time = current_time
-        
-        return c4d_processes
-    
-    def is_rendering_active(self, processes):
-        if not processes:
-            return False
-        
-        high_cpu_processes = [p for p in processes if p['cpu_percent'] > 20.0]
-        
-        commandline_processes = [p for p in processes if 'commandline' in p['name'].lower()]
-        
-        teamrender_processes = [p for p in processes if 'teamrender' in p['name'].lower()]
-        
-        if commandline_processes or teamrender_processes:
-            return True
-        
-        if high_cpu_processes:
-            return True
-        
-        return False
-    
-    def check_render_queue_files(self):
-        possible_files = [
-            os.path.expanduser("~/AppData/Roaming/Maxon/render_queue.xml"),
-            os.path.expanduser("~/AppData/Roaming/Maxon/queue.dat"),
-            os.path.expanduser("~/Documents/Maxon/render_queue.xml"),
-            "C:\\ProgramData\\Maxon\\render_queue.xml"
-        ]
-        
-        for file_path in possible_files:
-            try:
-                if os.path.exists(file_path):
-                    mtime = os.path.getmtime(file_path)
-                    if time.time() - mtime < 60:
-                        return True
-            except Exception:
-                continue
-        
-        return False
-    
-    def check_render_status(self):
-        processes = self.check_c4d_processes()
-        
-        queue_active = self.check_render_queue_files()
-        
-        process_rendering = self.is_rendering_active(processes)
-        current_rendering = process_rendering or queue_active
-        
-        return current_rendering
 
 def format_seconds(seconds):
     h = int(seconds // 3600)
@@ -298,27 +209,15 @@ class Worker(QThread):
         # 确保目标目录存在
         os.makedirs(folder_path, exist_ok=True)
         history = self.stats['history']
-        render_monitor = self.stats['render_monitor']
-        
-        is_rendering = render_monitor.check_render_status()
-        
         last_move_time = self.stats.get('last_move_time', None)
         moved_count = self.stats.get('moved_count', 0)
         program_start = self.stats.get('program_start', time.time())
         max_interval = self.stats.get('max_interval', 0)
         total_interval = self.stats.get('total_interval', 0)
-        total_render_time = self.stats.get('total_render_time', 0)
-        last_render_check = self.stats.get('last_render_check', time.time())
         is_first_run = self.stats.get('is_first_run', True)
         is_second_run = self.stats.get('is_second_run', False)
         moved_this_round = 0
-        
         current_time = time.time()
-        if self.stats.get('was_rendering', False) and is_rendering:
-            total_render_time += current_time - last_render_check
-        
-        self.stats['was_rendering'] = is_rendering
-        self.stats['last_render_check'] = current_time
         
         base_dir = folder_path
         sequences = {}
@@ -377,19 +276,17 @@ class Worker(QThread):
                         elif is_second_run:
                             history.append(f'[{timestamp_str}] "{filename}"[不完整渲染时长]')
                         else:
-                            if last_move_time and is_rendering:
+                            if last_move_time:
                                 interval = now - last_move_time
                                 total_interval += interval
                                 if interval > max_interval: max_interval = interval
                                 history.append(f'[{timestamp_str}] "{filename}" {format_seconds(interval)}')
-                            elif last_move_time and not is_rendering:
-                                history.append(f'[{timestamp_str}] "{filename}" [渲染暂停]')
                             else:
                                 history.append(f'[{timestamp_str}] "{filename}" [00:00:00]')
                         
                         moved_count += 1
                         moved_this_round += 1
-                        if is_rendering: last_move_time = now
+                        last_move_time = now
 
                 except Exception as e:
                     self.log_signal.emit(f"移动文件失败: {e}")
@@ -402,17 +299,15 @@ class Worker(QThread):
                 is_second_run = True
             elif is_second_run:
                 is_second_run = False
-            
+
         total_time = time.time() - program_start
         first_run_moved = self.stats.get('first_run_moved', 0)
         second_run_moved = self.stats.get('second_run_moved', 0)
         effective_moved_count = moved_count - first_run_moved - second_run_moved
         avg_interval = total_interval / effective_moved_count if effective_moved_count > 0 else 0
-        
-        render_indicator = "🔴渲染中" if is_rendering else "⚪暂停中"
-        
-        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 总渲染: {format_seconds(total_render_time)} | 运行: {format_seconds(total_time)} | {render_indicator}"
-        
+
+        stat_line = f"数量: {moved_count} | 最长: {format_seconds(max_interval)} | 平均: {format_seconds(avg_interval)} | 运行: {format_seconds(total_time)}"
+
         highlight_color = self.stats.get('highlight_color', '#FFFFFF')
         fill_char = self.stats.get('fill_char', '█')
         bar_width = self.stats.get('bar_width', 25)
@@ -430,7 +325,7 @@ class Worker(QThread):
 
         self.stats.update({
             'last_move_time': last_move_time, 'max_interval': max_interval, 'total_interval': total_interval,
-            'total_render_time': total_render_time, 'moved_count': moved_count, 'is_first_run': is_first_run,
+            'moved_count': moved_count, 'is_first_run': is_first_run,
             'is_second_run': is_second_run, 'history': history
         })
 
@@ -440,7 +335,6 @@ class C4DMonitorWidget(QWidget):
 
         self.stats = {
             'history': [],
-            'render_monitor': C4DRenderMonitor(),
             'program_start': time.time(),
             'should_exit': False
         }
