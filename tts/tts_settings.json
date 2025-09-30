@@ -7,5 +7,16 @@
   "selected_voices": [
     "zh-CN-XiaoxiaoMultilingualNeural",
     "zh-CN-YunyiMultilingualNeural"
+  ],
+  "panel_states": {
+    "settings": true,
+    "voice": true,
+    "log": false
+  },
+  "window_geometry": [
+    620,
+    245,
+    622,
+    640
   ]
 }

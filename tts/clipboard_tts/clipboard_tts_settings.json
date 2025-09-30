@@ -1,8 +1,46 @@
 {
   "hotkey": "ctrl+alt+v",
-  "checked_voices": [],
+  "checked_voices": [
+    "zh-TW-HsiaoChenNeural"
+  ],
   "output_device_id": 5,
   "monitor_device_id": -1,
   "output_dir_enabled": false,
-  "output_dir_path": "C:\\Users\\KYSAINT\\OneDrive\\-\\tts\\clipboard_tts\\output"
+  "output_dir_path": "C:\\Users\\KYSAINT\\OneDrive\\-\\tts\\clipboard_tts\\output",
+  "panel_states": {
+    "voice_expanded": false,
+    "settings_expanded": true,
+    "log_expanded": false
+  },
+  "panel_order": [
+    "settings",
+    "voice",
+    "log"
+  ],
+  "splitter_sizes": [
+    246,
+    23,
+    23
+  ],
+  "saved_panel_sizes": {
+    "voice": 292,
+    "log": 317
+  },
+  "expanded_regions": [],
+  "expanded_languages": [
+    "亚洲||zh-CN (中文)",
+    "亚洲||zh-CN-henan (中文)",
+    "亚洲||zh-CN-liaoning (中文)",
+    "亚洲||zh-CN-shaanxi (中文)",
+    "亚洲||zh-CN-shandong (中文)",
+    "亚洲||zh-CN-sichuan (中文)",
+    "亚洲||zh-HK (中文)",
+    "亚洲||zh-TW (中文)"
+  ],
+  "window_geometry": [
+    549,
+    125,
+    480,
+    898
+  ]
 }

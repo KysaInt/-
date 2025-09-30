@@ -11,7 +11,7 @@ from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QLineEdit, QCheckBox,
-    QComboBox, QSplitter, QSizePolicy
+    QComboBox
 )
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QIntValidator
@@ -81,57 +81,6 @@ def ensure_hanlp():
             sys.path.insert(0, script_dir)
 
 hanlp = ensure_hanlp()
-
-
-# ---- 折叠面板组件（参考 clipboard_tts.pyw 精简版） ----
-class CollapsibleBox(QWidget):
-    """简易折叠面板：点击标题按钮展开/收起内容，配合 QSplitter 使用。"""
-    toggled = Signal(bool)
-
-    def __init__(self, title: str = "面板", parent=None, expanded: bool = True):
-        super().__init__(parent)
-        self._base_title = title
-        self.toggle_button = QPushButton()
-        f = self.toggle_button.font()
-        f.setBold(True)
-        self.toggle_button.setFont(f)
-        self.toggle_button.setCheckable(True)
-        self.content_area = QWidget()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.toggle_button)
-        layout.addWidget(self.content_area)
-        self.toggle_button.clicked.connect(self._on_clicked)
-        self.set_expanded(expanded)
-
-    def header_height(self):
-        return self.toggle_button.sizeHint().height()
-
-    def is_expanded(self):
-        return self.toggle_button.isChecked()
-
-    def setContentLayout(self, inner_layout):
-        old = self.content_area.layout()
-        if old:
-            while old.count():
-                item = old.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.setParent(None)
-        self.content_area.setLayout(inner_layout)
-        if not self.is_expanded():
-            self.content_area.setVisible(False)
-
-    def set_expanded(self, expanded: bool):
-        self.toggle_button.setChecked(expanded)
-        self.content_area.setVisible(expanded)
-        arrow = "▼" if expanded else "►"
-        self.toggle_button.setText(f"{arrow} {self._base_title}")
-        self.toggled.emit(expanded)
-
-    def _on_clicked(self):
-        self.set_expanded(self.toggle_button.isChecked())
 
 
 def format_timestamp(total_seconds: float) -> str:
@@ -562,14 +511,10 @@ class TTSApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("微软 Edge TTS 文本转语音助手")
-        self._default_geometry = (160, 160, 560, 640)
-        self.setGeometry(*self._default_geometry)
-        self._settings_geometry_loaded = False
+        self.setGeometry(100, 100, 600, 650)
 
-        # 根布局
-        self.root_layout = QVBoxLayout(self)
+        self.layout = QVBoxLayout(self)
 
-        # 语音模型树
         self.label_voice = QLabel("选择语音模型 (可多选):")
         self.voice_tree = QTreeWidget()
         self.voice_tree.setHeaderLabels(["名称", "性别", "类别", "个性"])
@@ -582,34 +527,42 @@ class TTSApp(QWidget):
         self.voice_items = {}
         self.populate_voices()
 
-        # 标点转换控件
+        # 标点转换功能
         self.punctuation_layout = QHBoxLayout()
         self.punctuation_label = QLabel("标点转换:")
         self.punctuation_combo = QComboBox()
         self.punctuation_combo.addItem("不转换", "none")
         self.punctuation_combo.addItem("中文标点 → 英文标点", "to_halfwidth")
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
-        self.punctuation_combo.setToolTip("选择后立即对同目录下所有 txt 文件执行转换")
+        self.punctuation_combo.setToolTip("选择标点转换方式，选择后立即对同目录下所有txt文件执行转换")
+        
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
 
-        # 选项区
         self.options_layout = QHBoxLayout()
         self.default_output_checkbox = QCheckBox("完整输出")
         self.default_output_checkbox.setChecked(True)
         self.srt_checkbox = QCheckBox("生成字幕")
         self.srt_checkbox.setChecked(True)
         self.extra_line_checkbox = QCheckBox("分行输出")
+
         self.rule_label = QLabel("分行规则:")
         self.subtitle_rule_combo = QComboBox()
-        self.subtitle_rule_combo.addItem("规则1：按换行切分 (默认)", SubtitleGenerator.RULE_NEWLINE)
-        self.subtitle_rule_combo.addItem("规则2：智能分句", SubtitleGenerator.RULE_SMART)
-        self.subtitle_rule_combo.addItem("规则3：hanlp分句", SubtitleGenerator.RULE_HANLP)
+        self.subtitle_rule_combo.addItem(
+            "规则1：按换行切分 (默认)", SubtitleGenerator.RULE_NEWLINE
+        )
+        self.subtitle_rule_combo.addItem(
+            "规则2：智能分句", SubtitleGenerator.RULE_SMART
+        )
+        self.subtitle_rule_combo.addItem(
+            "规则3：hanlp分句", SubtitleGenerator.RULE_HANLP
+        )
         self.subtitle_rule_combo.setToolTip("选择字幕切分方式")
         self.line_length_label = QLabel("行字数(约):")
         self.line_length_input = QLineEdit("28")
         self.line_length_input.setValidator(QIntValidator(5, 120, self))
-        self.line_length_input.setFixedWidth(40)
+        self.line_length_input.setFixedWidth(30)
+
         self.options_layout.addWidget(self.default_output_checkbox)
         self.options_layout.addWidget(self.extra_line_checkbox)
         self.options_layout.addWidget(self.srt_checkbox)
@@ -618,65 +571,27 @@ class TTSApp(QWidget):
         self.options_layout.addWidget(self.line_length_label)
         self.options_layout.addWidget(self.line_length_input)
         self.options_layout.addStretch()
-
-        # 开始按钮
+        
         self.start_button = QPushButton("开始转换")
         self.start_button.clicked.connect(self.start_tts)
 
-        # 日志视图
-        self.log_view = QTextEdit(); self.log_view.setReadOnly(True)
-
-        # ========== 折叠面板结构 ==========
-        self.splitter = QSplitter(Qt.Vertical)
-        self.root_layout.addWidget(self.splitter)
-
-        # 设置面板（顶部）
-        self.settings_box = CollapsibleBox("设置", expanded=True)
-        settings_inner = QVBoxLayout(); settings_inner.setContentsMargins(8,8,8,8); settings_inner.setSpacing(6)
-        settings_inner.addLayout(self.punctuation_layout)
-        settings_inner.addLayout(self.options_layout)
-        settings_inner.addWidget(self.start_button, 0, Qt.AlignLeft)
-        self.settings_box.setContentLayout(settings_inner)
-        self.splitter.addWidget(self.settings_box)
-
-        # 语音模型面板
-        self.voice_box = CollapsibleBox("语音模型", expanded=True)
-        voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
-        voice_inner.addWidget(self.label_voice)
-        voice_inner.addWidget(self.voice_tree)
-        self.voice_box.setContentLayout(voice_inner)
-        self.splitter.addWidget(self.voice_box)
-
-        # 日志面板
-        self.log_box = CollapsibleBox("日志", expanded=True)
-        log_inner = QVBoxLayout(); log_inner.setContentsMargins(8,8,8,8); log_inner.setSpacing(6)
-        log_inner.addWidget(self.log_view)
-        self.log_box.setContentLayout(log_inner)
-        self.splitter.addWidget(self.log_box)
-
-        # 填充占位，保证折叠后贴顶
-        self.bottom_filler = QWidget(); self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.splitter.addWidget(self.bottom_filler)
-
-        # 保存展开尺寸
-        self._panel_saved_sizes = {"voice": None, "log": None}
-        for b in (self.settings_box, self.voice_box, self.log_box):
-            b.toggled.connect(self.update_splitter_sizes)
-        self.splitter.splitterMoved.connect(lambda *_: self._store_expanded_sizes())
-        # 附加：拖动后进行约束修正，避免覆盖折叠标题或挤压内容
-        self.splitter.splitterMoved.connect(lambda *_: self._enforce_splitter_constraints())
-
-        # 初始尺寸分配（异步等待渲染完成）
-        from PySide6.QtCore import QTimer as _QT
-        _QT.singleShot(0, self.update_splitter_sizes)
-
-        # 信号连接（原有逻辑）
         self.punctuation_combo.currentIndexChanged.connect(self.execute_punctuation_conversion)
+
         self.default_output_checkbox.toggled.connect(self.update_option_states)
         self.srt_checkbox.toggled.connect(self.update_option_states)
         self.subtitle_rule_combo.currentIndexChanged.connect(self.update_option_states)
         self.extra_line_checkbox.toggled.connect(self.update_option_states)
         self.update_option_states()
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+
+        self.layout.addWidget(self.label_voice)
+        self.layout.addWidget(self.voice_tree)
+        self.layout.addLayout(self.punctuation_layout)
+        self.layout.addLayout(self.options_layout)
+        self.layout.addWidget(self.start_button)
+        self.layout.addWidget(self.log_view)
 
         self.workers = {}
 
@@ -691,139 +606,6 @@ class TTSApp(QWidget):
         self.log_view.append("3. 点击“开始转换”按钮启动")
         self.log_view.append("4. 可选：勾选“同步生成 SRT 字幕文件”并调整参数")
         self.log_view.append("")
-
-    # ---------- Splitter 尺寸控制 ----------
-    def _store_expanded_sizes(self):
-        sizes = self.splitter.sizes()
-        if len(sizes) < 4:
-            return
-        # sizes: [settings, voice, log, filler]
-        if self.voice_box.is_expanded():
-            self._panel_saved_sizes['voice'] = max(0, sizes[1])
-        if self.log_box.is_expanded():
-            self._panel_saved_sizes['log'] = max(0, sizes[2])
-
-    def update_splitter_sizes(self):
-        splitter = self.splitter
-        total_h = max(1, splitter.height())
-        header_s = self.settings_box.header_height()
-        header_v = self.voice_box.header_height()
-        header_l = self.log_box.header_height()
-        MAX_COMPACT = 260
-
-        # 设置面板高度
-        if self.settings_box.is_expanded():
-            content_h = self.settings_box.content_area.sizeHint().height()
-            set_h = min(MAX_COMPACT, content_h + header_s)
-            set_h = max(set_h, header_s + 40)
-            self._expanded_settings_height = set_h
-        else:
-            set_h = header_s
-
-        all_collapsed = (not self.settings_box.is_expanded() and
-                         not self.voice_box.is_expanded() and
-                         not self.log_box.is_expanded())
-        if all_collapsed:
-            filler = max(0, total_h - (header_s + header_v + header_l))
-            splitter.setSizes([header_s, header_v, header_l, filler])
-            for box, h in [(self.settings_box, header_s), (self.voice_box, header_v), (self.log_box, header_l)]:
-                box.setMinimumHeight(h); box.setMaximumHeight(h)
-            self.bottom_filler.setMinimumHeight(0)
-            self.bottom_filler.setMaximumHeight(16777215)
-            self._store_expanded_sizes()
-            return
-
-        remaining = max(0, total_h - set_h)
-        voice_exp = self.voice_box.is_expanded()
-        log_exp = self.log_box.is_expanded()
-        MIN_CONTENT = 80
-        voice_h = header_v
-        log_h = header_l
-        if voice_exp and log_exp:
-            sv = self._panel_saved_sizes.get('voice') or 1
-            sl = self._panel_saved_sizes.get('log') or 1
-            tot = sv + sl
-            if tot <= 0: tot = 2; sv = sl = 1
-            voice_h = max(MIN_CONTENT, int(remaining * (sv / tot)))
-            log_h = max(MIN_CONTENT, remaining - voice_h)
-        elif voice_exp and not log_exp:
-            log_h = header_l
-            voice_h = max(MIN_CONTENT, remaining - log_h)
-        elif log_exp and not voice_exp:
-            voice_h = header_v
-            log_h = max(MIN_CONTENT, remaining - voice_h)
-
-        used = set_h + voice_h + log_h
-        filler = max(0, total_h - used)
-        splitter.setSizes([set_h, voice_h, log_h, filler])
-
-        # 约束高度
-        if self.settings_box.is_expanded():
-            self.settings_box.setMinimumHeight(set_h)
-            self.settings_box.setMaximumHeight(set_h)
-        else:
-            self.settings_box.setMinimumHeight(header_s)
-            self.settings_box.setMaximumHeight(header_s)
-
-        for box, expanded, header, h in [
-            (self.voice_box, voice_exp, header_v, voice_h),
-            (self.log_box, log_exp, header_l, log_h)
-        ]:
-            if expanded:
-                box.setMinimumHeight(MIN_CONTENT)
-                box.setMaximumHeight(16777215)
-            else:
-                box.setMinimumHeight(header)
-                box.setMaximumHeight(header)
-
-        self.bottom_filler.setMinimumHeight(0)
-        self.bottom_filler.setMaximumHeight(16777215)
-        self._store_expanded_sizes()
-
-    def _enforce_splitter_constraints(self):
-        """防止拖动超出合理范围：
-        - 折叠面板固定为 header 高度
-        - 展开面板 >= MIN_CONTENT
-        """
-        sizes = self.splitter.sizes()
-        if len(sizes) < 4:
-            return
-        header_s = self.settings_box.header_height()
-        header_v = self.voice_box.header_height()
-        header_l = self.log_box.header_height()
-        MIN_CONTENT = 80
-        set_h, voice_h, log_h, filler = sizes
-        if not self.settings_box.is_expanded():
-            set_h = header_s
-        else:
-            fixed = getattr(self, '_expanded_settings_height', None)
-            if fixed is not None:
-                set_h = fixed
-            else:
-                set_h = max(set_h, header_s + 40)
-        if not self.voice_box.is_expanded():
-            voice_h = header_v
-        else:
-            voice_h = max(voice_h, MIN_CONTENT)
-        if not self.log_box.is_expanded():
-            log_h = header_l
-        else:
-            log_h = max(log_h, MIN_CONTENT)
-        total = sum(sizes)
-        used = set_h + voice_h + log_h
-        filler = max(0, total - used)
-        if used > total:
-            scale = total / used if used > 0 else 1
-            set_h = int(set_h * scale)
-            voice_h = int(voice_h * scale)
-            log_h = int(log_h * scale)
-            used = set_h + voice_h + log_h
-            filler = max(0, total - used)
-        self.splitter.setSizes([set_h, voice_h, log_h, filler])
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update_splitter_sizes()
 
     def update_option_states(self, *_):
         default_output_enabled = self.default_output_checkbox.isChecked()
@@ -1044,28 +826,6 @@ class TTSApp(QWidget):
 
             selected_voices = data.get("selected_voices", [])
             self.apply_saved_voice_selection(selected_voices)
-            # 恢复窗口大小与位置
-            geo = data.get("window_geometry")
-            if isinstance(geo, list) and len(geo) == 4:
-                try:
-                    x, y, w, h = geo
-                    if w > 200 and h > 300:
-                        self.setGeometry(int(x), int(y), int(w), int(h))
-                        self._settings_geometry_loaded = True
-                except Exception:
-                    pass
-            # 折叠面板状态（兼容旧版无字段情况）
-            panel_states = data.get("panel_states") or {}
-            if isinstance(panel_states, dict):
-                if "settings" in panel_states:
-                    self.settings_box.set_expanded(bool(panel_states.get("settings", True)))
-                if "voice" in panel_states:
-                    self.voice_box.set_expanded(bool(panel_states.get("voice", True)))
-                if "log" in panel_states:
-                    self.log_box.set_expanded(bool(panel_states.get("log", True)))
-                # 延迟一次尺寸更新
-                from PySide6.QtCore import QTimer as _QT
-                _QT.singleShot(0, self.update_splitter_sizes)
         finally:
             self._loading_settings = False
             self.update_option_states()
@@ -1086,12 +846,6 @@ class TTSApp(QWidget):
             "line_length": max(5, min(120, line_length)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
-            "panel_states": {
-                "settings": self.settings_box.is_expanded(),
-                "voice": self.voice_box.is_expanded(),
-                "log": self.log_box.is_expanded(),
-            },
-            "window_geometry": [self.x(), self.y(), self.width(), self.height()],
         }
 
         try:
@@ -1119,7 +873,6 @@ class TTSApp(QWidget):
                 item.setCheckState(0, Qt.Checked)
 
     def closeEvent(self, event):
-        # 保存窗口几何信息
         self.save_settings()
         super().closeEvent(event)
 

@@ -1,0 +1,178 @@
+[2025-09-29 21:49:45] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 137, in _on_clicked
+    def _on_clicked(self):
+    
+KeyboardInterrupt
+
+[2025-09-29 21:53:00] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1195, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-29 21:53:30] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1196, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-29 21:55:47] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1201, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-29 21:57:07] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1204, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-29 22:16:41] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1205, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-29 22:17:14] 启动异常: 'ClipboardTTSApp' object has no attribute 'settings_box'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1207, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 485, in __init__
+    self.layout_splitter.addWidget(self.settings_box)
+                                   ^^^^^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'settings_box'
+
+[2025-09-30 00:28:46] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1110, in closeEvent
+    self.output_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
+    
+KeyboardInterrupt
+
+[2025-09-30 01:05:32] 启动异常: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1380, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 458, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 833, in populate_voices
+    region_item.setFlags(region_item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsTristate)
+                                                                          ^^^^^^^^^^^^^^^^^
+AttributeError: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+
+[2025-09-30 01:05:32] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1380, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 458, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 833, in populate_voices
+    region_item.setFlags(region_item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsTristate)
+                                                                          ^^^^^^^^^^^^^^^^^
+AttributeError: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1390, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 01:06:01] 启动异常: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1380, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 458, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 833, in populate_voices
+    region_item.setFlags(region_item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsTristate)
+                                                                          ^^^^^^^^^^^^^^^^^
+AttributeError: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+
+[2025-09-30 01:06:01] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1380, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 458, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 833, in populate_voices
+    region_item.setFlags(region_item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsTristate)
+                                                                          ^^^^^^^^^^^^^^^^^
+AttributeError: type object 'PySide6.QtCore.Qt' has no attribute 'ItemIsTristate'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1390, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 01:20:38] 启动异常: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1409, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 525, in __init__
+    highlight = pal.color(pal.Highlight)
+                          ^^^^^^^^^^^^^
+AttributeError: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'. Did you mean: 'highlight'?
+
+[2025-09-30 01:20:38] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1409, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 525, in __init__
+    highlight = pal.color(pal.Highlight)
+                          ^^^^^^^^^^^^^
+AttributeError: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'. Did you mean: 'highlight'?
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1419, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 01:21:00] 启动异常: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1409, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 525, in __init__
+    highlight = pal.color(pal.Highlight)
+                          ^^^^^^^^^^^^^
+AttributeError: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'. Did you mean: 'highlight'?
+
+[2025-09-30 01:21:01] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1409, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 525, in __init__
+    highlight = pal.color(pal.Highlight)
+                          ^^^^^^^^^^^^^
+AttributeError: 'PySide6.QtGui.QPalette' object has no attribute 'Highlight'. Did you mean: 'highlight'?
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\KYSAINT\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1419, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
