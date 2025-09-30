@@ -37,6 +37,7 @@ from ui_form import Ui_Widget
 from mf_pyside6 import C4DMonitorWidget # Import the refactored widget
 from sequence_viewer import SequenceViewerWidget # 导入序列查看器小部件
 from rename_tool import ReplaceWidget # 导入新的重命名模块
+from sequence_splitter import SequenceSplitWidget # 第四模块：序列切分
 
 class Widget(QWidget):
     def __init__(self, parent=None):
@@ -77,6 +78,18 @@ class Widget(QWidget):
                 widget.deleteLater()
         page_3_layout.addWidget(self.rename_tool)
         self.ui.navigationList.item(2).setText("替换")
+        # --- Module 4: Sequence Splitter ---
+        # 动态添加一个新的页面与导航项，避免修改 .ui 源文件
+        from PySide6.QtWidgets import QListWidgetItem, QWidget as _QW, QVBoxLayout as _QVL
+        self.sequence_splitter = SequenceSplitWidget(self)
+        page_4 = _QW()
+        page_4.setObjectName("page_4")
+        page_4_layout = _QVL(page_4)
+        page_4_layout.setContentsMargins(0,0,0,0)
+        page_4_layout.addWidget(self.sequence_splitter)
+        self.ui.stackedWidget.addWidget(page_4)
+        QListWidgetItem(self.ui.navigationList)  # 新增列表项
+        self.ui.navigationList.item(3).setText("切分")
 
 
 if __name__ == "__main__":
