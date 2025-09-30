@@ -211,98 +211,94 @@ class SequenceViewerWidget(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         # 先创建“切分设置”折叠面板（放置路径行）
         self.split_box = CollapsibleBox("切分设置", default_open=True, expand_flex=False)
-        split_layout = QGridLayout()
-        split_layout.setSpacing(6)
-        split_layout.setContentsMargins(6, 6, 6, 6)
+        from PySide6.QtWidgets import QVBoxLayout as _QVBL, QHBoxLayout as _QHBL
+        split_layout = _QVBL()
+        split_layout.setContentsMargins(4, 4, 4, 4)
+        split_layout.setSpacing(4)
 
-        # 顶部：预览目录行（去掉“目录:”文字，按钮改为“预览目录”）
+        # 行1：预览目录 + 预览按钮
+        row1 = _QHBL()
         self.path_edit = QLineEdit(self.current_path)
-        self.path_edit.setMinimumWidth(360)
         self.path_edit.returnPressed.connect(self.path_edited)
         self.select_button = QPushButton("预览目录")
         self.select_button.clicked.connect(self.select_directory)
-        self.refresh_button = QPushButton("刷新")
-        self.refresh_button.clicked.connect(self.scan_directory)
-        split_layout.addWidget(self.path_edit, 0, 0, 1, 4)
-        split_layout.addWidget(self.select_button, 0, 4)
-        split_layout.addWidget(self.refresh_button, 0, 5)
-        split_layout.setColumnStretch(0, 4)
-        split_layout.setColumnStretch(1, 1)
-        split_layout.setColumnStretch(2, 1)
+        row1.addWidget(self.path_edit, 1)
+        row1.addWidget(self.select_button)
+        split_layout.addLayout(row1)
 
-        # 第二行：输出目录文本框 + 选择按钮（原“输出目录”按钮逻辑保留，新增加一个 QLineEdit 与其并排）
+        # 行2：输出目录 + 选择按钮
+        row2 = _QHBL()
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setPlaceholderText("输出目录（未选择）")
         self.output_dir_edit.setReadOnly(True)
-        split_layout.addWidget(self.output_dir_edit, 1, 0, 1, 4)
-        # 复用 unified_output_dir_btn 作为选择按钮
         self.unified_output_dir_btn = QPushButton("输出目录")
         self.unified_output_dir_btn.clicked.connect(self.choose_unified_output_dir)
-        split_layout.addWidget(self.unified_output_dir_btn, 1, 4)
-        # 预留一个“打开”按钮
-        self.open_output_dir_btn = QPushButton("打开")
-        self.open_output_dir_btn.clicked.connect(self.open_unified_output_dir)
-        split_layout.addWidget(self.open_output_dir_btn, 1, 5)
+        row2.addWidget(self.output_dir_edit, 1)
+        row2.addWidget(self.unified_output_dir_btn)
+        split_layout.addLayout(row2)
 
-    # 第三行（原第二行）: 切分方法 + 片段数 + 差异最大化复选框（占用后侧列）
-        split_layout.addWidget(QLabel("切分方法:"), 2, 0)
+        # 行3：切分方法 + 片段数 + 刷新按钮（右侧）
+        row3 = _QHBL()
+        row3.addWidget(QLabel("切分方法:"))
         self.split_method_combo = QComboBox()
         self.split_method_combo.addItems(["默认切分模式", "字幕时间切分", "音频响度切分"])
         self.split_method_combo.currentIndexChanged.connect(self.split_method_changed)
-        split_layout.addWidget(self.split_method_combo, 2, 1)
+        row3.addWidget(self.split_method_combo)
         self.segment_count_label = QLabel("片段数:")
         self.segment_count_spin = QSpinBox()
         self.segment_count_spin.setRange(2, 1000)
         self.segment_count_spin.setValue(3)
-        split_layout.addWidget(self.segment_count_label, 2, 2)
-        split_layout.addWidget(self.segment_count_spin, 2, 3)
+        row3.addWidget(self.segment_count_label)
+        row3.addWidget(self.segment_count_spin)
+        row3.addStretch()
+        self.refresh_button = QPushButton("刷新")
+        self.refresh_button.clicked.connect(self.scan_directory)
+        row3.addWidget(self.refresh_button)
+        split_layout.addLayout(row3)
 
-    # 第四行：输出类型复选框
+        # 行4：输出类型复选框
+        row4 = _QHBL()
         self.segment_output_checkbox = QCheckBox("片段输出")
         self.segment_output_checkbox.setChecked(True)
         self.segment_output_checkbox.stateChanged.connect(self.output_mode_changed)
         self.custom_output_checkbox = QCheckBox("组合输出")
         self.custom_output_checkbox.stateChanged.connect(self.custom_output_toggled)
-        split_layout.addWidget(self.segment_output_checkbox, 3, 0, 1, 1)
-        split_layout.addWidget(self.custom_output_checkbox, 3, 1, 1, 1)
+        row4.addWidget(self.segment_output_checkbox)
+        row4.addWidget(self.custom_output_checkbox)
+        row4.addStretch()
+        split_layout.addLayout(row4)
 
-    # 第五/六行：组合模式输入改为两行，第一行左侧显示“组合”说明
-        self.custom_pattern_label = QLabel("组合文本:")
+        # 行5：组合模式
+        row5 = _QHBL()
+        self.custom_pattern_label = QLabel("组合:")
         self.custom_pattern_edit = QLineEdit()
         self.custom_pattern_edit.setPlaceholderText("例如: ABAB 或 ACBA ...")
-        split_layout.addWidget(self.custom_pattern_label, 4, 0)
-        split_layout.addWidget(self.custom_pattern_edit, 4, 1, 1, 3)
+        row5.addWidget(self.custom_pattern_label)
+        row5.addWidget(self.custom_pattern_edit, 1)
+        split_layout.addLayout(row5)
+
+        # 行6：前缀
+        row6 = _QHBL()
         self.custom_prefix_label = QLabel("前缀:")
         self.custom_prefix_edit = QLineEdit()
-        split_layout.addWidget(self.custom_prefix_label, 5, 0)
-        split_layout.addWidget(self.custom_prefix_edit, 5, 1, 1, 3)
+        row6.addWidget(self.custom_prefix_label)
+        row6.addWidget(self.custom_prefix_edit, 1)
+        split_layout.addLayout(row6)
 
-    # 第七行：差异最大化复选框（独占）
-        self.max_diff_checkbox = QCheckBox("选则差异最大化的组合的限制方法")
-        self.max_diff_checkbox.setChecked(False)
-        split_layout.addWidget(self.max_diff_checkbox, 6, 0, 1, 6)
-
-    # 最后一行：执行输出按钮（行号 +1）
-        self.execute_output_btn = QPushButton("执行输出")
+        # 行7：执行按钮（全宽）
+        self.execute_output_btn = QPushButton("执行")
         self.execute_output_btn.clicked.connect(self.execute_outputs)
-        split_layout.addWidget(self.execute_output_btn, 7, 0, 1, 6)
-
-        # 更新列伸展策略
-        split_layout.setColumnStretch(0, 4)
-        split_layout.setColumnStretch(1, 1)
-        split_layout.setColumnStretch(2, 1)
-        split_layout.setColumnStretch(3, 1)
-        split_layout.setColumnStretch(4, 1)
+        self.execute_output_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        split_layout.addWidget(self.execute_output_btn)
 
         # 组合输出复用统一输出目录
-        self.custom_output_dir = ''  # deprecated per unified design
+        self.custom_output_dir = ''
 
         # 初始禁用自定义输出子控件
         for w in [self.custom_pattern_label, self.custom_pattern_edit,
                   self.custom_prefix_label, self.custom_prefix_edit]:
             w.setEnabled(False)
 
-    # 移除旧的列伸展重复设置
         self.split_box.setContentLayout(split_layout)
         main_layout.addWidget(self.split_box)
 
@@ -354,7 +350,7 @@ class SequenceViewerWidget(QWidget):
         # 同步一次状态
         self.custom_output_toggled(self.custom_output_checkbox.checkState())
 
-        # 主序列折叠面板
+        # 主序列折叠面板 (可扩展填充)
         self.sequence_box = CollapsibleBox("主序列", default_open=True, expand_flex=True)
         sequence_layout = QVBoxLayout()
         sequence_layout.setContentsMargins(0, 0, 0, 0)
@@ -368,7 +364,6 @@ class SequenceViewerWidget(QWidget):
         self.scroll_area.setWidget(self.card_container)
         sequence_layout.addWidget(self.scroll_area)
         self.sequence_box.setContentLayout(sequence_layout)
-        # 使用 stretch 使主序列占据剩余空间
         main_layout.addWidget(self.sequence_box, 1)
 
     def path_edited(self):

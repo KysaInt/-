@@ -1,16 +1,16 @@
 {
   "hotkey": "ctrl+alt+v",
   "checked_voices": [
-    "ja-JP-AoiNeural"
+    "ja-JP-Nanami:DragonHDLatestNeural"
   ],
-  "output_device_id": 3,
+  "output_device_id": 4,
   "monitor_device_id": -1,
   "output_dir_enabled": false,
   "output_dir_path": "C:\\Users\\KYSAINT\\OneDrive\\-\\tts\\clipboard_tts\\output",
   "panel_states": {
-    "voice_expanded": false,
-    "settings_expanded": false,
-    "log_expanded": false
+    "voice_expanded": true,
+    "settings_expanded": true,
+    "log_expanded": true
   },
   "panel_order": [
     "settings",
@@ -18,9 +18,9 @@
     "log"
   ],
   "splitter_sizes": [
-    23,
-    23,
-    23
+    251,
+    355,
+    266
   ],
   "saved_panel_sizes": {
     "voice": 371,
@@ -30,12 +30,13 @@
     "亚洲"
   ],
   "expanded_languages": [
-    "亚洲||ja-JP (日语)"
+    "亚洲||ja-JP (日语)",
+    "亚洲||zh-TW (中文)"
   ],
   "window_geometry": [
-    375,
-    202,
-    480,
+    445,
+    151,
+    527,
     909
   ]
 }
