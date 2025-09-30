@@ -64,6 +64,24 @@ class CollapsibleBox(QWidget):
 
         self.toggle_button.clicked.connect(self.toggle)
         self.update_arrow(self.toggle_button.isChecked())
+        self._apply_expand_flex_constraints(self.toggle_button.isChecked())
+
+    def _calculate_collapsed_height(self):
+        margins = self.layout().contentsMargins()
+        return self.toggle_button.sizeHint().height() + margins.top() + margins.bottom()
+
+    def _apply_expand_flex_constraints(self, expanded):
+        if not self.expand_flex:
+            return
+        if expanded:
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+        else:
+            collapsed_height = self._calculate_collapsed_height()
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setMinimumHeight(collapsed_height)
+            self.setMaximumHeight(collapsed_height)
 
     def setContentLayout(self, layout):
         if self.content_area.layout() is not None:
@@ -85,16 +103,18 @@ class CollapsibleBox(QWidget):
     def toggle(self, checked):
         self.update_arrow(checked)
         if self.expand_flex:
-            # 展开：允许充分扩展；折叠：高度=0，仅显示按钮所在的外层 widget 高度
+            # 对可扩展面板：统一用最大高度 16777215 / 0 控制
             if checked:
+                self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 self.content_area.setMaximumHeight(16777215)
             else:
+                self.content_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 self.content_area.setMaximumHeight(0)
+            
             self.content_area.updateGeometry()
-            # 强制父布局重新计算，使折叠后按钮贴顶
-            parent_layout = self.parentWidget().layout() if self.parentWidget() else None
-            if parent_layout:
-                parent_layout.invalidate()
+            # 无需手动更新父布局，Qt会自动处理
+            self._apply_expand_flex_constraints(checked)
+            self.updateGeometry()
         else:
             content_height = self.content_area.sizeHint().height()
             self.toggle_animation.setStartValue(self.content_area.maximumHeight())
@@ -364,7 +384,8 @@ class SequenceViewerWidget(QWidget):
         self.scroll_area.setWidget(self.card_container)
         sequence_layout.addWidget(self.scroll_area)
         self.sequence_box.setContentLayout(sequence_layout)
-        main_layout.addWidget(self.sequence_box, 1)
+        main_layout.addWidget(self.sequence_box, 100)
+        main_layout.addStretch(1)
 
     def path_edited(self):
         new_path = self.path_edit.text()
