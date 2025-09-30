@@ -2,6 +2,7 @@
 import sys
 import os
 import subprocess
+import ctypes  # For setting Windows AppUserModelID so taskbar/icon works properly
 
 def check_and_regenerate_ui():
     """
@@ -79,14 +80,27 @@ class Widget(QWidget):
 
 
 if __name__ == "__main__":
+    # --- Windows 任务栏图标支持：设置 AppUserModelID（必须在窗口创建前执行）---
+    if sys.platform.startswith('win'):
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AYE.App.1.0")
+        except Exception:
+            # 静默失败即可（在部分旧系统或受限环境可能失败）
+            pass
+
     app = QApplication(sys.argv)
 
-    # 设置应用程序图标
+    # 设置应用程序图标（作为全局默认）
     script_dir = os.path.dirname(os.path.abspath(__file__))
     icon_path = os.path.join(script_dir, "icon.ico")
+    app_icon = None
     if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
 
     widget = Widget()
+    # 再对主窗口显式设置一次，确保任务栏/Alt+Tab 使用
+    if app_icon is not None:
+        widget.setWindowIcon(app_icon)
     widget.show()
     sys.exit(app.exec())
