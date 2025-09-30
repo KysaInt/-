@@ -1,7 +1,7 @@
 {
   "hotkey": "ctrl+alt+v",
   "checked_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural"
+    "ja-JP-AoiNeural"
   ],
   "output_device_id": 3,
   "monitor_device_id": -1,
@@ -10,7 +10,7 @@
   "panel_states": {
     "voice_expanded": false,
     "settings_expanded": false,
-    "log_expanded": true
+    "log_expanded": false
   },
   "panel_order": [
     "settings",
@@ -20,23 +20,22 @@
   "splitter_sizes": [
     23,
     23,
-    702
+    23
   ],
   "saved_panel_sizes": {
-    "voice": 167,
-    "log": 556
+    "voice": 371,
+    "log": 277
   },
   "expanded_regions": [
     "亚洲"
   ],
   "expanded_languages": [
-    "亚洲||zh-CN (中文)",
-    "亚洲||zh-TW (中文)"
+    "亚洲||ja-JP (日语)"
   ],
   "window_geometry": [
-    857,
-    102,
+    538,
+    129,
     480,
-    785
+    909
   ]
 }
