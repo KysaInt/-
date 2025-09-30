@@ -171,66 +171,66 @@ class SequenceViewerWidget(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Toolbar
-        toolbar = QFrame()
-        toolbar_layout = QHBoxLayout(toolbar)
-        
-        self.path_edit = QLineEdit(self.current_path)
-        self.path_edit.returnPressed.connect(self.path_edited)
-        
-        self.select_button = QPushButton("选择目录")
-        self.select_button.clicked.connect(self.select_directory)
-        self.refresh_button = QPushButton("刷新")
-        self.refresh_button.clicked.connect(self.scan_directory)
-        
-        toolbar_layout.addWidget(QLabel("当前目录:"))
-        toolbar_layout.addWidget(self.path_edit)
-        toolbar_layout.addWidget(self.select_button)
-        toolbar_layout.addWidget(self.refresh_button)
-        main_layout.addWidget(toolbar)
+        # 将路径选择行整合进设置折叠面板中
 
         # Collapsible settings box
         self.collapsible_box = CollapsibleBox("设置")
         settings_layout = QGridLayout() # Use QGridLayout for better alignment
 
+        # Path selection row (位于顶部)
+        path_label = QLabel("目录:")
+        self.path_edit = QLineEdit(self.current_path)
+        self.path_edit.returnPressed.connect(self.path_edited)
+        self.select_button = QPushButton("选择")
+        self.select_button.clicked.connect(self.select_directory)
+        self.refresh_button = QPushButton("刷新")
+        self.refresh_button.clicked.connect(self.scan_directory)
+
+        settings_layout.addWidget(path_label, 0, 0)
+        settings_layout.addWidget(self.path_edit, 0, 1)
+        settings_layout.addWidget(self.select_button, 0, 2)
+        settings_layout.addWidget(self.refresh_button, 0, 3)
+
+        # 调整列拉伸，让路径编辑框更宽
+        settings_layout.setColumnStretch(1, 1)
+
         # Width Slider
-        settings_layout.addWidget(QLabel("宽度:"), 0, 0)
+        settings_layout.addWidget(QLabel("宽度:"), 1, 0)
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setRange(1, 30)
         self.width_slider.setValue(2)
         self.width_slider_label = QLabel(str(self.width_slider.value()))
         self.width_slider.valueChanged.connect(self.width_slider_label.setNum)
         self.width_slider.valueChanged.connect(self.update_pixel_width)
-        settings_layout.addWidget(self.width_slider, 0, 1)
-        settings_layout.addWidget(self.width_slider_label, 0, 2)
+        settings_layout.addWidget(self.width_slider, 1, 1)
+        settings_layout.addWidget(self.width_slider_label, 1, 2)
 
         # Height Slider
-        settings_layout.addWidget(QLabel("高度:"), 1, 0)
+        settings_layout.addWidget(QLabel("高度:"), 2, 0)
         self.height_slider = QSlider(Qt.Horizontal)
         self.height_slider.setRange(1, 30)
         self.height_slider.setValue(2)
         self.height_slider_label = QLabel(str(self.height_slider.value()))
         self.height_slider.valueChanged.connect(self.height_slider_label.setNum)
         self.height_slider.valueChanged.connect(self.update_pixel_height)
-        settings_layout.addWidget(self.height_slider, 1, 1)
-        settings_layout.addWidget(self.height_slider_label, 1, 2)
+        settings_layout.addWidget(self.height_slider, 2, 1)
+        settings_layout.addWidget(self.height_slider_label, 2, 2)
 
         # Min Frames Input
-        settings_layout.addWidget(QLabel("最少帧数:"), 2, 0)
+        settings_layout.addWidget(QLabel("最少帧数:"), 3, 0)
         self.min_frames_spinbox = QSpinBox()
         self.min_frames_spinbox.setRange(0, 9999)
         self.min_frames_spinbox.setValue(self.min_frame_threshold)
         self.min_frames_spinbox.valueChanged.connect(self.update_min_threshold)
-        settings_layout.addWidget(self.min_frames_spinbox, 2, 1)
+        settings_layout.addWidget(self.min_frames_spinbox, 3, 1)
 
         # Max Frames Input
-        settings_layout.addWidget(QLabel("最多帧数:"), 3, 0)
+        settings_layout.addWidget(QLabel("最多帧数:"), 4, 0)
         self.max_frames_spinbox = QSpinBox()
         self.max_frames_spinbox.setRange(1, 99999)
         self.max_frames_spinbox.setValue(self.max_frame_threshold)
         self.max_frames_spinbox.valueChanged.connect(self.update_max_threshold)
-        settings_layout.addWidget(self.max_frames_spinbox, 3, 1)
+        settings_layout.addWidget(self.max_frames_spinbox, 4, 1)
 
         self.collapsible_box.setContentLayout(settings_layout)
         main_layout.addWidget(self.collapsible_box)
