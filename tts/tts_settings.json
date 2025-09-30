@@ -11,11 +11,11 @@
   "panel_states": {
     "settings": true,
     "voice": true,
-    "log": false
+    "log": true
   },
   "window_geometry": [
-    620,
-    245,
+    792,
+    175,
     622,
     640
   ]

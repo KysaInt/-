@@ -14,12 +14,6 @@ from datetime import datetime
 import threading
 from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Dict
-import random
-
-try:
-    import httpx  # 供模拟浏览器获取 token
-except ImportError:  # 延迟安装
-    httpx = None
 
 # ---- 可调参数 / Troubleshooting 开关 ----
 PARALLEL_TTS = False
@@ -27,14 +21,17 @@ MAX_PARALLEL_TTS = 2
 DETAILED_TTS_ERROR = True
 DEBUG_PRINT = False
 
-# ---- 全局日志（已禁用文件写入，根据需求取消 runtime/crash log） ----
+# ---- 全局日志与崩溃捕获 ----
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
-CRASH_LOG = None  # 原文件路径不再使用
-RUNTIME_LOG = None
+CRASH_LOG = os.path.join(LOG_DIR, "clipboard_tts_crash.log")
+RUNTIME_LOG = os.path.join(LOG_DIR, "clipboard_tts_runtime.log")
 
 def _append_log(path, text):
-    # 日志文件写入被需求取消；保留函数避免引用报错，可改为 print 或直接忽略
-    return
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+    except Exception:
+        pass
 
 def dprint(*args, **kwargs):
     if DEBUG_PRINT:
@@ -94,18 +91,20 @@ class AppSettings:
             pass
 
 def init_global_error_logging():
-    # 保留接口但不写入文件；如需调试可改用 print。
     def handle_exception(exc_type, exc_value, exc_tb):
+        import traceback as _tb
+        details = ''.join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        _append_log(CRASH_LOG, f"UNCAUGHT: {details}")
         try:
             sys.__excepthook__(exc_type, exc_value, exc_tb)
         except Exception:
             pass
     def handle_unraisable(unraisable):
-        # 静默忽略
-        pass
+        _append_log(CRASH_LOG, f"UNRAISABLE: {unraisable.exctype} {unraisable.exc_value} attr={getattr(unraisable.object, '__class__', type(unraisable.object))}")
     sys.excepthook = handle_exception
     if hasattr(sys, 'unraisablehook'):
         sys.unraisablehook = handle_unraisable
+    _append_log(RUNTIME_LOG, "程序启动，已安装全局异常钩子。")
 
 def ensure_package(package_name, import_name=None):
     normalized_name = import_name or package_name.replace('-', '_')
@@ -203,135 +202,37 @@ class CollapsibleBox(QWidget):
 # 但根据实际需求增加显式刷新机制。
 
 _EDGE_REFRESH_LOCK = threading.Lock()
-_EDGE_TOKEN_EXPIRE = 0.0
-_EDGE_TOKEN_CACHE: Dict[str, str] = {}
-_EDGE_TOKEN_LIFETIME = 60 * 8  # 微软 session token 在当前流程下通常较短，这里设置 8 分钟后强制刷新
+_LAST_EDGE_REFRESH_TS = 0
+_EDGE_REFRESH_INTERVAL = 30  # 秒; 避免频繁刷新，可根据需要调整
 
-EDGE_TTS_BASE_HEADERS = {
-    # 伪造常见 Edge 浏览器 UA
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Connection": "keep-alive",
-    "Cache-Control": "no-cache",
-}
-
-def _ensure_httpx():
-    global httpx
-    if httpx is None:
-        try:
-            import importlib
-            import subprocess, sys as _sys
-            subprocess.check_call([_sys.executable, '-m', 'pip', 'install', 'httpx'])
-            httpx = importlib.import_module('httpx')  # type: ignore
-        except Exception as e:
-            raise RuntimeError(f"无法安装 httpx 用于获取 Edge token: {e}")
-    return httpx
-
-async def _fetch_edge_token_async():
-    """模拟浏览器访问，提取 Edge TTS 所需的 session token。
-    注意：微软在线 TTS 页面变动较快，此实现依赖当前公开页面结构，仅供临时稳定。
-    如果失败，返回 None。
-    流程：
-      1. 访问 https://azure.microsoft.com/en-us/products/ai-services/text-to-speech/ 获取初始 cookies
-      2. 请求静态 js (若需要) 或直接访问 https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1 获取会话 token
+def refresh_edge_tts_key(force: bool = True):
+    """强制通过 VoicesManager.create() 触发 edge_tts 内部重新协商参数/密钥。
+    返回 True 表示成功，False 表示失败。
     """
-    _ensure_httpx()
-    async with httpx.AsyncClient(timeout=10, headers=EDGE_TTS_BASE_HEADERS) as client:  # type: ignore
-        # Step1: 打页面获取 cookie
-        landing_urls = [
-            "https://azure.microsoft.com/en-us/products/ai-services/text-to-speech/",
-            "https://www.microsoft.com/en-us/edge/features/immersive-reader"
-        ]
-        for url in landing_urls:
-            try:
-                await client.get(url)
-            except Exception:
-                pass
-        # Step2: 获取 token 接口
-        # 旧接口： https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1
-        # 新接口有时出现 region 参数，这里先尝试旧接口
-        token_url_candidates = [
-            "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1",
-            "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?trustedclient=1",
-        ]
-        for token_url in token_url_candidates:
-            try:
-                r = await client.get(token_url, headers={
-                    **EDGE_TTS_BASE_HEADERS,
-                    "Pragma": "no-cache",
-                    "Accept": "*/*",
-                    "Origin": "https://azure.microsoft.com",
-                    "Referer": "https://azure.microsoft.com/",
-                })
-                if r.status_code == 200:
-                    # 响应正文为 token 字符串
-                    token_text = r.text.strip().strip('"')
-                    if token_text and len(token_text) < 200:  # 简单长度校验
-                        return token_text
-                # 某些情况下 401/403，继续尝试下一个
-            except Exception:
-                continue
-    return None
-
-def get_edge_session_token(force: bool = False) -> Optional[str]:
-    """获取/缓存 Edge session token。"""
-    global _EDGE_TOKEN_EXPIRE, _EDGE_TOKEN_CACHE
+    global _LAST_EDGE_REFRESH_TS
     with _EDGE_REFRESH_LOCK:
         now = time.time()
-        cached = _EDGE_TOKEN_CACHE.get('token') if _EDGE_TOKEN_EXPIRE > now and not force else None
-        if cached:
-            return cached
-        # 重新获取（同步包装）
+        if not force and (now - _LAST_EDGE_REFRESH_TS) < _EDGE_REFRESH_INTERVAL:
+            return True
         try:
+            async def _do():
+                try:
+                    # 创建一次即可; 结果不使用，只为触发内部请求
+                    await edge_tts.VoicesManager.create()
+                except Exception as inner_e:
+                    raise inner_e
             try:
                 loop = asyncio.get_running_loop()
-                needs_close = False
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                needs_close = True
-            token = loop.run_until_complete(_fetch_edge_token_async())
-            if needs_close:
-                try:
-                    loop.close()
-                except Exception:
-                    pass
-            if token:
-                _EDGE_TOKEN_CACHE['token'] = token
-                _EDGE_TOKEN_EXPIRE = time.time() + _EDGE_TOKEN_LIFETIME
-                return token
-            return None
+            loop.run_until_complete(_do())
+            _LAST_EDGE_REFRESH_TS = now
+            print("Edge TTS 鉴权参数刷新成功")
+            return True
         except Exception as e:
-            print(f"获取 Edge token 失败: {e}")
-            return None
-
-def refresh_edge_tts_key(force: bool = True):
-    """刷新 edge-tts 内部上下文：
-    1. 先确保 session token 可用
-    2. 调用 VoicesManager.create() 触发内部 (Authorization) 刷新
-    """
-    token = get_edge_session_token(force=force)
-    if not token:
-        print("未能获取 Edge session token，刷新终止。")
-        return False
-    try:
-        async def _do():
-            try:
-                await edge_tts.VoicesManager.create()
-            except Exception as inner_e:
-                raise inner_e
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_do())
-        print("Edge TTS 上下文刷新成功 (含 session token)")
-        return True
-    except Exception as e:
-        print(f"刷新 Edge TTS 上下文失败: {e}\n{traceback.format_exc()}")
-        return False
+            print(f"刷新 Edge TTS 鉴权参数失败: {e}\n{traceback.format_exc()}")
+            return False
 
 
 VBCABLE_INSTALL_URL = "https://vb-audio.com/Cable/"
@@ -348,29 +249,35 @@ def get_audio_devices():
 
 def load_voice_list():
     print("load_voice_list called")
-    # 确保 token
-    if not get_edge_session_token(force=False):
-        get_edge_session_token(force=True)
     try:
+        print("Trying to create VoicesManager...")
         async def _inner():
             manager = await edge_tts.VoicesManager.create()
             return manager.voices or []
+
+        # Use the running event loop if it exists, otherwise create a new one
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+        
         try:
             return loop.run_until_complete(_inner())
         except Exception as e:
+            # 如果遇到 401/Unauthorized，尝试刷新后再重试一次
             if '401' in str(e) or 'Unauthorized' in str(e):
-                print("获取 voices 401，强制刷新 token 后重试…")
-                refresh_edge_tts_key(force=True)
-                return loop.run_until_complete(_inner())
-            print(f"加载 voices 异常: {e}")
-            return []
+                print("首次加载语音列表发生 401，尝试刷新鉴权后重试一次…")
+                try:
+                    refresh_edge_tts_key(force=True)
+                    return loop.run_until_complete(_inner())
+                except Exception as e2:
+                    print(f"重试仍失败: {e2}")
+                    return []
+            else:
+                raise
     except Exception as e:
-        print(f"Error in load_voice_list outer: {e}")
+        print(f"Error in load_voice_list: {e}")
         return []
 
 
@@ -399,9 +306,6 @@ class TTSWorker(QThread):
         last_error = None
         while attempt < 2:  # 最多重试1次（总共2次尝试）
             try:
-                # 合成前确保 token 有效
-                if not get_edge_session_token(force=False):
-                    get_edge_session_token(force=True)
                 if DETAILED_TTS_ERROR:
                     print(f"[DEBUG] 开始合成 voice={self.voice} attempt={attempt+1}")
                 communicate = edge_tts.Communicate(self.text, self.voice)
@@ -431,8 +335,11 @@ class TTSWorker(QThread):
                     print(f"[DEBUG][ERROR] voice={self.voice} attempt={attempt+1} error={err_text}\n{traceback.format_exc()}")
                 last_error = err_text
                 if '401' in err_text or 'Unauthorized' in err_text:
-                    # 刷新 token + 上下文
-                    refresh_edge_tts_key(force=True)
+                    # 刷新密钥后重试一次
+                    try:
+                        refresh_edge_tts_key(force=True)
+                    except Exception:
+                        pass
                     attempt += 1
                     continue
                 # 某些地区/新语音可能暂时不可用或返回空流；提示用户稍后再试
@@ -516,7 +423,8 @@ class ClipboardTTSApp(QWidget):
         self.setMinimumWidth(480)
         self.setMinimumHeight(560)
         self._settings_geometry_loaded = False
-    # 原日志写入已禁用
+        # 记录启动
+        _append_log(RUNTIME_LOG, "构造 ClipboardTTSApp")
 
         # 启动即刷新一次 Edge TTS 鉴权
         try:
@@ -1274,10 +1182,12 @@ class ClipboardTTSApp(QWidget):
                     self.trigger_conversion("hotkey")
                 except Exception as e:
                     self.log(f"热键触发异常: {e}")
+                    _append_log(CRASH_LOG, f"HOTKEY ERROR: {e}\n{traceback.format_exc()}")
             keyboard.add_hotkey(self.hotkey_string, _safe_trigger)
             self.log(f"快捷键 '{self.hotkey_string}' 已激活。")
         except Exception as exc:
             self.log(f"设置快捷键失败: {exc}")
+            _append_log(CRASH_LOG, f"设置快捷键失败: {exc}\n{traceback.format_exc()}")
 
     def trigger_conversion(self, source: str):
         now = time.time()
@@ -1594,41 +1504,6 @@ if __name__ == "__main__":
         init_global_error_logging()
     except Exception:
         pass
-
-    # ---- 控制台显示/隐藏逻辑 ----
-    # 需求：UI 出现之前显示 cmd 窗口，UI 出现后隐藏。
-    # 实现：
-    #   1. 若当前无控制台 (pythonw.exe) -> 调用 AllocConsole 创建
-    #   2. 记录我们是否新建控制台 (created_console)
-    #   3. 在窗口 show() 后使用 Win32 API ShowWindow(hWnd, SW_HIDE) 隐藏控制台
-    # 注意：如果用户本身就是在已有控制台 (python.exe) 中运行，为避免打断用户，默认仍隐藏，
-    #       可根据需要修改 retain_existing_console 标志。
-    created_console = False
-    try:
-        if os.name == 'nt':
-            import ctypes
-            kernel32 = ctypes.windll.kernel32  # type: ignore
-            user32 = ctypes.windll.user32      # type: ignore
-            get_console = kernel32.GetConsoleWindow
-            get_console.restype = ctypes.wintypes.HWND  # type: ignore
-            h_console = get_console()
-            if not h_console:
-                # 无控制台，分配新的
-                if kernel32.AllocConsole():
-                    created_console = True
-                    # 绑定标准流 (只在全新控制台情形下进行，避免覆盖用户控制台缓冲区)
-                    try:
-                        sys.stdout = open('CONOUT$', 'w', encoding='utf-8', buffering=1)
-                        sys.stderr = open('CONOUT$', 'w', encoding='utf-8', buffering=1)
-                        sys.stdin = open('CONIN$', 'r', encoding='utf-8')
-                    except Exception:
-                        pass
-                    print("[启动] 已分配新的控制台窗口，用于查看初始化信息…")
-                h_console = get_console()
-            else:
-                print("[启动] 检测到已有控制台窗口。")
-    except Exception as _ce:
-        print(f"控制台初始化失败: {_ce}")
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
@@ -1639,25 +1514,12 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
         window = ClipboardTTSApp()
         window.show()
-        # ---- 隐藏控制台 ----
-        try:
-            if os.name == 'nt':
-                import ctypes
-                import ctypes.wintypes
-                user32 = ctypes.windll.user32  # type: ignore
-                kernel32 = ctypes.windll.kernel32  # type: ignore
-                h_console = kernel32.GetConsoleWindow()
-                if h_console:
-                    # 0:SW_HIDE 5:SW_SHOW
-                    user32.ShowWindow(h_console, 0)
-        except Exception as _he:
-            print(f"隐藏控制台失败: {_he}")
         rc = app.exec()
-    # 退出日志写入已禁用
+        _append_log(RUNTIME_LOG, f"QApplication 退出 rc={rc}")
         sys.exit(rc)
     except Exception as e:
         err = f"启动异常: {e}"
         print(err)
         traceback.print_exc()
-    # 崩溃日志写入已禁用
+        _append_log(CRASH_LOG, err + "\n" + traceback.format_exc())
         input("Press Enter to exit...")

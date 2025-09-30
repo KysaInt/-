@@ -176,3 +176,166 @@ Traceback (most recent call last):
     ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
 RuntimeError: lost sys.stdin
 
+[2025-09-30 10:24:43] 启动异常: 'ClipboardTTSApp' object has no attribute 'log_view'
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+[2025-09-30 10:24:43] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1525, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 10:24:47] 启动异常: 'ClipboardTTSApp' object has no attribute 'log_view'
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+[2025-09-30 10:24:47] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1525, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 10:24:57] 启动异常: 'ClipboardTTSApp' object has no attribute 'log_view'
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+[2025-09-30 10:24:57] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1525, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 10:25:03] 启动异常: 'ClipboardTTSApp' object has no attribute 'log_view'
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+[2025-09-30 10:25:03] UNCAUGHT: Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.pyw", line 1525, in <module>
+    input("Press Enter to exit...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: lost sys.stdin
+
+[2025-09-30 10:25:36] 启动异常: 'ClipboardTTSApp' object has no attribute 'log_view'
+Traceback (most recent call last):
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.py", line 1515, in <module>
+    window = ClipboardTTSApp()
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.py", line 461, in __init__
+    self.populate_voices()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.py", line 895, in populate_voices
+    self.log("警告: 无法加载语音列表，使用回退语音集合。")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\94230\OneDrive\-\tts\clipboard_tts\clipboard_tts.py", line 879, in log
+    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    ^^^^^^^^^^^^^
+AttributeError: 'ClipboardTTSApp' object has no attribute 'log_view'
+
