@@ -15,67 +15,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette
 
-# ---- 辅助: 颜色对比调整，避免柱状图颜色与背景/空条过近导致“看不见” ----
-def _hex_to_rgb(hex_color: str):
-    hex_color = hex_color.lstrip('#')
-    if len(hex_color) == 3:
-        hex_color = ''.join(c*2 for c in hex_color)
-    try:
-        r = int(hex_color[0:2], 16)
-        g = int(hex_color[2:4], 16)
-        b = int(hex_color[4:6], 16)
-        return r, g, b
-    except Exception:
-        return 0, 0, 0
-
-def _luminance(rgb):
-    # sRGB 相对亮度
-    def _c(c):
-        c = c / 255.0
-        return c/12.92 if c <= 0.03928 else ((c+0.055)/1.055)**2.4
-    r,g,b = rgb
-    return 0.2126*_c(r) + 0.7152*_c(g) + 0.0722*_c(b)
-
-def _contrast_ratio(c1, c2):
-    L1 = _luminance(c1)
-    L2 = _luminance(c2)
-    lighter = max(L1, L2)
-    darker = min(L1, L2)
-    return (lighter + 0.05) / (darker + 0.05)
-
-def ensure_contrast_color(fg_hex: str, *bg_hex_candidates: str, min_ratio: float = 2.2) -> str:
-    """如果前景色与任一背景色/空条色对比度过低，则返回一个可见度更高的替代颜色。
-    min_ratio 取较低值以适应深色主题；若希望更强对比，可增大到 3+。"""
-    try:
-        fg_rgb = _hex_to_rgb(fg_hex)
-        bg_rgbs = [_hex_to_rgb(c) for c in bg_hex_candidates if c]
-        need_adjust = False
-        for bg in bg_rgbs:
-            if _contrast_ratio(fg_rgb, bg) < min_ratio:
-                need_adjust = True
-                break
-        if not need_adjust:
-            return fg_hex
-    except Exception:
-        # 解析失败就直接返回一个默认亮色
-        return '#00A8FF'
-
-    # 简单策略：若过暗 -> 变亮；过亮 -> 加蓝偏青；再保证一定饱和度
-    r,g,b = fg_rgb
-    lum = _luminance(fg_rgb)
-    if lum < 0.3:  # 偏暗，提亮并稍带色相
-        r = min(255, int(r*0.6 + 80))
-        g = min(255, int(g*0.6 + 140))
-        b = min(255, int(b*0.6 + 220))
-    elif lum > 0.8:  # 太亮，往青色/蓝色偏移加深
-        r = int(r*0.4)
-        g = int(g*0.7)
-        b = int(b*0.9)
-    else:  # 中等亮度，稍微提高饱和 / 偏蓝
-        b = min(255, int(b*1.25 + 20))
-        g = min(255, int(g*1.10 + 10))
-    return f"#{r:02X}{g:02X}{b:02X}"
-
 
 def format_seconds(seconds):
     h = int(seconds // 3600)
@@ -185,6 +124,9 @@ def generate_bar_chart_for_history(
             raw = bar_width * ratio
             # 使用向下取整(允许显示为0长度)，保证比例真实；极小值不被强制放大
             filled_length = int(raw)
+            # 若存在非零间隔但比例太小导致长度为0，为保证可见性，至少显示1格
+            if interval > 0 and filled_length == 0:
+                filled_length = 1
             filled_length = max(0, min(filled_length, bar_width))
             empty_length = bar_width - filled_length
             
@@ -434,11 +376,10 @@ class C4DMonitorWidget(QWidget):
         self.history_view.setReadOnly(True)
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.history_view.setFont(font)
-        # 主题高亮色作为条形颜色（增加对比度调整防止不可见）
-        raw_highlight = self.palette().color(QPalette.ColorRole.Highlight).name()
-        base_bg = self.palette().color(QPalette.ColorRole.Base).name()
-        empty_bar_color = '#555555'
-        highlight_color = ensure_contrast_color(raw_highlight, base_bg, empty_bar_color)
+        # 主题高亮色作为条形颜色
+        highlight_color = self._ensure_visible_color(
+            self.palette().color(QPalette.ColorRole.Highlight).name()
+        )
         self.stats['highlight_color'] = highlight_color
         # Ctrl+滚轮缩放字号
         self.history_view.wheelEvent = self.history_view_wheel_event
@@ -530,7 +471,8 @@ class C4DMonitorWidget(QWidget):
     def _settings_changed(self, *args):
         # 重新渲染当前 history
         history = self.stats.get('history', [])
-        highlight_color = self.stats.get('highlight_color', '#FFFFFF')
+        highlight_color = self._ensure_visible_color(self.stats.get('highlight_color', '#FFFFFF'))
+        self.stats['highlight_color'] = highlight_color
         fill_char = (self.fill_char_edit.text() or '█')[0]
         bar_width = self.bar_width_spin.value()
         scale = self.scale_slider.value() / 100.0
@@ -549,9 +491,59 @@ class C4DMonitorWidget(QWidget):
         # 保持滚动位置逻辑
         sb = self.history_view.verticalScrollBar()
         at_bottom = sb.value() == sb.maximum()
-        self.history_view.setHtml(history_text.replace('\n','<br>'))
+        self._suppress_scroll_signal = True
+        self._set_history_html(history_text)
         if at_bottom:
             self.history_view.moveCursor(QTextCursor.End)
+        self._suppress_scroll_signal = False
+
+    def _history_html_from_text(self, history_text: str) -> str:
+        lines = history_text.split('\n') if history_text else []
+        if not lines:
+            lines = ['']
+        html_lines = []
+        for line in lines:
+            content = line if line else '&nbsp;'
+            html_lines.append(f'<div style="white-space: pre;">{content}</div>')
+
+        font = self.history_view.font()
+        font_size = font.pointSizeF()
+        if font_size <= 0:
+            font_size = getattr(self, '_base_font_point_size', 10)
+        palette = self.history_view.palette()
+        fg_color = palette.color(QPalette.Text).name()
+        bg_color = palette.color(QPalette.Base).name()
+
+        return (
+            "<html><head><meta charset='utf-8'></head>"
+            f"<body style=\"margin:0;font-family:'{font.family()}';font-size:{font_size}pt;"
+            f"color:{fg_color};background-color:{bg_color};\">"
+            f"{''.join(html_lines)}"
+            "</body></html>"
+        )
+
+    def _set_history_html(self, history_text: str):
+        self.history_view.setHtml(self._history_html_from_text(history_text))
+
+    def _ensure_visible_color(self, color: str) -> str:
+        fallback = '#4caf50'
+        if not color:
+            return fallback
+        hex_value = color[1:] if color.startswith('#') else color
+        if len(hex_value) == 3:
+            hex_value = ''.join(ch * 2 for ch in hex_value)
+        if len(hex_value) != 6:
+            return fallback
+        try:
+            r, g, b = [int(hex_value[i:i+2], 16) for i in range(0, 6, 2)]
+        except ValueError:
+            return fallback
+
+        bg = self.history_view.palette().color(QPalette.Base)
+        contrast = abs(r - bg.red()) + abs(g - bg.green()) + abs(b - bg.blue())
+        if contrast < 120:
+            return fallback
+        return f"#{hex_value.lower()}"
 
     # ---------------- 视图与线程逻辑（原误放在 CollapsibleBox 内） ----------------
     def history_view_wheel_event(self, event):
@@ -586,7 +578,7 @@ class C4DMonitorWidget(QWidget):
             distance_from_bottom = 0
 
         self._suppress_scroll_signal = True
-        self.history_view.setHtml(history_text.replace('\n', '<br>'))
+        self._set_history_html(history_text)
         if self.auto_scroll_enabled:
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
@@ -654,7 +646,7 @@ class C4DMonitorWidget(QWidget):
                         global_scale=self.stats.get('global_scale',1.0)
                     ))
                     self._suppress_scroll_signal = True
-                    self.history_view.setHtml(history_text.replace('\n', '<br>'))
+                    self._set_history_html(history_text)
                     self.history_view.moveCursor(QTextCursor.MoveOperation.End)
                     self._suppress_scroll_signal = False
             except Exception as e:

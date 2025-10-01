@@ -34,10 +34,15 @@ from PySide6.QtGui import QIcon
 #     pyside6-uic form.ui -o ui_form.py, or
 #     pyside2-uic form.ui -o ui_form.py
 from ui_form import Ui_Widget
-from mf_pyside6 import C4DMonitorWidget # Import the refactored widget
-from sequence_viewer import SequenceViewerWidget # 导入序列查看器小部件
-from rename_tool import ReplaceWidget # 导入新的重命名模块
-from sequence_splitter import SequenceSplitWidget # 第四模块：序列切分
+"""
+更新说明:
+1. 现在主程序改为导入已加序号的模块文件 (module1_*, module2_* 等)。
+2. 如需再次使用未加序号旧文件名, 只需把下方 import 改回去即可。
+"""
+from module1_c4d_monitor import C4DMonitorWidget  # 渲染监控（原 mf_pyside6 / c4d monitor）
+from module2_sequence_viewer import SequenceViewerWidget  # 序列查看器
+from module3_rename_tool import ReplaceWidget  # 批量替换工具
+from module4_sequence_splitter import SequenceSplitWidget  # 序列切分
 
 class Widget(QWidget):
     def __init__(self, parent=None):

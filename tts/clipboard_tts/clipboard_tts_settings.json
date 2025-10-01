@@ -8,9 +8,9 @@
   "output_dir_enabled": false,
   "output_dir_path": "C:\\Users\\KYSAINT\\OneDrive\\-\\tts\\clipboard_tts\\output",
   "panel_states": {
-    "voice_expanded": true,
+    "voice_expanded": false,
     "settings_expanded": true,
-    "log_expanded": true
+    "log_expanded": false
   },
   "panel_order": [
     "settings",
@@ -19,8 +19,8 @@
   ],
   "splitter_sizes": [
     251,
-    355,
-    266
+    23,
+    23
   ],
   "saved_panel_sizes": {
     "voice": 371,
@@ -34,8 +34,8 @@
     "亚洲||zh-TW (中文)"
   ],
   "window_geometry": [
-    445,
-    151,
+    675,
+    236,
     527,
     909
   ]
