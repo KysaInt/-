@@ -1,0 +1,5 @@
+{
+    "hotkey": "ctrl+shift+a",
+    "tesseract_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "ocr_lang": "chi_sim+eng"
+}
