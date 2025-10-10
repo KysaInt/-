@@ -1,8 +1,6 @@
 {
   "hotkey": "ctrl+alt+v",
-  "checked_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural"
-  ],
+  "checked_voices": [],
   "output_device_id": 4,
   "monitor_device_id": -1,
   "output_dir_enabled": false,
@@ -10,7 +8,7 @@
   "panel_states": {
     "voice_expanded": true,
     "settings_expanded": true,
-    "log_expanded": false
+    "log_expanded": true
   },
   "panel_order": [
     "settings",
@@ -18,24 +16,32 @@
     "log"
   ],
   "splitter_sizes": [
-    251,
-    857,
-    23
+    453,
+    446,
+    214
   ],
   "saved_panel_sizes": {
-    "voice": 371,
-    "log": 277
+    "voice": 438,
+    "log": 210
   },
   "expanded_regions": [
     "亚洲"
   ],
   "expanded_languages": [
+    "欧洲||en-US (英语)",
     "亚洲||zh-CN (中文)"
   ],
   "window_geometry": [
-    503,
-    65,
-    527,
-    1168
-  ]
+    726,
+    171,
+    640,
+    1150
+  ],
+  "voice_rate": "+0%",
+  "voice_pitch": "+0Hz",
+  "voice_volume": "+0%",
+  "enable_emotion": true,
+  "voice_style": "general",
+  "voice_styledegree": "2.0",
+  "voice_role": ""
 }

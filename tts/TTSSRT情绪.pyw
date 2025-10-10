@@ -11,10 +11,112 @@ from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QLineEdit, QCheckBox,
-    QComboBox, QSplitter, QSizePolicy
+    QComboBox, QSplitter, QSizePolicy, QSlider
 )
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QIntValidator
+
+
+# ==================== edge-tts SSML情绪标签补丁 ====================
+# 直接集成补丁代码,无需外部文件
+def apply_edge_tts_patch():
+    """应用edge-tts SSML情绪标签支持补丁"""
+    try:
+        import edge_tts
+        from edge_tts import communicate
+        from xml.sax.saxutils import escape
+        
+        # 保存原始函数
+        _original_mkssml = communicate.mkssml
+        _original_communicate_init = communicate.Communicate.__init__
+        _original_split = communicate.split_text_by_byte_length
+        
+        def patched_mkssml(tc, escaped_text):
+            """修改后的mkssml,添加mstts命名空间"""
+            if isinstance(escaped_text, bytes):
+                escaped_text = escaped_text.decode("utf-8")
+            
+            # 添加mstts命名空间声明
+            return (
+                "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
+                "xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='zh-CN'>"
+                f"<voice name='{tc.voice}'>"
+                f"<prosody pitch='{tc.pitch}' rate='{tc.rate}' volume='{tc.volume}'>"
+                f"{escaped_text}"
+                "</prosody>"
+                "</voice>"
+                "</speak>"
+            )
+        
+        def patched_communicate_init(self, text, voice, *args, **kwargs):
+            """修改Communicate初始化,在文本转义前提取SSML标签"""
+            original_text = text
+            
+            # 检查是否包含express-as标签
+            if '<mstts:express-as' in text and '</mstts:express-as>' in text:
+                # 提取标签和内容
+                pattern = r'<mstts:express-as\s+([^>]+)>(.*?)</mstts:express-as>'
+                match = re.search(pattern, text, re.DOTALL)
+                
+                if match:
+                    attrs = match.group(1)
+                    inner_text = match.group(2).strip()
+                    
+                    # 使用零宽字符作为标记(不会被转义)
+                    marker_start = "\u200B__EXPR_START__"
+                    marker_attrs = f"\u200B__ATTRS__{attrs}__"
+                    marker_end = "\u200B__EXPR_END__"
+                    
+                    # 替换文本
+                    text = f"{marker_start}{marker_attrs}{inner_text}{marker_end}"
+            
+            # 调用原始__init__
+            _original_communicate_init(self, text, voice, *args, **kwargs)
+        
+        def patched_split(text, max_len):
+            """修改split_text,在分割后还原SSML标签"""
+            result = _original_split(text, max_len)
+            
+            # 在每个chunk中还原SSML标签
+            processed = []
+            for chunk in result:
+                # 处理bytes和str
+                if isinstance(chunk, bytes):
+                    chunk_str = chunk.decode('utf-8')
+                else:
+                    chunk_str = chunk
+                    
+                if '\u200B__EXPR_START__' in chunk_str:
+                    # 提取属性
+                    attrs_match = re.search(r'\u200B__ATTRS__(.+?)__', chunk_str)
+                    if attrs_match:
+                        attrs = attrs_match.group(1)
+                        # 移除标记
+                        chunk_str = chunk_str.replace('\u200B__EXPR_START__', '')
+                        chunk_str = chunk_str.replace(f'\u200B__ATTRS__{attrs}__', '')
+                        chunk_str = chunk_str.replace('\u200B__EXPR_END__', '')
+                        # 添加SSML标签
+                        chunk_str = f"<mstts:express-as {attrs}>{chunk_str}</mstts:express-as>"
+                
+                # 保持原类型
+                if isinstance(chunk, bytes):
+                    processed.append(chunk_str.encode('utf-8'))
+                else:
+                    processed.append(chunk_str)
+            
+            return processed
+        
+        # 应用所有补丁
+        communicate.mkssml = patched_mkssml
+        communicate.Communicate.__init__ = patched_communicate_init  
+        communicate.split_text_by_byte_length = patched_split
+        
+        print("✓ edge-tts SSML情绪标签补丁已应用")
+        return True
+    except Exception as e:
+        print(f"⚠ edge-tts补丁应用失败: {e}")
+        return False
+# ==================== 补丁代码结束 ====================
 
 
 # 自动检查并安装 edge-tts，并处理同名脚本导致的导入冲突
@@ -35,6 +137,9 @@ def ensure_edge_tts():
             sys.path.insert(0, script_dir)
 
 edge_tts = ensure_edge_tts()
+
+# 立即应用补丁
+apply_edge_tts_patch()
 
 _mutagen_mp3_module = None
 
@@ -409,6 +514,13 @@ class TTSWorker(QThread):
         output_root: str | None = None,
         extra_line_output: bool = False,
         default_output: bool = True,
+        rate: str = "+0%",
+        pitch: str = "+0Hz",
+        volume: str = "+0%",
+        enable_emotion: bool = False,
+        style: str = "general",
+        styledegree: str = "1.0",
+        role: str = "",
     ):
         super().__init__(parent)
         self.voice = voice
@@ -421,15 +533,62 @@ class TTSWorker(QThread):
         self.default_output = default_output
         self.output_root = output_root or os.path.dirname(os.path.abspath(__file__))
         os.makedirs(self.output_root, exist_ok=True)
+        # 情绪控制参数
+        self.rate = rate
+        self.pitch = pitch
+        self.volume = volume
+        self.enable_emotion = enable_emotion
+        self.style = style
+        self.styledegree = styledegree
+        self.role = role
+
+    def build_ssml_text(self, text: str):
+        """构建包含情绪标签的文本
+        
+        通过edge_tts_patch的猴子补丁,可以使用SSML标签
+        补丁会在生成最终SSML时正确处理express-as标签
+        """
+        text = text.strip()
+        
+        # 只有在启用情绪控制且情绪不是普通时才添加标签
+        if self.enable_emotion and self.style != "general":
+            express_attrs = [f'style="{self.style}"', f'styledegree="{self.styledegree}"']
+            if self.role:
+                express_attrs.append(f'role="{self.role}"')
+            
+            attrs_str = " ".join(express_attrs)
+            text = f'<mstts:express-as {attrs_str}>{text}</mstts:express-as>'
+            print(f"[调试] 情绪控制已启用 - style={self.style}, degree={self.styledegree}, role={self.role}")
+            print(f"[调试] SSML文本片段: {text[:200]}...")
+        else:
+            if self.enable_emotion:
+                print(f"[调试] 情绪控制已启用但style为general，不添加标签")
+            else:
+                print(f"[调试] 情绪控制未启用")
+        
+        return text
 
     async def tts_async(self, text, voice, output):
+        # 构建包含情绪的SSML文本
+        ssml_text = self.build_ssml_text(text)
+        
         try:
             from edge_tts import async_api
-            communicate = async_api.Communicate(text, voice)
+            communicate = async_api.Communicate(
+                ssml_text, voice,
+                rate=self.rate,
+                pitch=self.pitch,
+                volume=self.volume
+            )
             self.progress.emit(f"    → [{self.voice}] 正在调用微软语音服务...")
             await communicate.save(output)
         except Exception:
-            communicate = edge_tts.Communicate(text, voice)
+            communicate = edge_tts.Communicate(
+                ssml_text, voice,
+                rate=self.rate,
+                pitch=self.pitch,
+                volume=self.volume
+            )
             self.progress.emit(f"    → [{self.voice}] 检测到旧版 API，已切换兼容模式。")
             await communicate.save(output)
         self.progress.emit(f"    ✓ [{self.voice}] 语音已保存到 {os.path.basename(output)}")
@@ -562,7 +721,7 @@ class TTSApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("微软 Edge TTS 文本转语音助手")
-        self._default_geometry = (160, 160, 560, 640)
+        self._default_geometry = (160, 160, 560, 800)  # 增加窗口高度以容纳情绪控制面板
         self.setGeometry(*self._default_geometry)
         self._settings_geometry_loaded = False
 
@@ -581,6 +740,23 @@ class TTSApp(QWidget):
         self.voice_tree.sortByColumn(0, Qt.AscendingOrder)
         self.voice_items = {}
         self.populate_voices()
+        
+        # 添加已选择模型的提示标签
+        self.selected_voices_label = QLabel("已选择: 0 个模型")
+        self.selected_voices_label.setStyleSheet("""
+            QLabel {
+                color: #2196F3;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #E3F2FD;
+                border-radius: 3px;
+                border: 1px solid #90CAF9;
+            }
+        """)
+        self.selected_voices_label.setWordWrap(True)
+        
+        # 连接树控件的itemChanged信号以更新选择提示
+        self.voice_tree.itemChanged.connect(self._update_selected_voices_label)
 
         # 标点转换控件
         self.punctuation_layout = QHBoxLayout()
@@ -619,6 +795,138 @@ class TTSApp(QWidget):
         self.options_layout.addWidget(self.line_length_input)
         self.options_layout.addStretch()
 
+        # ========== 语音参数控制 ==========
+        self.voice_params_layout = QHBoxLayout()
+        
+        # 语速控制
+        self.rate_label = QLabel("语速:")
+        self.rate_combo = QComboBox()
+        rate_options = ["-50%", "-25%", "+0%", "+25%", "+50%"]
+        self.rate_combo.addItems(rate_options)
+        self.rate_combo.setCurrentText("+0%")
+        
+        # 音调控制
+        self.pitch_label = QLabel("音调:")
+        self.pitch_combo = QComboBox()
+        pitch_options = ["-50Hz", "-25Hz", "+0Hz", "+25Hz", "+50Hz"]
+        self.pitch_combo.addItems(pitch_options)
+        self.pitch_combo.setCurrentText("+0Hz")
+        
+        # 音量控制
+        self.volume_label = QLabel("音量:")
+        self.volume_combo = QComboBox()
+        volume_options = ["-50%", "-25%", "+0%", "+25%", "+50%"]
+        self.volume_combo.addItems(volume_options)
+        self.volume_combo.setCurrentText("+0%")
+        
+        self.voice_params_layout.addWidget(self.rate_label)
+        self.voice_params_layout.addWidget(self.rate_combo)
+        self.voice_params_layout.addWidget(self.pitch_label)
+        self.voice_params_layout.addWidget(self.pitch_combo)
+        self.voice_params_layout.addWidget(self.volume_label)
+        self.voice_params_layout.addWidget(self.volume_combo)
+        self.voice_params_layout.addStretch()
+
+        # ========== 情绪控制选项 (SSML) ==========
+        # 添加启用开关
+        self.enable_emotion_checkbox = QCheckBox("启用情绪控制 (SSML)")
+        self.enable_emotion_checkbox.setChecked(False)
+        self.enable_emotion_checkbox.setToolTip("启用后可使用微软TTS的情绪表达功能")
+        self.enable_emotion_checkbox.stateChanged.connect(self._toggle_emotion_controls)
+        
+        # 情绪下拉选择（带emoji图标）
+        self.style_label = QLabel("情绪:")
+        self.style_combo = QComboBox()
+        
+        # 情绪选项配置 (带emoji图标)
+        emotion_options = [
+            # 常用情绪
+            ("😐 普通", "general"),
+            ("😊 高兴", "cheerful"),
+            ("😢 悲伤", "sad"),
+            ("😠 生气", "angry"),
+            ("🤩 兴奋", "excited"),
+            ("🤝 友好", "friendly"),
+            ("🥰 温柔", "gentle"),
+            ("😌 冷静", "calm"),
+            ("😑 严肃", "serious"),
+            # 进阶情绪
+            ("😨 恐惧", "fearful"),
+            ("😱 惊恐", "terrified"),
+            ("😒 不满", "disgruntled"),
+            ("😞 沮丧", "depressed"),
+            ("😳 尴尬", "embarrassed"),
+            ("😤 嫉妒", "envious"),
+            ("🤗 充满希望", "hopeful"),
+            ("💕 亲切", "affectionate"),
+            ("🎵 抒情", "lyrical"),
+            # 语气变化
+            ("🤫 低语", "whispering"),
+            ("📢 喊叫", "shouting"),
+            ("😾 不友好", "unfriendly"),
+            # 专业场景
+            ("🤖 助手", "assistant"),
+            ("💬 聊天", "chat"),
+            ("👔 客服", "customerservice"),
+            ("📰 新闻播报", "newscast"),
+            ("📻 新闻-休闲", "newscast-casual"),
+            ("📺 新闻-正式", "newscast-formal"),
+            ("⚽ 体育播报", "sports_commentary"),
+            ("🏆 体育-兴奋", "sports_commentary_excited"),
+            ("🎬 纪录片", "documentary-narration"),
+            ("📣 广告", "advertisement_upbeat"),
+            # 专业朗读
+            ("📖 诗歌朗读", "poetry-reading"),
+            ("📚 讲故事", "narration-professional"),
+            ("🎙️ 轻松叙述", "narration-relaxed"),
+            # 其他
+            ("🥺 同情", "empathetic"),
+            ("💪 鼓励", "encouragement"),
+            ("👍 肯定", "affirmative")
+        ]
+        
+        for text, value in emotion_options:
+            self.style_combo.addItem(text, value)
+        self.style_combo.setCurrentIndex(0)
+        
+        # 强度滑动条（0.01 - 2.0）
+        self.styledegree_label = QLabel("强度: 1.00")
+        self.styledegree_slider = QSlider(Qt.Horizontal)
+        self.styledegree_slider.setMinimum(1)      # 0.01
+        self.styledegree_slider.setMaximum(200)    # 2.00
+        self.styledegree_slider.setValue(100)      # 1.00
+        self.styledegree_slider.setTickPosition(QSlider.TicksBelow)
+        self.styledegree_slider.setTickInterval(20)
+        self.styledegree_slider.valueChanged.connect(self._on_styledegree_changed)
+        
+        # 角色控制保留
+        self.role_label = QLabel("角色:")
+        self.role_combo = QComboBox()
+        role_options = [
+            ("无", ""),
+            ("👧 女孩", "Girl"),
+            ("👦 男孩", "Boy"),
+            ("👩 年轻女性", "YoungAdultFemale"),
+            ("👨 年轻男性", "YoungAdultMale"),
+            ("👩‍🦳 成熟女性", "OlderAdultFemale"),
+            ("👨‍🦳 成熟男性", "OlderAdultMale"),
+            ("👵 老年女性", "SeniorFemale"),
+            ("👴 老年男性", "SeniorMale")
+        ]
+        for text, value in role_options:
+            self.role_combo.addItem(text, value)
+        self.role_combo.setCurrentIndex(0)
+        self.role_combo.setToolTip("角色扮演 (部分语音支持)")
+
+        # 保存情绪控制的控件引用,便于启用/禁用
+        self.emotion_widgets = [
+            self.style_label, self.style_combo,
+            self.styledegree_label, self.styledegree_slider,
+            self.role_label, self.role_combo
+        ]
+        # 初始状态设为禁用（使用整数0表示未选中）
+        self._toggle_emotion_controls(0)
+
         # 开始按钮
         self.start_button = QPushButton("开始转换")
         self.start_button.clicked.connect(self.start_tts)
@@ -635,6 +943,39 @@ class TTSApp(QWidget):
         settings_inner = QVBoxLayout(); settings_inner.setContentsMargins(8,8,8,8); settings_inner.setSpacing(6)
         settings_inner.addLayout(self.punctuation_layout)
         settings_inner.addLayout(self.options_layout)
+        
+        # 添加语音参数控制
+        settings_inner.addWidget(QLabel("<b>基础参数:</b>"))
+        settings_inner.addLayout(self.voice_params_layout)
+        
+        # 添加情绪控制
+        settings_inner.addWidget(QLabel("<b>🎭 情绪控制 (SSML):</b>"))
+        
+        # 添加说明标签
+        emotion_help_label = QLabel("⚠️ 注意：不同语音支持的情绪不同，部分情绪可能无效果。\n推荐使用中文语音（如晓晓/云希/云扬）测试情绪功能。")
+        emotion_help_label.setWordWrap(True)
+        emotion_help_label.setStyleSheet("color: #666; font-size: 10px; padding: 3px; background: #f0f0f0; border-radius: 3px;")
+        settings_inner.addWidget(emotion_help_label)
+        
+        settings_inner.addWidget(self.enable_emotion_checkbox)
+        
+        # 情绪选择
+        emotion_style_layout = QHBoxLayout()
+        emotion_style_layout.addWidget(self.style_label)
+        emotion_style_layout.addWidget(self.style_combo, 1)
+        settings_inner.addLayout(emotion_style_layout)
+        
+        # 强度滑动条
+        settings_inner.addWidget(self.styledegree_label)
+        settings_inner.addWidget(self.styledegree_slider)
+        
+        # 角色控制
+        role_layout = QHBoxLayout()
+        role_layout.addWidget(self.role_label)
+        role_layout.addWidget(self.role_combo)
+        role_layout.addStretch()
+        settings_inner.addLayout(role_layout)
+        
         settings_inner.addWidget(self.start_button, 0, Qt.AlignLeft)
         self.settings_box.setContentLayout(settings_inner)
         self.splitter.addWidget(self.settings_box)
@@ -643,6 +984,7 @@ class TTSApp(QWidget):
         self.voice_box = CollapsibleBox("语音模型", expanded=True)
         voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
         voice_inner.addWidget(self.label_voice)
+        voice_inner.addWidget(self.selected_voices_label)  # 添加已选择模型提示
         voice_inner.addWidget(self.voice_tree)
         self.voice_box.setContentLayout(voice_inner)
         self.splitter.addWidget(self.voice_box)
@@ -694,6 +1036,13 @@ class TTSApp(QWidget):
 
     # ---------- Splitter 尺寸控制 ----------
     def _store_expanded_sizes(self):
+        # 初始化选择提示（如果还未调用）
+        if hasattr(self, 'selected_voices_label') and hasattr(self, '_update_selected_voices_label'):
+            try:
+                self._update_selected_voices_label()
+            except:
+                pass
+        
         sizes = self.splitter.sizes()
         if len(sizes) < 4:
             return
@@ -709,7 +1058,7 @@ class TTSApp(QWidget):
         header_s = self.settings_box.header_height()
         header_v = self.voice_box.header_height()
         header_l = self.log_box.header_height()
-        MAX_COMPACT = 260
+        MAX_COMPACT = 500  # 增加高度以容纳情绪控制面板
 
         # 设置面板高度
         if self.settings_box.is_expanded():
@@ -1044,6 +1393,28 @@ class TTSApp(QWidget):
 
             selected_voices = data.get("selected_voices", [])
             self.apply_saved_voice_selection(selected_voices)
+            
+            # 恢复语音参数
+            self.rate_combo.setCurrentText(data.get("voice_rate", "+0%"))
+            self.pitch_combo.setCurrentText(data.get("voice_pitch", "+0Hz"))
+            self.volume_combo.setCurrentText(data.get("voice_volume", "+0%"))
+            
+            # 恢复情绪控制参数
+            self.enable_emotion_checkbox.setChecked(data.get("enable_emotion", False))
+            
+            style_value = data.get("voice_style", "general")
+            style_index = self.style_combo.findData(style_value)
+            if style_index != -1:
+                self.style_combo.setCurrentIndex(style_index)
+            
+            styledegree_value = float(data.get("voice_styledegree", "1.0"))
+            self.styledegree_slider.setValue(int(styledegree_value * 100))
+            
+            role_value = data.get("voice_role", "")
+            role_index = self.role_combo.findData(role_value)
+            if role_index != -1:
+                self.role_combo.setCurrentIndex(role_index)
+            
             # 恢复窗口大小与位置
             geo = data.get("window_geometry")
             if isinstance(geo, list) and len(geo) == 4:
@@ -1086,6 +1457,13 @@ class TTSApp(QWidget):
             "line_length": max(5, min(120, line_length)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
+            "voice_rate": self.rate_combo.currentText(),
+            "voice_pitch": self.pitch_combo.currentText(),
+            "voice_volume": self.volume_combo.currentText(),
+            "enable_emotion": self.enable_emotion_checkbox.isChecked(),
+            "voice_style": self.style_combo.currentData() or "general",
+            "voice_styledegree": str(self.styledegree_slider.value() / 100.0),
+            "voice_role": self.role_combo.currentData() or "",
             "panel_states": {
                 "settings": self.settings_box.is_expanded(),
                 "voice": self.voice_box.is_expanded(),
@@ -1183,6 +1561,13 @@ class TTSApp(QWidget):
                 output_root=output_root,
                 extra_line_output=extra_line_output,
                 default_output=default_output_enabled,
+                rate=self.rate_combo.currentText(),
+                pitch=self.pitch_combo.currentText(),
+                volume=self.volume_combo.currentText(),
+                enable_emotion=self.enable_emotion_checkbox.isChecked(),
+                style=self.style_combo.currentData() or "general",
+                styledegree=str(self.styledegree_slider.value() / 100.0),
+                role=self.role_combo.currentData() or "",
             )
             worker.progress.connect(self.log_view.append)
             worker.finished.connect(self.on_worker_finished)
@@ -1239,6 +1624,70 @@ class TTSApp(QWidget):
                 self.log_view.append(f"✗ 处理文件失败 {txt_file}: {e}")
         
         self.log_view.append(f"标点转换完成，共处理 {converted_count} 个文件")
+
+    # ---------- 语音模型选择提示更新 ----------
+    def _update_selected_voices_label(self, *args):
+        """更新已选择语音模型的提示标签"""
+        selected = self.get_selected_voices()
+        count = len(selected)
+        
+        if count == 0:
+            self.selected_voices_label.setText("已选择: 0 个模型")
+            self.selected_voices_label.setStyleSheet("""
+                QLabel {
+                    color: #757575;
+                    font-weight: bold;
+                    padding: 5px;
+                    background-color: #F5F5F5;
+                    border-radius: 3px;
+                    border: 1px solid #E0E0E0;
+                }
+            """)
+        elif count <= 3:
+            # 显示所有选中的模型名称
+            voices_text = ", ".join(selected)
+            self.selected_voices_label.setText(f"已选择 {count} 个模型: {voices_text}")
+            self.selected_voices_label.setStyleSheet("""
+                QLabel {
+                    color: #2196F3;
+                    font-weight: bold;
+                    padding: 5px;
+                    background-color: #E3F2FD;
+                    border-radius: 3px;
+                    border: 1px solid #90CAF9;
+                }
+            """)
+        else:
+            # 只显示前3个，其余用省略号
+            voices_preview = ", ".join(selected[:3])
+            self.selected_voices_label.setText(f"已选择 {count} 个模型: {voices_preview}... 等")
+            self.selected_voices_label.setStyleSheet("""
+                QLabel {
+                    color: #4CAF50;
+                    font-weight: bold;
+                    padding: 5px;
+                    background-color: #E8F5E9;
+                    border-radius: 3px;
+                    border: 1px solid #A5D6A7;
+                }
+            """)
+
+    # ---------- 情绪控制辅助方法 ----------
+    def _toggle_emotion_controls(self, state):
+        """切换情绪控制UI的启用/禁用状态"""
+        # state 来自 stateChanged 信号，是整数: 0=未选中, 2=选中
+        enabled = (state == 2) if isinstance(state, int) else bool(state)
+        
+        print(f"[调试] 情绪控制开关状态变更: state={state}, enabled={enabled}")
+        
+        for widget in self.emotion_widgets:
+            widget.setEnabled(enabled)
+            print(f"[调试] 设置控件 {widget.__class__.__name__} 为 {'启用' if enabled else '禁用'}")
+    
+    def _on_styledegree_changed(self, value):
+        """更新情绪强度标签"""
+        degree = value / 100.0
+        self.styledegree_label.setText(f"强度: {degree:.2f}")
 
 
 if __name__ == "__main__":
