@@ -268,6 +268,28 @@ class CollapsibleBox(QWidget):
         self.toggle_button = QPushButton()
         f = self.toggle_button.font(); f.setBold(True); self.toggle_button.setFont(f)
         self.toggle_button.setCheckable(True)
+        # 更扁的标题按钮样式：减小 padding 和最小高度，保持文字完整
+        self.toggle_button.setStyleSheet(
+            """
+            QPushButton {
+                padding: 2px 8px;
+                min-height: 22px;
+                border: 1px solid palette(Mid);
+                border-radius: 6px;
+                background-color: palette(Base);
+                color: palette(ButtonText);
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: rgba(127,127,127,0.08);
+            }
+            QPushButton:checked {
+                background-color: palette(Highlight);
+                color: palette(HighlightedText);
+                border-color: palette(Highlight);
+            }
+            """
+        )
         self.content_area = QWidget()
         outer = QVBoxLayout(self)
         outer.setSpacing(0); outer.setContentsMargins(0,0,0,0)
@@ -820,8 +842,8 @@ class ClipboardTTSApp(QWidget):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
 
-        # 语音选择折叠面板（将排在设置面板之后）
-        self.voice_box = CollapsibleBox("语音模型", expanded=True)
+        # 语音选择面板（取消折叠按钮，直接作为普通容器）
+        self.voice_panel = QWidget()
         _voice_inner_layout = QVBoxLayout()
         _voice_inner_layout.setContentsMargins(8,8,8,8)
         # 动态显示当前选中的语音（单选模式）
@@ -865,13 +887,15 @@ class ClipboardTTSApp(QWidget):
         
         _voice_inner_layout.addWidget(self.label_voice)
         _voice_inner_layout.addWidget(self.voice_tree)
-        self.voice_box.setContentLayout(_voice_inner_layout)
+        self.voice_panel.setLayout(_voice_inner_layout)
 
         # Splitter 主布局（稍后按：设置 -> 语音 -> 日志 的顺序添加）
         self.layout_splitter = QSplitter(Qt.Vertical)
+        # 禁止子项被拖动到完全折叠
+        self.layout_splitter.setChildrenCollapsible(False)
         self.layout.addWidget(self.layout_splitter)
 
-        # --- 输出目录设置控件（后面塞进折叠面板） ---
+    # --- 输出目录设置控件 ---
         self.output_dir_checkbox = QCheckBox("修改地址")
         self.output_dir_label = QLabel("MP3 输出目录:")
         self.output_dir_edit = QLineEdit()
@@ -992,12 +1016,9 @@ class ClipboardTTSApp(QWidget):
         self.role_combo.setCurrentIndex(0)
         self.role_combo.setToolTip("角色扮演 (部分语音支持)")
 
-        # ---- 组装折叠设置面板（完整显示所有内容） ----
-        self.settings_box = CollapsibleBox("设置", expanded=True)
-        
-        # 不使用滚动区域，直接显示所有内容
-        settings_content = QWidget()
-        settings_layout = QVBoxLayout(settings_content)
+        # ---- 设置面板（取消折叠，直接显示所有内容） ----
+        self.settings_panel = QWidget()
+        settings_layout = QVBoxLayout(self.settings_panel)
         settings_layout.setContentsMargins(6,6,6,6)
         settings_layout.setSpacing(3)
         
@@ -1088,38 +1109,21 @@ class ClipboardTTSApp(QWidget):
         # 初始状态设为禁用
         self._toggle_emotion_controls(Qt.Unchecked)
         
-        # 直接将内容添加到设置盒子（不使用滚动区域）
-        settings_wrapper = QVBoxLayout()
-        settings_wrapper.setContentsMargins(0,0,0,0)
-        settings_wrapper.addWidget(settings_content)
-        self.settings_box.setContentLayout(settings_wrapper)
         # 先添加设置面板（顶部）
-        self.layout_splitter.addWidget(self.settings_box)
+        self.layout_splitter.addWidget(self.settings_panel)
 
-        # 日志折叠面板
-        self.log_box = CollapsibleBox("日志", expanded=True)
-        _log_layout = QVBoxLayout()
+        # 日志面板（普通容器）
+        self.log_panel = QWidget()
+        _log_layout = QVBoxLayout(self.log_panel)
         _log_layout.setContentsMargins(8,8,8,8)
         _log_layout.addWidget(self.log_view)
-        self.log_box.setContentLayout(_log_layout)
         # 添加剩余两个面板（语音、日志）
-        self.layout_splitter.addWidget(self.voice_box)
-        self.layout_splitter.addWidget(self.log_box)
-        # 底部填充：用于在全部折叠时占据剩余空间，使三个面板始终贴顶
-        self.bottom_filler = QWidget()
-        self.bottom_filler.setObjectName("BottomFiller")
-        self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.layout_splitter.addWidget(self.bottom_filler)
-        # 面板尺寸记录结构（用于恢复用户调整过的高度）
-        self._panel_saved_sizes = {"voice": None, "log": None}
-        # 内部标志: 避免在程序计算 setSizes 时覆盖用户真实拖动高度
-        self._updating_splitter = False
-        # 初始分配一次尺寸 & 绑定事件
-        QTimer.singleShot(0, self.update_splitter_sizes)
-        for b in (self.settings_box, self.voice_box, self.log_box):
-            b.toggled.connect(lambda _c, _b=b: self.update_splitter_sizes())
-        # 监听 splitter 拖动，记录最新尺寸
-        self.layout_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self.layout_splitter.addWidget(self.voice_panel)
+        self.layout_splitter.addWidget(self.log_panel)
+        # 设置初始比例（可拖动动态调整）
+        self.layout_splitter.setStretchFactor(0, 3)  # 设置
+        self.layout_splitter.setStretchFactor(1, 4)  # 语音
+        self.layout_splitter.setStretchFactor(2, 3)  # 日志
 
         # --- 连接信号和槽 ---
         self.record_hotkey_button.clicked.connect(self.start_hotkey_recording)
@@ -1165,81 +1169,37 @@ class ClipboardTTSApp(QWidget):
         self.log("4. 使用快捷键或“立即转换”按钮，剪贴板文本将转为语音。")
 
     def _on_splitter_moved(self, *_):
-        """用户拖动 splitter 后记录当前展开面板高度。"""
-        if getattr(self, '_updating_splitter', False):
+        """用户拖动 splitter 后记录当前高度比例。"""
+        if not hasattr(self, 'layout_splitter'):
             return
-        # 先约束一次，防止拖动覆盖折叠标题或压扁内容
-        self._enforce_splitter_constraints()
-        self._store_expanded_sizes()
+        sizes = self.layout_splitter.sizes()
+        if len(sizes) >= 3:
+            # 只保存前三项（设置/语音/日志），忽略底部 filler（已移除）
+            self._saved_splitter_sizes = sizes[:3]
 
     def _enforce_splitter_constraints(self):
-        """在用户拖动后强制修正 sizes：
-        - 折叠面板高度 = header 高度
-        - 展开面板 >= MIN_CONTENT
-        - 不允许把某个展开面板挤到低于 MIN_CONTENT 或把折叠标题挤没
-        """
+        """在用户拖动后校正最小高度，防止压扁内容。"""
         splitter = getattr(self, 'layout_splitter', None)
         if not splitter:
             return
-        sizes = splitter.sizes()  # [settings, voice, log, filler]
-        if len(sizes) < 4:
+        sizes = splitter.sizes()
+        if len(sizes) < 3:
             return
-        header_s = self.settings_box.header_height()
-        header_v = self.voice_box.header_height()
-        header_l = self.log_box.header_height()
         MIN_CONTENT = 80
-        set_h, voice_h, log_h, filler = sizes
-
-        # 锁定折叠的面板高度为其 header 高度
-        if not self.settings_box.is_expanded():
-            set_h = header_s
-        else:
-            fixed = getattr(self, '_expanded_settings_height', None)
-            if fixed is not None:
-                set_h = fixed
-            else:
-                set_h = max(set_h, header_s + 40)
-
-        if not self.voice_box.is_expanded():
-            voice_h = header_v
-        else:
-            voice_h = max(voice_h, MIN_CONTENT)
-
-        if not self.log_box.is_expanded():
-            log_h = header_l
-        else:
-            log_h = max(log_h, MIN_CONTENT)
-
-        # 重新计算剩余/填充，保持总高度不变
+        set_h, voice_h, log_h = sizes[:3]
+        # 设置面板至少 100，语音/日志至少 MIN_CONTENT
+        set_h = max(100, set_h)
+        voice_h = max(MIN_CONTENT, voice_h)
+        log_h = max(MIN_CONTENT, log_h)
         total = sum(sizes)
         used = set_h + voice_h + log_h
-        filler = max(0, total - used)
-        # 若 filler 不足以维持 used, 做一次比例压缩（极端窗口过小）
-        if used > total:
-            scale = total / used if used > 0 else 1
-            set_h = int(set_h * scale)
-            voice_h = int(voice_h * scale)
-            log_h = int(log_h * scale)
-            used = set_h + voice_h + log_h
-            filler = max(0, total - used)
-        self._updating_splitter = True
-        splitter.setSizes([set_h, voice_h, log_h, filler])
-        self._updating_splitter = False
+        # 保持总和不变
+        rest = max(0, total - used)
+        splitter.setSizes([set_h, voice_h, log_h] + (sizes[3:] if len(sizes) > 3 else []))
 
     def _store_expanded_sizes(self):
-        # 仅在用户交互(拖动)后调用, 内部自动布局阶段(_updating_splitter=True)跳过
-        if getattr(self, '_updating_splitter', False):
-            return
-        if not hasattr(self, 'layout_splitter'):
-            return
-        sizes = self.layout_splitter.sizes()  # [settings, voice, log, filler]
-        if len(sizes) < 4:
-            return
-        # 记录当前展开面板的总高度(含标题), 仅更新处于展开状态的面板
-        if self.voice_box.is_expanded():
-            self._panel_saved_sizes['voice'] = max(0, sizes[1])
-        if self.log_box.is_expanded():
-            self._panel_saved_sizes['log'] = max(0, sizes[2])
+        # 已废弃：改为 _on_splitter_moved 中保存三段尺寸
+        pass
 
     def _create_separator(self):
         """创建分隔线"""
@@ -1325,115 +1285,27 @@ class ClipboardTTSApp(QWidget):
             self.role_combo.setCurrentIndex(0)  # 无
 
     def update_splitter_sizes(self):
-        """统一计算 4 个 splitter 项（设置 / 语音 / 日志 / filler）。
-        行为：
-        1. 设置面板：完整显示所有内容（不限制高度），折叠仅标题。
-        2. 语音 / 日志：支持记忆用户拖动；一个展开则占剩余；两个展开按记忆比例或均分。
-        3. 全部折叠：三个标题贴顶，filler 吞掉余量。
-        """
+        """按当前窗口高度分配 设置/语音/日志 三段高度，保留用户拖动比例。"""
         splitter = getattr(self, 'layout_splitter', None)
         if not splitter:
             return
-        self._updating_splitter = True  # 标记内部调整阶段
         total_h = max(1, splitter.height())
-        header_s = self.settings_box.header_height()
-        header_v = self.voice_box.header_height()
-        header_l = self.log_box.header_height()
-
-        # 设置面板高度 - 完整显示所有内容
-        if self.settings_box.is_expanded():
-            content_h = self.settings_box.content_area.sizeHint().height()
-            set_h = content_h + header_s + 10  # 添加10px间距
-            # 记录展开时的高度
-            self._expanded_settings_height = set_h
-        else:
-            set_h = header_s
-
-        # 全部折叠情况
-        all_collapsed = (not self.settings_box.is_expanded() and
-                         not self.voice_box.is_expanded() and
-                         not self.log_box.is_expanded())
-        if all_collapsed:
-            filler = max(0, total_h - (header_s + header_v + header_l))
-            splitter.setSizes([header_s, header_v, header_l, filler])
-            # 约束
-            for box, h in [(self.settings_box, header_s), (self.voice_box, header_v), (self.log_box, header_l)]:
-                box.setMinimumHeight(h); box.setMaximumHeight(h); box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            self.bottom_filler.setMinimumHeight(0)
-            self.bottom_filler.setMaximumHeight(16777215)
-            self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-            self._updating_splitter = False
-            return
-
-        remaining = max(0, total_h - set_h)
-
-        # 语音/日志高度分配
-        voice_exp = self.voice_box.is_expanded()
-        log_exp = self.log_box.is_expanded()
-        voice_h = header_v
-        log_h = header_l
-        MIN_CONTENT = 80
-
-        if voice_exp and log_exp:
-            # 使用保存的比例；若无则均分
-            sv = self._panel_saved_sizes.get('voice') or 1
-            sl = self._panel_saved_sizes.get('log') or 1
-            total_saved = sv + sl
-            if total_saved <= 0:
-                sv = sl = 1; total_saved = 2
-            voice_h = max(MIN_CONTENT, int(remaining * (sv / total_saved)))
-            log_h = max(MIN_CONTENT, remaining - voice_h)
-        elif voice_exp and not log_exp:
-            log_h = header_l
-            voice_h = max(MIN_CONTENT, remaining - log_h)
-        elif log_exp and not voice_exp:
-            voice_h = header_v
-            log_h = max(MIN_CONTENT, remaining - voice_h)
-        # else: both collapsed handled earlier (would have returned), so no extra case
-
-        # 计算 filler
-        used = set_h + voice_h + log_h
-        filler = max(0, total_h - used)
-        splitter.setSizes([set_h, voice_h, log_h, filler])
-
-        # 约束设置面板
-        if self.settings_box.is_expanded():
-            # 展开时完全固定高度，不允许拖动影响
-            self.settings_box.setMinimumHeight(set_h)
-            self.settings_box.setMaximumHeight(set_h)
-            self.settings_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        else:
-            self.settings_box.setMinimumHeight(header_s)
-            self.settings_box.setMaximumHeight(header_s)
-            self.settings_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
-        # 语音/日志面板
-        for box, expanded, header, h in [
-            (self.voice_box, voice_exp, header_v, voice_h),
-            (self.log_box, log_exp, header_l, log_h)
-        ]:
-            if expanded:
-                box.setMinimumHeight(MIN_CONTENT)
-                box.setMaximumHeight(16777215)
-                box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-            else:
-                box.setMinimumHeight(header)
-                box.setMaximumHeight(header)
-                box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
-        # filler 保持扩展
-        self.bottom_filler.setMinimumHeight(0)
-        self.bottom_filler.setMaximumHeight(16777215)
-        self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-
-        # 若尚未有用户拖动记录, 初始化一次记忆值（避免首次折叠后丢失比例）
-        if self.voice_box.is_expanded() and not self._panel_saved_sizes.get('voice'):
-            self._panel_saved_sizes['voice'] = voice_h
-        if self.log_box.is_expanded() and not self._panel_saved_sizes.get('log'):
-            self._panel_saved_sizes['log'] = log_h
-
-        # 结束内部调整; 不在此时写入保存尺寸, 避免覆盖用户拖动记忆
-        self._updating_splitter = False
+        # 若有用户保存的尺寸，优先使用（裁剪到总高度）
+        sizes = getattr(self, '_saved_splitter_sizes', None)
+        if sizes and len(sizes) == 3:
+            base_sum = sum(sizes)
+            if base_sum > 0:
+                scale = total_h / base_sum
+                s0 = max(100, int(sizes[0] * scale))
+                s1 = max(80, int(sizes[1] * scale))
+                s2 = max(80, int(sizes[2] * scale))
+                splitter.setSizes([s0, s1, s2])
+                return
+        # 默认比例：3:4:3
+        s0 = max(100, int(total_h * 0.3))
+        s1 = max(80, int(total_h * 0.4))
+        s2 = max(80, total_h - s0 - s1)
+        splitter.setSizes([s0, s1, s2])
 
     def update_current_voice_label_style(self):
         """使用主题高亮(Highlight)颜色作为文字颜色, 不加背景。"""
@@ -2018,14 +1890,10 @@ class ClipboardTTSApp(QWidget):
             monitor_device_id=self.monitor_device_combo.currentData(),
             output_dir_enabled=self.output_dir_enabled,
             output_dir_path=self.output_dir_path,
-            panel_states={
-                "voice_expanded": self.voice_box.is_expanded(),
-                "settings_expanded": self.settings_box.is_expanded(),
-                "log_expanded": self.log_box.is_expanded(),
-            },
+            panel_states={},
             panel_order=["settings", "voice", "log"],
             splitter_sizes=core_sizes,
-            saved_panel_sizes=self._panel_saved_sizes,
+            saved_panel_sizes={},
             expanded_regions=expanded_regions,
             expanded_languages=expanded_languages,
             window_geometry=[self.x(), self.y(), self.width(), self.height()],
@@ -2099,19 +1967,16 @@ class ClipboardTTSApp(QWidget):
                 idx = self.role_combo.findData(settings_obj.voice_role)
                 if idx != -1:
                     self.role_combo.setCurrentIndex(idx)
-            # 面板状态
-            ps = settings_obj.panel_states or {}
-            self.voice_box.set_expanded(ps.get("voice_expanded", True))
-            self.settings_box.set_expanded(ps.get("settings_expanded", True))
-            self.log_box.set_expanded(ps.get("log_expanded", True))
-            # 分割尺寸恢复（追加 filler）
+            # 分割尺寸恢复（三段）
             if settings_obj.splitter_sizes and settings_obj.panel_order == ["settings", "voice", "log"]:
                 base_sum = sum(settings_obj.splitter_sizes)
                 total_h = max(1, self.layout_splitter.height())
-                filler = max(0, total_h - base_sum)
-                self.layout_splitter.setSizes(settings_obj.splitter_sizes + [filler])
-            if isinstance(settings_obj.saved_panel_sizes, dict):
-                self._panel_saved_sizes.update(settings_obj.saved_panel_sizes)
+                if base_sum > 0:
+                    scale = total_h / base_sum
+                    s0 = max(100, int(settings_obj.splitter_sizes[0] * scale))
+                    s1 = max(80, int(settings_obj.splitter_sizes[1] * scale))
+                    s2 = max(80, int(settings_obj.splitter_sizes[2] * scale))
+                    self.layout_splitter.setSizes([s0, s1, s2])
             # 恢复窗口几何
             if isinstance(settings_obj.window_geometry, list) and len(settings_obj.window_geometry) == 4:
                 try:
