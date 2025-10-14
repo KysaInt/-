@@ -162,8 +162,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QFileDialog, QProgressBar, QTextEdit, QMessageBox,
                                QScrollArea, QGroupBox, QListWidget,
                                QListWidgetItem, QListView, QMenu, QInputDialog,
-                               QSlider, QSizePolicy, QStyledItemDelegate, QFrame, QSplitter, QStyle, QGridLayout)
-from PySide6.QtCore import Qt, QThread, Signal, QPoint, QSize, QRect, QPropertyAnimation, QEasingCurve, QUrl, QEvent, QSettings
+                               QSlider, QSizePolicy, QStyledItemDelegate, QFrame, QSplitter, QStyle, QGridLayout, QDialog)
+from PySide6.QtCore import Qt, QThread, Signal, QPoint, QSize, QRect, QPropertyAnimation, QEasingCurve, QUrl, QEvent, QSettings, QTimer
 from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QPainter, QColor, QPen, QFont, QDesktopServices
 
 def build_themed_icon(palette=None) -> QIcon:
@@ -271,6 +271,84 @@ class ImageStitcher:
         if status == cv2.Stitcher_OK and pano is not None:
             return self._make_transparent(pano)
         return None
+
+class ProgressDialog(QDialog):
+    """下载/处理进度弹窗：显示当前进度、状态信息与耗时。
+
+    使用 update_progress(current,total,message) 更新；
+    finish() 结束并自动关闭。
+    """
+    def __init__(self, parent=None, title: str = "正在处理"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        # 改为非模态，避免阻塞父窗口交互
+        self.setModal(False)
+        self.resize(420, 160)
+        self._start_dt = datetime.now()
+        self._last_message = ""
+        layout = QVBoxLayout(self)
+        self.label_status = QLabel("准备中…")
+        self.label_status.setWordWrap(True)
+        layout.addWidget(self.label_status)
+        self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
+        layout.addWidget(self.bar)
+        self.label_elapsed = QLabel("耗时: 0s")
+        layout.addWidget(self.label_elapsed)
+        # 取消按钮
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        layout.addWidget(self.btn_cancel)
+        self._cancelled = False
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(1000)
+        # 顶置
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        # 样式自适应主题
+        pal = self.palette()
+        try:
+            hi = pal.color(pal.ColorRole.Highlight)
+        except Exception:
+            hi = pal.highlight().color()  # type: ignore
+        self.bar.setStyleSheet(
+            "QProgressBar { border: 1px solid palette(Mid); border-radius: 4px; height: 14px; text-align: center;}"
+            f"QProgressBar::chunk {{ background-color: rgb({hi.red()},{hi.green()},{hi.blue()}); border-radius: 4px; }}"
+        )
+    def _on_tick(self):
+        delta = datetime.now() - self._start_dt
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            txt = f"耗时: {secs}s"
+        else:
+            m, s = divmod(secs, 60)
+            if m < 60:
+                txt = f"耗时: {m}m{s:02d}s"
+            else:
+                h, rem = divmod(m, 60)
+                m2, s2 = divmod(rem, 60)
+                txt = f"耗时: {h}h{m2:02d}m{s2:02d}s"
+        self.label_elapsed.setText(txt)
+    def update_progress(self, current: int, total: int, message: str):
+        # 归一化为百分比
+        pct = 0
+        if total > 0:
+            pct = max(0, min(100, int((current / total) * 100)))
+        self.bar.setValue(pct)
+        self._last_message = message or ""
+        self.label_status.setText(f"{message}\n进度: {pct}% ({current}/{total})")
+        if self._cancelled:
+            self.label_status.setText(f"已请求取消… 当前进度 {pct}%")
+    def finish(self, success: bool = True, final_message: str = ""):
+        self._timer.stop()
+        if final_message:
+            self.label_status.setText(final_message)
+        else:
+            self.label_status.setText("处理完成" if success else "处理失败")
+        QTimer.singleShot(800, self.accept)
+    def _on_cancel_clicked(self):
+        self._cancelled = True
+        self.btn_cancel.setEnabled(False)
+        self.label_status.setText("已发出取消请求，等待当前步骤完成…")
 
 class ImageGrouper:
     """基于特征匹配的图片分组器：将可拼合的图片划为同一连通分量"""
@@ -428,14 +506,21 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        # 结果图像（用于单结果保存等）
         self.result_image = None
+        # 后台线程
         self.stitch_thread = None
+        # 缩略图初始尺寸
         self._thumb_size = 60
-        self.selection_order = []  # 用于跟踪点击选择的顺序
+        # 选择顺序跟踪列表
+        self.selection_order = []
         # QListWidget item roles
         self.ROLE_PATH = Qt.UserRole
         self.ROLE_ORDER = Qt.UserRole + 1
         self.ROLE_MARK = Qt.UserRole + 2
+        # 进度弹窗实例（运行时创建/销毁）
+        self._progress_dialog = None
+        # 初始化界面
         self.init_ui()
         
     def init_ui(self):
@@ -984,71 +1069,54 @@ class MainWindow(QMainWindow):
     def start_stitching(self):
         """开始拼接"""
         directory = self.dir_edit.text().strip()
-        
         if not directory:
             QMessageBox.warning(self, "警告", "请先选择图片目录")
             return
-        
         if not os.path.isdir(directory):
             QMessageBox.warning(self, "警告", "选择的目录不存在")
             return
-        
         self.start_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
-        
-        self.preview_label.setText("⏳ 正在处理，请稍候...")
-        # 使用主题色作为边框，窗口背景色作为底色
+        # 视觉反馈
         pal = self.palette()
         try:
-            win_col = pal.color(pal.ColorRole.Window)
-            txt_col = pal.color(pal.ColorRole.Text)
-            hi_col = pal.color(pal.ColorRole.Highlight)
+            win_col = pal.color(pal.ColorRole.Window); txt_col = pal.color(pal.ColorRole.Text); hi_col = pal.color(pal.ColorRole.Highlight)
         except Exception:
-            win_col = pal.window().color()  # type: ignore
-            txt_col = pal.text().color()    # type: ignore
-            hi_col = pal.highlight().color()  # type: ignore
+            win_col = pal.window().color(); txt_col = pal.text().color(); hi_col = pal.highlight().color()  # type: ignore
+        self.preview_label.setText("⏳ 正在处理，请稍候...")
         self.preview_label.setStyleSheet(
             "QLabel { "
             f"background-color: rgb({win_col.red()},{win_col.green()},{win_col.blue()}); "
-            f"border: 2px solid rgb({hi_col.red()},{hi_col.green()},{hi_col.blue()}); "
-            "padding: 20px; "
-            f"color: rgb({txt_col.red()},{txt_col.green()},{txt_col.blue()}); "
-            "font-size: 14px; "
+            f"border: 2px solid rgb({hi_col.red()},{hi_col.green()},{hi_col.blue()}); padding: 20px; font-size: 14px; "
             "}"
         )
-        self.result_image = None
-        
-        # 默认使用扫描模式
-        mode = 'scans'
-        mode_name = "扫描模式"
-        
-        # 按点击顺序读取用户选择
+        # 模式
+        mode = 'scans'; mode_name = '扫描模式'
+        # 需要处理的文件列表
         if self.selection_order:
-            image_paths_for_job = [item.data(self.ROLE_PATH) for item in self.selection_order]
+            image_paths_for_job = [it.data(self.ROLE_PATH) for it in self.selection_order if it]
         else:
-            # 未选择则默认处理全部（按显示顺序）
-            image_paths_for_job = []
-            for i in range(self.image_list.count()):
-                it = self.image_list.item(i)
-                if it:
-                    path = it.data(self.ROLE_PATH)
-                    if path:
-                        image_paths_for_job.append(path)
-
+            image_paths_for_job = [self.image_list.item(i).data(self.ROLE_PATH) for i in range(self.image_list.count()) if self.image_list.item(i)]
+        image_paths_for_job = [p for p in image_paths_for_job if p]
         if not image_paths_for_job:
             QMessageBox.warning(self, "警告", "没有要处理的图片。请选择图片或确保目录不为空。")
-            self.start_btn.setEnabled(True)
-            self.browse_btn.setEnabled(True)
-            return
-
+            self.start_btn.setEnabled(True); self.browse_btn.setEnabled(True); return
+        # 确认
+        est = "取决于图片数量与分辨率"
+        reply = QMessageBox.question(self, "确认开始", f"即将开始拼接处理\n\n模式: {mode_name}\n图片数量: {len(image_paths_for_job)} 张\n预计耗时: {est}\n\n是否继续?", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            self.start_btn.setEnabled(True); self.browse_btn.setEnabled(True); self.preview_label.setText("操作已取消"); return
+        # 进度弹窗
+        self._progress_dialog = ProgressDialog(self, title="拼接进度")
+        self._progress_dialog.update_progress(0, len(image_paths_for_job), "准备启动线程…")
+        self._progress_dialog.show(); QApplication.processEvents()
+        # 启动线程
         self.stitch_thread = StitchThread(directory, mode, image_paths=image_paths_for_job)
         self.stitch_thread.progress.connect(self.on_progress)
         self.stitch_thread.finished.connect(self.on_finished)
         self.stitch_thread.error.connect(self.on_error)
         self.stitch_thread.start()
-        
-        self.log("="*60)
-        self.log(f"🚀 开始拼接处理... (模式: {mode_name})")
+        self.log("="*60); self.log(f"🚀 开始拼接处理... (模式: {mode_name})")
     
     def on_progress(self, current: int, total: int, message: str):
         """更新进度"""
@@ -1056,6 +1124,9 @@ class MainWindow(QMainWindow):
             progress = int((current / total) * 100)
             self.progress_bar.setValue(progress)
         self.log(message)
+        if self._progress_dialog:
+            self._progress_dialog.update_progress(current, total, message)
+            QApplication.processEvents()
     
     def on_finished(self, result_obj):
         """拼接完成：兼容单结果与多结果"""
@@ -1113,6 +1184,9 @@ class MainWindow(QMainWindow):
         )
         
         self.log("✅ 图片拼接完成，预览区已更新。所有结果已自动保存到输出目录 stitch。")
+        if self._progress_dialog:
+            self._progress_dialog.finish(success=True, final_message="拼接完成，结果已保存。")
+            self._progress_dialog = None
     
     def on_error(self, error_message: str):
         """处理错误"""
@@ -1135,6 +1209,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         
         QMessageBox.critical(self, "❌ 错误", error_message)
+        if self._progress_dialog:
+            self._progress_dialog.finish(success=False, final_message=error_message)
+            self._progress_dialog = None
     
     def display_results(self, images: List[np.ndarray]):
         """显示多个结果（1张=单图，>1张=网格）"""
