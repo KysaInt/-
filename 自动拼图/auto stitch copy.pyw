@@ -162,7 +162,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QFileDialog, QProgressBar, QTextEdit, QMessageBox,
                                QScrollArea, QGroupBox, QListWidget,
                                QListWidgetItem, QListView, QMenu, QInputDialog,
-                               QSlider, QSizePolicy, QStyledItemDelegate, QFrame, QSplitter, QStyle, QGridLayout, QDialog, QComboBox)
+                               QSlider, QSizePolicy, QStyledItemDelegate, QFrame, QSplitter, QStyle, QGridLayout, QDialog, QComboBox, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal, QPoint, QSize, QRect, QPropertyAnimation, QEasingCurve, QUrl, QEvent, QSettings, QTimer, QFileSystemWatcher
 from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QPainter, QColor, QPen, QFont, QDesktopServices
 
@@ -185,345 +185,40 @@ class ImageStitcher:
               'grid'       网格拼接
         """
         self.mode = mode
-        # 初始化特征检测器
-        try:
-            # 优先使用SIFT（更准确，适合截图）
-            self.detector = cv2.SIFT_create(nfeatures=2000)
-            self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-            self.feature_type = 'SIFT'
-        except:
-            # 回退到ORB
-            self.detector = cv2.ORB_create(nfeatures=2000)
-            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-            self.feature_type = 'ORB'
 
-    def load_images(self, directory: str) -> List[str]:
-        """加载目录下的所有图片"""
+    def load_images(self, directory: str, include_subdirs: bool = False) -> List[str]:
+        """加载目录下的所有图片
+        
+        Args:
+            directory: 图片目录路径
+            include_subdirs: 是否包含子目录，默认False只扫描当前目录
+        
+        Returns:
+            图片文件路径列表
+        """
         supported_formats = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
         image_files = []
 
-        for root, _, files in os.walk(directory):
-            for file in sorted(files):
-                if Path(file).suffix.lower() in supported_formats:
-                    image_files.append(os.path.join(root, file))
+        if include_subdirs:
+            # 递归扫描所有子目录
+            for root, _, files in os.walk(directory):
+                for file in sorted(files):
+                    if Path(file).suffix.lower() in supported_formats:
+                        image_files.append(os.path.join(root, file))
+        else:
+            # 只扫描当前目录层级
+            try:
+                for file in sorted(os.listdir(directory)):
+                    file_path = os.path.join(directory, file)
+                    if os.path.isfile(file_path) and Path(file).suffix.lower() in supported_formats:
+                        image_files.append(file_path)
+            except Exception as e:
+                print(f"扫描目录失败: {e}")
 
         return image_files
 
 
-    def _find_overlap_precise(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> dict:
-        """精确查找两张图片的重叠区域和变换矩阵
-        
-        Args:
-            img1: 第一张图片（上方/左侧）
-            img2: 第二张图片（下方/右侧）
-            direction: 'vertical' 或 'horizontal'
-        
-        Returns:
-            {
-                'found': bool,           # 是否找到重叠
-                'overlap': int,          # 重叠像素数
-                'offset': (x, y),        # 偏移量
-                'homography': np.ndarray # 单应性矩阵（如果需要）
-            }
-        """
-        result = {
-            'found': False,
-            'overlap': 0,
-            'offset': (0, 0),
-            'homography': None
-        }
-        
-        # 转换为灰度图
-        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if len(img1.shape) == 3 else img1
-        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if len(img2.shape) == 3 else img2
-        
-        # 提取感兴趣区域（减少计算量）
-        h1, w1 = gray1.shape
-        h2, w2 = gray2.shape
-        
-        if direction == 'vertical':
-            # 垂直拼接：比较img1底部30%和img2顶部30%
-            roi1 = gray1[int(h1*0.7):, :]
-            roi2 = gray2[:int(h2*0.3), :]
-            roi1_offset = (0, int(h1*0.7))
-            roi2_offset = (0, 0)
-        else:
-            # 水平拼接：比较img1右侧30%和img2左侧30%
-            roi1 = gray1[:, int(w1*0.7):]
-            roi2 = gray2[:, :int(w2*0.3)]
-            roi1_offset = (int(w1*0.7), 0)
-            roi2_offset = (0, 0)
-        
-        # 检测特征点
-        kp1, des1 = self.detector.detectAndCompute(roi1, None)
-        kp2, des2 = self.detector.detectAndCompute(roi2, None)
-        
-        if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-            return result
-        
-        # 特征匹配
-        try:
-            matches = self.matcher.knnMatch(des1, des2, k=2)
-        except:
-            return result
-        
-        # Lowe's ratio test
-        good_matches = []
-        for m_n in matches:
-            if len(m_n) == 2:
-                m, n = m_n
-                if m.distance < 0.75 * n.distance:
-                    good_matches.append(m)
-        
-        # 至少需要4个好的匹配点
-        if len(good_matches) < 4:
-            return result
-        
-        # 提取匹配点坐标
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-        
-        # 调整坐标到原图
-        pts1[:, 0] += roi1_offset[0]
-        pts1[:, 1] += roi1_offset[1]
-        pts2[:, 0] += roi2_offset[0]
-        pts2[:, 1] += roi2_offset[1]
-        
-        # 计算单应性矩阵（用于处理缩放、旋转）
-        try:
-            H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
-            if H is None:
-                return result
-            
-            # 统计内点
-            inliers = np.sum(mask)
-            if inliers < 4:
-                return result
-            
-            result['found'] = True
-            result['homography'] = H
-            
-            # 计算偏移量
-            if direction == 'vertical':
-                # 计算img2需要向上移动多少才能对齐
-                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
-                transformed = cv2.perspectiveTransform(corners2, H)
-                # 取顶部边缘的平均y坐标作为重叠位置
-                top_y = np.mean(transformed[0:2, 0, 1])
-                result['overlap'] = max(0, int(h1 - top_y))
-                result['offset'] = (0, int(top_y))
-            else:
-                # 水平拼接
-                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
-                transformed = cv2.perspectiveTransform(corners2, H)
-                # 取左侧边缘的平均x坐标作为重叠位置
-                left_x = np.mean(transformed[[0, 3], 0, 0])
-                result['overlap'] = max(0, int(w1 - left_x))
-                result['offset'] = (int(left_x), 0)
-            
-            return result
-            
-        except Exception as e:
-            return result
 
-    def _stitch_two_precise(self, img1: np.ndarray, img2: np.ndarray, direction='vertical', progress_callback=None) -> np.ndarray:
-        """精确拼接两张图片
-        
-        使用特征匹配找到精确的重叠位置，支持缩放和旋转
-        """
-        if progress_callback:
-            progress_callback(1, 2, f"正在分析图片重叠区域...")
-        
-        # 查找重叠
-        overlap_info = self._find_overlap_precise(img1, img2, direction)
-        
-        if not overlap_info['found']:
-            # 如果找不到重叠，使用简单拼接
-            if progress_callback:
-                progress_callback(1, 2, f"未检测到重叠，使用简单拼接...")
-            return self._simple_stitch_two(img1, img2, direction)
-        
-        if progress_callback:
-            progress_callback(1, 2, f"✓ 检测到{overlap_info['overlap']}px重叠，正在精确拼接...")
-        
-        h1, w1 = img1.shape[:2]
-        h2, w2 = img2.shape[:2]
-        H = overlap_info['homography']
-        
-        if direction == 'vertical':
-            # 垂直拼接
-            offset_y = overlap_info['offset'][1]
-            
-            # 如果有单应性变换，先对img2进行变换
-            if H is not None and not np.allclose(H, np.eye(3)):
-                # 计算变换后的尺寸
-                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
-                transformed = cv2.perspectiveTransform(corners2, H)
-                
-                x_coords = transformed[:, 0, 0]
-                y_coords = transformed[:, 0, 1]
-                
-                min_x, max_x = int(np.floor(x_coords.min())), int(np.ceil(x_coords.max()))
-                min_y, max_y = int(np.floor(y_coords.min())), int(np.ceil(y_coords.max()))
-                
-                # 创建变换矩阵（加上平移）
-                translation = np.array([[1, 0, -min_x], [0, 1, -min_y], [0, 0, 1]])
-                H_translated = translation @ H
-                
-                # 变换img2
-                out_w = max_x - min_x
-                out_h = max_y - min_y
-                img2_warped = cv2.warpPerspective(img2, H_translated, (out_w, out_h))
-                
-                # 调整offset
-                offset_y = offset_y - min_y
-            else:
-                img2_warped = img2
-            
-            # 创建画布
-            canvas_h = max(h1, offset_y + img2_warped.shape[0])
-            canvas_w = max(w1, img2_warped.shape[1])
-            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-            
-            # 放置img1
-            canvas[:h1, :w1] = img1
-            
-            # 放置img2（融合重叠区域）
-            y_start = max(0, offset_y)
-            y_end = min(canvas_h, offset_y + img2_warped.shape[0])
-            
-            if y_start < h1:
-                # 有重叠，使用alpha融合
-                overlap_h = min(h1 - y_start, img2_warped.shape[0])
-                for i in range(overlap_h):
-                    alpha = i / overlap_h  # 线性融合
-                    y = y_start + i
-                    canvas[y, :img2_warped.shape[1]] = (
-                        canvas[y, :img2_warped.shape[1]] * (1 - alpha) +
-                        img2_warped[i, :] * alpha
-                    ).astype(np.uint8)
-                
-                # 放置非重叠部分
-                if offset_y + overlap_h < offset_y + img2_warped.shape[0]:
-                    canvas[y_start + overlap_h:y_end, :img2_warped.shape[1]] = \
-                        img2_warped[overlap_h:y_end - y_start, :]
-            else:
-                # 无重叠
-                canvas[y_start:y_end, :img2_warped.shape[1]] = img2_warped[:y_end - y_start, :]
-            
-            return canvas
-            
-        else:
-            # 水平拼接（类似逻辑）
-            offset_x = overlap_info['offset'][0]
-            
-            if H is not None and not np.allclose(H, np.eye(3)):
-                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
-                transformed = cv2.perspectiveTransform(corners2, H)
-                
-                x_coords = transformed[:, 0, 0]
-                y_coords = transformed[:, 0, 1]
-                
-                min_x, max_x = int(np.floor(x_coords.min())), int(np.ceil(x_coords.max()))
-                min_y, max_y = int(np.floor(y_coords.min())), int(np.ceil(y_coords.max()))
-                
-                translation = np.array([[1, 0, -min_x], [0, 1, -min_y], [0, 0, 1]])
-                H_translated = translation @ H
-                
-                out_w = max_x - min_x
-                out_h = max_y - min_y
-                img2_warped = cv2.warpPerspective(img2, H_translated, (out_w, out_h))
-                
-                offset_x = offset_x - min_x
-            else:
-                img2_warped = img2
-            
-            canvas_h = max(h1, img2_warped.shape[0])
-            canvas_w = max(w1, offset_x + img2_warped.shape[1])
-            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-            
-            canvas[:h1, :w1] = img1
-            
-            x_start = max(0, offset_x)
-            x_end = min(canvas_w, offset_x + img2_warped.shape[1])
-            
-            if x_start < w1:
-                overlap_w = min(w1 - x_start, img2_warped.shape[1])
-                for i in range(overlap_w):
-                    alpha = i / overlap_w
-                    x = x_start + i
-                    canvas[:img2_warped.shape[0], x] = (
-                        canvas[:img2_warped.shape[0], x] * (1 - alpha) +
-                        img2_warped[:, i] * alpha
-                    ).astype(np.uint8)
-                
-                if offset_x + overlap_w < offset_x + img2_warped.shape[1]:
-                    canvas[:img2_warped.shape[0], x_start + overlap_w:x_end] = \
-                        img2_warped[:, overlap_w:x_end - x_start]
-            else:
-                canvas[:img2_warped.shape[0], x_start:x_end] = img2_warped[:, :x_end - x_start]
-            
-            return canvas
-
-    def _simple_stitch_two(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> np.ndarray:
-        """简单拼接两张图片（无特征匹配）"""
-        if direction == 'vertical':
-            max_w = max(img1.shape[1], img2.shape[1])
-            if img1.shape[1] < max_w:
-                img1 = np.pad(img1, ((0, 0), (0, max_w - img1.shape[1]), (0, 0)), mode='constant')
-            if img2.shape[1] < max_w:
-                img2 = np.pad(img2, ((0, 0), (0, max_w - img2.shape[1]), (0, 0)), mode='constant')
-            return np.vstack([img1, img2])
-        else:
-            max_h = max(img1.shape[0], img2.shape[0])
-            if img1.shape[0] < max_h:
-                img1 = np.pad(img1, ((0, max_h - img1.shape[0]), (0, 0), (0, 0)), mode='constant')
-            if img2.shape[0] < max_h:
-                img2 = np.pad(img2, ((0, max_h - img2.shape[0]), (0, 0), (0, 0)), mode='constant')
-            return np.hstack([img1, img2])
-
-    def _detect_stitch_direction(self, images: List[np.ndarray]) -> str:
-        """智能检测拼接方向
-        
-        策略：
-        1. 如果所有图片宽度相同或接近，且高度不同 -> 垂直拼接
-        2. 如果所有图片高度相同或接近，且宽度不同 -> 水平拼接
-        3. 如果图片尺寸差异很大 -> 网格拼接
-        4. 默认 -> 垂直拼接
-        """
-        if len(images) <= 1:
-            return 'vertical'
-        
-        widths = [img.shape[1] for img in images]
-        heights = [img.shape[0] for img in images]
-        
-        # 计算尺寸变化系数
-        w_var = np.std(widths) / (np.mean(widths) + 1e-6)
-        h_var = np.std(heights) / (np.mean(heights) + 1e-6)
-        
-        # 判断逻辑
-        if w_var < 0.1 and h_var > 0.2:  # 宽度相近，高度差异大
-            return 'vertical'
-        elif h_var < 0.1 and w_var > 0.2:  # 高度相近，宽度差异大
-            return 'horizontal'
-        elif w_var > 0.5 or h_var > 0.5:  # 尺寸差异很大
-            return 'grid'
-        else:
-            # 默认垂直（最常见的截图场景）
-            return 'vertical'
-
-    def _stitch_sequence_precise(self, images: List[np.ndarray], direction: str, progress_callback=None) -> np.ndarray:
-        """精确拼接多张图片序列"""
-        if len(images) == 1:
-            return images[0]
-        
-        result = images[0]
-        for i, img in enumerate(images[1:], start=1):
-            if progress_callback:
-                progress_callback(i, len(images)-1, f"正在精确拼接第 {i}/{len(images)-1} 张...")
-            result = self._stitch_two_precise(result, img, direction, progress_callback)
-        
-        return result
 
     def _grid_stitch(self, images: List[np.ndarray], progress_callback=None) -> np.ndarray:
         """网格拼接"""
@@ -561,12 +256,15 @@ class ImageStitcher:
         return result
 
     def stitch_images(self, image_paths: List[str], progress_callback=None, fallback_mode='vertical') -> Optional[np.ndarray]:
-        """拼接图片 - 精确特征匹配实现
+        """拼接图片 - 使用模板匹配方法，专门处理有重叠的截图
         
         Args:
             image_paths: 图片路径列表
             progress_callback: 进度回调函数
-            fallback_mode: 备选拼接模式 ('vertical', 'horizontal', 'grid', None)
+            fallback_mode: 拼接模式 ('vertical', 'horizontal', 'grid')
+        
+        Returns:
+            拼接后的图片，失败返回None
         """
         if not image_paths:
             return None
@@ -578,11 +276,7 @@ class ImageStitcher:
                 progress_callback(i + 1, len(image_paths), f"加载图片: {Path(path).name}")
 
             try:
-                with open(path, 'rb') as f:
-                    img_bytes = f.read()
-                img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
+                img = cv2.imread(path, cv2.IMREAD_COLOR)
                 if img is not None:
                     images.append(img)
                     if progress_callback:
@@ -595,52 +289,260 @@ class ImageStitcher:
                     progress_callback(i + 1, len(image_paths), f"⚠ 加载失败: {Path(path).name} - {e}")
 
         if not images:
+            if progress_callback:
+                progress_callback(0, 0, "❌ 没有成功加载任何图片")
             return None
 
         if len(images) == 1:
             if progress_callback:
-                progress_callback(1, 1, "单张图片，无需拼接")
+                progress_callback(1, 1, "✓ 单张图片，直接返回")
             return images[0]
 
-        # 2. 确定拼接方向
-        if self.mode == 'smart':
-            # 使用fallback_mode作为智能模式的指导
-            if fallback_mode == 'vertical':
-                direction = 'vertical'
-            elif fallback_mode == 'horizontal':
-                direction = 'horizontal'
-            elif fallback_mode == 'grid':
-                direction = 'grid'
-            else:
-                # 真正的智能检测
-                direction = self._detect_stitch_direction(images)
-        else:
-            direction = self.mode if self.mode in ['vertical', 'horizontal', 'grid'] else fallback_mode or 'vertical'
-
+        # 2. 根据模式执行拼接
+        mode_name = {'vertical': '垂直', 'horizontal': '水平', 'grid': '网格'}.get(fallback_mode, '垂直')
         if progress_callback:
-            direction_name = {'vertical': '垂直', 'horizontal': '水平', 'grid': '网格'}.get(direction, direction)
-            progress_callback(len(image_paths), len(image_paths), f"开始{direction_name}拼接 {len(images)} 张图片...")
-            progress_callback(len(image_paths), len(image_paths), f"使用 {self.feature_type} 特征检测器进行精确匹配...")
-
-        # 3. 执行拼接
+            progress_callback(len(images), len(images), f"🔄 开始{mode_name}拼接 {len(images)} 张图片...")
+        
         try:
-            if direction == 'grid':
-                result = self._grid_stitch(images, progress_callback)
+            if fallback_mode == 'vertical':
+                return self._stitch_vertical_with_overlap(images, progress_callback)
+            elif fallback_mode == 'horizontal':
+                return self._stitch_horizontal_with_overlap(images, progress_callback)
+            elif fallback_mode == 'grid':
+                return self._grid_stitch(images, progress_callback)
             else:
-                # 使用精确特征匹配拼接
-                result = self._stitch_sequence_precise(images, direction, progress_callback)
-            
-            if progress_callback:
-                progress_callback(len(image_paths), len(image_paths), f"✓ 拼接完成！结果尺寸: {result.shape[1]}x{result.shape[0]}")
-            
-            return result
-            
+                return self._stitch_vertical_with_overlap(images, progress_callback)
         except Exception as e:
-            import traceback
             if progress_callback:
-                progress_callback(len(image_paths), len(image_paths), f"✗ 拼接失败: {e}")
-                progress_callback(len(image_paths), len(image_paths), traceback.format_exc())
+                progress_callback(0, 0, f"❌ 拼接异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
+    
+    def _find_overlap_offset(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> tuple:
+        """使用模板匹配查找两张图片的重叠偏移量
+        
+        Args:
+            img1: 第一张图片（上方/左侧）
+            img2: 第二张图片（下方/右侧）
+            direction: 'vertical' 或 'horizontal'
+        
+        Returns:
+            (offset, confidence) - 偏移量和匹配置信度
+        """
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        
+        if direction == 'vertical':
+            # 垂直拼接：用img2的顶部在img1的底部区域搜索
+            search_height = min(int(h1 * 0.5), h1 - 10)  # 搜索区域：img1底部50%
+            template_height = min(int(h2 * 0.3), h2 - 10, 300)  # 模板：img2顶部30%，最多300px
+            
+            if search_height < 20 or template_height < 20:
+                return 0, 0.0
+            
+            # 提取搜索区域和模板
+            search_region = img1[h1 - search_height:, :]
+            template = img2[:template_height, :]
+            
+            # 确保宽度一致
+            min_width = min(search_region.shape[1], template.shape[1])
+            search_region = search_region[:, :min_width]
+            template = template[:, :min_width]
+            
+            # 转换为灰度图以提高匹配速度
+            if len(search_region.shape) == 3:
+                search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
+                template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            else:
+                search_gray = search_region
+                template_gray = template
+            
+            # 使用归一化相关系数匹配（对亮度变化不敏感）
+            result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+            
+            # 计算重叠偏移量
+            match_y = max_loc[1]  # 在搜索区域中的y位置
+            overlap = search_height - match_y  # 重叠的高度
+            
+            return overlap, max_val
+            
+        else:  # horizontal
+            # 水平拼接：用img2的左侧在img1的右侧区域搜索
+            search_width = min(int(w1 * 0.5), w1 - 10)
+            template_width = min(int(w2 * 0.3), w2 - 10, 300)
+            
+            if search_width < 20 or template_width < 20:
+                return 0, 0.0
+            
+            search_region = img1[:, w1 - search_width:]
+            template = img2[:, :template_width]
+            
+            min_height = min(search_region.shape[0], template.shape[0])
+            search_region = search_region[:min_height, :]
+            template = template[:min_height, :]
+            
+            if len(search_region.shape) == 3:
+                search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
+                template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            else:
+                search_gray = search_region
+                template_gray = template
+            
+            result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+            
+            match_x = max_loc[0]
+            overlap = search_width - match_x
+            
+            return overlap, max_val
+    
+    def _stitch_vertical_with_overlap(self, images: List[np.ndarray], progress_callback=None) -> np.ndarray:
+        """垂直拼接，自动检测重叠"""
+        if len(images) == 1:
+            return images[0]
+        
+        result = images[0]
+        
+        for i, img in enumerate(images[1:], start=1):
+            if progress_callback:
+                progress_callback(i, len(images) - 1, f"正在拼接第 {i}/{len(images)-1} 张...")
+            
+            # 查找重叠
+            overlap, confidence = self._find_overlap_offset(result, img, 'vertical')
+            
+            if progress_callback:
+                if confidence > 0.7:
+                    progress_callback(i, len(images) - 1, f"✓ 检测到 {overlap}px 重叠 (置信度 {confidence:.2f})")
+                else:
+                    progress_callback(i, len(images) - 1, f"⚠ 未检测到明显重叠 (置信度 {confidence:.2f})，使用无缝拼接")
+            
+            # 根据置信度决定是否使用重叠
+            if confidence > 0.6 and overlap > 10:
+                # 有明显重叠，使用渐变融合
+                result = self._blend_vertical(result, img, overlap)
+            else:
+                # 没有重叠，直接拼接
+                max_width = max(result.shape[1], img.shape[1])
+                if result.shape[1] < max_width:
+                    pad_width = max_width - result.shape[1]
+                    result = np.pad(result, ((0, 0), (0, pad_width), (0, 0)), mode='constant')
+                if img.shape[1] < max_width:
+                    pad_width = max_width - img.shape[1]
+                    img = np.pad(img, ((0, 0), (0, pad_width), (0, 0)), mode='constant')
+                result = np.vstack([result, img])
+        
+        if progress_callback:
+            h, w = result.shape[:2]
+            progress_callback(len(images), len(images), f"✓ 垂直拼接完成: {w}x{h}")
+        
+        return result
+    
+    def _blend_vertical(self, img1: np.ndarray, img2: np.ndarray, overlap: int) -> np.ndarray:
+        """垂直方向渐变融合两张图片"""
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        max_width = max(w1, w2)
+        
+        # 统一宽度
+        if w1 < max_width:
+            img1 = np.pad(img1, ((0, 0), (0, max_width - w1), (0, 0)), mode='constant')
+        if w2 < max_width:
+            img2 = np.pad(img2, ((0, 0), (0, max_width - w2), (0, 0)), mode='constant')
+        
+        # 创建画布
+        canvas_height = h1 + h2 - overlap
+        canvas = np.zeros((canvas_height, max_width, 3), dtype=np.uint8)
+        
+        # 放置第一张图片的非重叠部分
+        canvas[:h1 - overlap, :] = img1[:h1 - overlap, :]
+        
+        # 渐变融合重叠区域
+        for i in range(overlap):
+            alpha = i / max(overlap - 1, 1)  # 从0到1
+            y_canvas = h1 - overlap + i
+            y_img1 = h1 - overlap + i
+            y_img2 = i
+            
+            if y_img1 < h1 and y_img2 < h2:
+                canvas[y_canvas, :] = (
+                    img1[y_img1, :] * (1 - alpha) + img2[y_img2, :] * alpha
+                ).astype(np.uint8)
+        
+        # 放置第二张图片的非重叠部分
+        canvas[h1:, :] = img2[overlap:, :]
+        
+        return canvas
+    
+    def _stitch_horizontal_with_overlap(self, images: List[np.ndarray], progress_callback=None) -> np.ndarray:
+        """水平拼接，自动检测重叠"""
+        if len(images) == 1:
+            return images[0]
+        
+        result = images[0]
+        
+        for i, img in enumerate(images[1:], start=1):
+            if progress_callback:
+                progress_callback(i, len(images) - 1, f"正在拼接第 {i}/{len(images)-1} 张...")
+            
+            overlap, confidence = self._find_overlap_offset(result, img, 'horizontal')
+            
+            if progress_callback:
+                if confidence > 0.7:
+                    progress_callback(i, len(images) - 1, f"✓ 检测到 {overlap}px 重叠 (置信度 {confidence:.2f})")
+                else:
+                    progress_callback(i, len(images) - 1, f"⚠ 未检测到明显重叠，使用无缝拼接")
+            
+            if confidence > 0.6 and overlap > 10:
+                result = self._blend_horizontal(result, img, overlap)
+            else:
+                max_height = max(result.shape[0], img.shape[0])
+                if result.shape[0] < max_height:
+                    pad_height = max_height - result.shape[0]
+                    result = np.pad(result, ((0, pad_height), (0, 0), (0, 0)), mode='constant')
+                if img.shape[0] < max_height:
+                    pad_height = max_height - img.shape[0]
+                    img = np.pad(img, ((0, pad_height), (0, 0), (0, 0)), mode='constant')
+                result = np.hstack([result, img])
+        
+        if progress_callback:
+            h, w = result.shape[:2]
+            progress_callback(len(images), len(images), f"✓ 水平拼接完成: {w}x{h}")
+        
+        return result
+    
+    def _blend_horizontal(self, img1: np.ndarray, img2: np.ndarray, overlap: int) -> np.ndarray:
+        """水平方向渐变融合两张图片"""
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        max_height = max(h1, h2)
+        
+        if h1 < max_height:
+            img1 = np.pad(img1, ((0, max_height - h1), (0, 0), (0, 0)), mode='constant')
+        if h2 < max_height:
+            img2 = np.pad(img2, ((0, max_height - h2), (0, 0), (0, 0)), mode='constant')
+        
+        canvas_width = w1 + w2 - overlap
+        canvas = np.zeros((max_height, canvas_width, 3), dtype=np.uint8)
+        
+        canvas[:, :w1 - overlap] = img1[:, :w1 - overlap]
+        
+        for i in range(overlap):
+            alpha = i / max(overlap - 1, 1)
+            x_canvas = w1 - overlap + i
+            x_img1 = w1 - overlap + i
+            x_img2 = i
+            
+            if x_img1 < w1 and x_img2 < w2:
+                canvas[:, x_canvas] = (
+                    img1[:, x_img1] * (1 - alpha) + img2[:, x_img2] * alpha
+                ).astype(np.uint8)
+        
+        canvas[:, w1:] = img2[:, overlap:]
+        
+        return canvas
+
 
 class ProgressDialog(QDialog):
     """下载/处理进度弹窗：显示当前进度、状态信息与耗时。
@@ -825,8 +727,15 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("浏览...")
         self.browse_btn.setProperty("btn", "secondary")
         self.browse_btn.clicked.connect(self.browse_directory)
+        
+        # 添加"包含子项"复选框
+        self.include_subdirs_checkbox = QCheckBox("包含子目录")
+        self.include_subdirs_checkbox.setToolTip("勾选后将扫描指定目录下所有子目录的图片文件")
+        self.include_subdirs_checkbox.stateChanged.connect(self._on_subdirs_checkbox_changed)
+        
         dir_row.addWidget(QLabel("目录:"))
         dir_row.addWidget(self.dir_edit, 1)
+        dir_row.addWidget(self.include_subdirs_checkbox)
         dir_row.addWidget(self.browse_btn)
         top_settings.addLayout(dir_row)
 
@@ -930,12 +839,15 @@ class MainWindow(QMainWindow):
         # 合并：结果预览区域（右侧，自动缩放；支持单图和多图网格）
         self.result_container = QWidget()
         self.result_container.setMinimumHeight(260)
+        self.result_container.setMinimumWidth(200)  # 设置最小宽度，防止被压缩太小
+        self.result_container.setMaximumWidth(16777215)  # 移除最大宽度限制，但不自动扩张
         rc_layout = QVBoxLayout(self.result_container)
         rc_layout.setContentsMargins(0,0,0,0)
         rc_layout.setSpacing(0)
         # 单结果占位/显示
         self.preview_label = QLabel("拼接结果将显示在这里")
         self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setScaledContents(False)  # 禁用自动缩放内容
         # 使用当前主题的窗口背景色和中间色设置初始底色和边框，避免纯白
         pal = self.palette()
         try:
@@ -966,14 +878,15 @@ class MainWindow(QMainWindow):
         self.result_scroll.setWidget(self.result_grid_widget)
         self.result_scroll.setVisible(False)  # 初始隐藏，默认单图显示
         rc_layout.addWidget(self.result_scroll, 1)
-        def _rc_resize(ev):
-            QWidget.resizeEvent(self.result_container, ev)
-            self._refresh_results_preview()
-        self.result_container.resizeEvent = _rc_resize
+        
+        # 禁用result_container的resizeEvent，防止自动调整大小
+        # self.result_container.resizeEvent = _rc_resize  # 注释掉自动调整
 
         # 左右结构：左（缩略图+操作）| 分隔线 | 右（结果预览）
         self.h_splitter = QSplitter(Qt.Horizontal)
         self.h_splitter.setChildrenCollapsible(False)
+        # 设置固定的初始分割比例
+        self.h_splitter.setSizes([500, 500])  # 左右各占一半，不会自动调整
 
         left_widget = QWidget()
         left_col = QVBoxLayout(left_widget)
@@ -982,8 +895,11 @@ class MainWindow(QMainWindow):
 
         self.h_splitter.addWidget(left_widget)
         self.h_splitter.addWidget(self.result_container)
-        self.h_splitter.setStretchFactor(0, 1)
-        self.h_splitter.setStretchFactor(1, 1)
+        # 设置固定的拉伸因子，防止自动调整
+        self.h_splitter.setStretchFactor(0, 1)  # 左侧面板
+        self.h_splitter.setStretchFactor(1, 0)  # 右侧面板不自动拉伸
+        # 设置右侧面板的大小策略为固定
+        self.result_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         preview_select_layout.addWidget(self.h_splitter)
 
         # 双击打开：为缩略图列表启用双击打开文件
@@ -1292,7 +1208,9 @@ class MainWindow(QMainWindow):
         # 清空并填充列表
         self.image_list.clear()
         stitcher = ImageStitcher()
-        paths = stitcher.load_images(directory)
+        # 根据复选框状态决定是否包含子目录
+        include_subdirs = self.include_subdirs_checkbox.isChecked()
+        paths = stitcher.load_images(directory, include_subdirs=include_subdirs)
         for path in paths:
             self._add_image_item(path)
         self._update_summary()
@@ -1364,6 +1282,14 @@ class MainWindow(QMainWindow):
     def _apply_global_styles(self):
         """应用全局样式（占位方法）"""
         pass
+    
+    def _on_subdirs_checkbox_changed(self, state):
+        """复选框状态变化时刷新图片列表"""
+        directory = self.dir_edit.text().strip()
+        if directory and os.path.isdir(directory):
+            include_text = "包含子目录" if state == Qt.Checked else "仅当前目录"
+            self.log(f"🔄 扫描模式: {include_text}")
+            self._load_images_for_preview(directory)
     
     def browse_directory(self):
         """浏览选择目录"""
@@ -1719,7 +1645,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存失败", "没有成功保存任何文件，请查看日志了解详情")
 
     def display_image(self, cv_img):
-        """在预览标签中显示OpenCV图像"""
+        """在预览标签中显示OpenCV图像，自动缩放适应容器大小"""
         if cv_img is None:
             self.preview_label.setText("拼接失败或没有结果")
             self.preview_label.setPixmap(QPixmap())
@@ -1749,12 +1675,32 @@ class MainWindow(QMainWindow):
 
         pixmap = QPixmap.fromImage(q_img)
         
-        # 缩放以适应标签大小
-        self.preview_label.setPixmap(pixmap.scaled(
-            self.preview_label.size(), 
+        # 获取预览标签的实际可用大小（使用父容器的viewport大小）
+        scroll_area = self.preview_label.parent()  # scroll_area_widget_contents
+        if scroll_area and scroll_area.parent():  # QScrollArea
+            viewport = scroll_area.parent()
+            if hasattr(viewport, 'viewport'):
+                available_width = max(200, viewport.viewport().width() - 20)
+                available_height = max(200, viewport.viewport().height() - 20)
+            else:
+                available_width = max(200, scroll_area.width() - 20)
+                available_height = max(200, scroll_area.height() - 20)
+        else:
+            # 回退：使用result_container的大小
+            container_size = self.result_container.size()
+            available_width = max(200, container_size.width() - 20)
+            available_height = max(200, container_size.height() - 20)
+        
+        # 缩放以适应容器大小，保持纵横比
+        scaled_pixmap = pixmap.scaled(
+            available_width,
+            available_height,
             Qt.KeepAspectRatio, 
             Qt.SmoothTransformation
-        ))
+        )
+        
+        self.preview_label.setPixmap(scaled_pixmap)
+        self.log(f"显示预览图: 原始 {w}x{h} -> 可用空间 {available_width}x{available_height} -> 缩放后 {scaled_pixmap.width()}x{scaled_pixmap.height()}")
 
     def save_result(self):
         """保存单个拼接结果（此功能在多图输出模式下可能需要调整）"""

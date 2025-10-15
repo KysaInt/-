@@ -195,27 +195,37 @@ class SequenceViewerWidget(QWidget):
         # 调整列拉伸，让路径编辑框更宽
         settings_layout.setColumnStretch(1, 1)
 
-        # Width Slider
+        # Width Slider - 使用HBoxLayout让滑块和标签在同一行
         settings_layout.addWidget(QLabel("宽度:"), 1, 0)
+        width_container = QWidget()
+        width_layout = QHBoxLayout(width_container)
+        width_layout.setContentsMargins(0, 0, 0, 0)
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setRange(1, 30)
         self.width_slider.setValue(2)
         self.width_slider_label = QLabel(str(self.width_slider.value()))
+        self.width_slider_label.setMinimumWidth(30)
         self.width_slider.valueChanged.connect(self.width_slider_label.setNum)
         self.width_slider.valueChanged.connect(self.update_pixel_width)
-        settings_layout.addWidget(self.width_slider, 1, 1)
-        settings_layout.addWidget(self.width_slider_label, 1, 2)
+        width_layout.addWidget(self.width_slider)
+        width_layout.addWidget(self.width_slider_label)
+        settings_layout.addWidget(width_container, 1, 1, 1, 3)  # 跨3列
 
-        # Height Slider
+        # Height Slider - 使用HBoxLayout让滑块和标签在同一行
         settings_layout.addWidget(QLabel("高度:"), 2, 0)
+        height_container = QWidget()
+        height_layout = QHBoxLayout(height_container)
+        height_layout.setContentsMargins(0, 0, 0, 0)
         self.height_slider = QSlider(Qt.Horizontal)
         self.height_slider.setRange(1, 30)
         self.height_slider.setValue(2)
         self.height_slider_label = QLabel(str(self.height_slider.value()))
+        self.height_slider_label.setMinimumWidth(30)
         self.height_slider.valueChanged.connect(self.height_slider_label.setNum)
         self.height_slider.valueChanged.connect(self.update_pixel_height)
-        settings_layout.addWidget(self.height_slider, 2, 1)
-        settings_layout.addWidget(self.height_slider_label, 2, 2)
+        height_layout.addWidget(self.height_slider)
+        height_layout.addWidget(self.height_slider_label)
+        settings_layout.addWidget(height_container, 2, 1, 1, 3)  # 跨3列
 
         # Min Frames Input
         settings_layout.addWidget(QLabel("最少帧数:"), 3, 0)
@@ -223,7 +233,7 @@ class SequenceViewerWidget(QWidget):
         self.min_frames_spinbox.setRange(0, 9999)
         self.min_frames_spinbox.setValue(self.min_frame_threshold)
         self.min_frames_spinbox.valueChanged.connect(self.update_min_threshold)
-        settings_layout.addWidget(self.min_frames_spinbox, 3, 1)
+        settings_layout.addWidget(self.min_frames_spinbox, 3, 1, 1, 3)  # 跨3列
 
         # Max Frames Input
         settings_layout.addWidget(QLabel("最多帧数:"), 4, 0)
@@ -231,7 +241,7 @@ class SequenceViewerWidget(QWidget):
         self.max_frames_spinbox.setRange(1, 99999)
         self.max_frames_spinbox.setValue(self.max_frame_threshold)
         self.max_frames_spinbox.valueChanged.connect(self.update_max_threshold)
-        settings_layout.addWidget(self.max_frames_spinbox, 4, 1)
+        settings_layout.addWidget(self.max_frames_spinbox, 4, 1, 1, 3)  # 跨3列
 
         self.collapsible_box.setContentLayout(settings_layout)
         main_layout.addWidget(self.collapsible_box)
