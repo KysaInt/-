@@ -1,0 +1,40 @@
+[2025-10-15 01:56:27] 开始依赖检测
+[2025-10-15 01:56:27] 所有依赖已满足
+[2025-10-15 01:56:47] 开始依赖检测
+[2025-10-15 01:56:47] 所有依赖已满足
+[2025-10-15 02:16:58] 开始依赖检测
+[2025-10-15 02:16:58] 所有依赖已满足
+[2025-10-15 02:16:58] 进入 __main__ 部分
+[2025-10-15 02:16:58] Python: C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\pythonw.exe
+[2025-10-15 02:16:58] CWD: C:\Users\KYSAINT\OneDrive\-
+[2025-10-15 02:16:58] 部分 sys.path:
+C:\Users\KYSAINT\OneDrive\-\自动拼图
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\python313.zip
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\DLLs
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\win32
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\win32\lib
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\Pythonwin
+[2025-10-15 02:16:58] QApplication 创建成功
+[2025-10-15 02:16:59] MainWindow 初始化失败: 'MainWindow' object has no attribute '_apply_global_styles'
+[2025-10-15 02:16:59] 窗口未创建，退出
+[2025-10-15 02:17:32] 开始依赖检测
+[2025-10-15 02:17:32] 所有依赖已满足
+[2025-10-15 02:17:32] 进入 __main__ 部分
+[2025-10-15 02:17:32] Python: C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\python.exe
+[2025-10-15 02:17:32] CWD: C:\Users\KYSAINT\OneDrive\-\自动拼图
+[2025-10-15 02:17:32] 部分 sys.path:
+C:\Users\KYSAINT\OneDrive\-\自动拼图
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\python313.zip
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\DLLs
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\win32
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\win32\lib
+C:\Users\KYSAINT\AppData\Local\Programs\Python\Python313\Lib\site-packages\Pythonwin
+[2025-10-15 02:17:32] QApplication 创建成功
+[2025-10-15 02:17:32] MainWindow 初始化失败: 'MainWindow' object has no attribute '_apply_global_styles'
+[2025-10-15 02:17:32] 窗口未创建，退出
