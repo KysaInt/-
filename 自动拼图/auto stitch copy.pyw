@@ -163,47 +163,39 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QScrollArea, QGroupBox, QListWidget,
                                QListWidgetItem, QListView, QMenu, QInputDialog,
                                QSlider, QSizePolicy, QStyledItemDelegate, QFrame, QSplitter, QStyle, QGridLayout, QDialog, QComboBox)
-from PySide6.QtCore import Qt, QThread, Signal, QPoint, QSize, QRect, QPropertyAnimation, QEasingCurve, QUrl, QEvent, QSettings, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QPoint, QSize, QRect, QPropertyAnimation, QEasingCurve, QUrl, QEvent, QSettings, QTimer, QFileSystemWatcher
 from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QPainter, QColor, QPen, QFont, QDesktopServices
-
-def crop_transparent_border(image: np.ndarray) -> np.ndarray:
-    """裁剪图像的透明边框（要求为 BGRA 格式）。"""
-    if image is None or image.shape[2] != 4:
-        return image
-
-    alpha_channel = image[:, :, 3]
-    _, thresh = cv2.threshold(alpha_channel, 0, 255, cv2.THRESH_BINARY)
-    
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return image # 没有非透明区域
-
-    # 合并所有轮廓的边界框
-    x_min, y_min, x_max, y_max = float('inf'), float('inf'), 0, 0
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        x_min = min(x_min, x)
-        y_min = min(y_min, y)
-        x_max = max(x_max, x + w)
-        y_max = max(y_max, y + h)
-
-    # 确保边界有效
-    if x_min < x_max and y_min < y_max:
-        return image[y_min:y_max, x_min:x_max]
-    else:
-        return image # 如果没有有效的非透明区域，返回原图
 
 
 class ImageStitcher:
-    """使用 OpenCV Stitcher 进行图片拼接"""
+    """精确图片拼接器 - 基于特征匹配的高精度拼接
+    
+    新特性:
+    1. 使用SIFT/ORB特征点精确定位重叠区域
+    2. 支持任意角度和比例的图片拼接
+    3. 智能裁剪，生成不规则边界
+    4. 多种拼接模式：智能、垂直、水平、网格
+    """
 
-    def __init__(self, mode='scans'):
+    def __init__(self, mode='smart'):
         """
-        mode: 'scans' 适合扫描/截图（更精确）
-              'panorama' 适合全景照片
+        mode: 'smart'      自动检测最佳拼接方式
+              'vertical'   强制垂直拼接
+              'horizontal' 强制水平拼接
+              'grid'       网格拼接
         """
         self.mode = mode
+        # 初始化特征检测器
+        try:
+            # 优先使用SIFT（更准确，适合截图）
+            self.detector = cv2.SIFT_create(nfeatures=2000)
+            self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+            self.feature_type = 'SIFT'
+        except:
+            # 回退到ORB
+            self.detector = cv2.ORB_create(nfeatures=2000)
+            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            self.feature_type = 'ORB'
 
     def load_images(self, directory: str) -> List[str]:
         """加载目录下的所有图片"""
@@ -217,37 +209,369 @@ class ImageStitcher:
 
         return image_files
 
-    def _make_transparent(self, pano: np.ndarray) -> np.ndarray:
-        """将拼接结果的纯黑背景转为透明（BGRA）。
-        注意：此方法以接近黑色(0~1)作为空白的判定阈值，可能会把真实黑色像素也当作透明。
-        如有需要，可根据素材调整阈值或更换空白检测逻辑。
-        """
-        if pano is None:
-            return pano
-        if pano.ndim != 3:
-            return pano
-        h, w = pano.shape[:2]
-        # 确保是 BGR
-        if pano.shape[2] == 4:
-            bgr = pano[:, :, :3]
-        else:
-            bgr = pano
-        # 阈值：非常接近纯黑
-        mask = cv2.inRange(bgr, (0, 0, 0), (1, 1, 1))
-        # 构建 BGRA
-        bgra = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
-        # 默认不透明
-        bgra[:, :, 3] = 255
-        # 空白处设为透明
-        bgra[mask > 0, 3] = 0
-        return bgra
 
-    def stitch_images(self, image_paths: List[str], progress_callback=None) -> Optional[np.ndarray]:
-        """拼接图片"""
+    def _find_overlap_precise(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> dict:
+        """精确查找两张图片的重叠区域和变换矩阵
+        
+        Args:
+            img1: 第一张图片（上方/左侧）
+            img2: 第二张图片（下方/右侧）
+            direction: 'vertical' 或 'horizontal'
+        
+        Returns:
+            {
+                'found': bool,           # 是否找到重叠
+                'overlap': int,          # 重叠像素数
+                'offset': (x, y),        # 偏移量
+                'homography': np.ndarray # 单应性矩阵（如果需要）
+            }
+        """
+        result = {
+            'found': False,
+            'overlap': 0,
+            'offset': (0, 0),
+            'homography': None
+        }
+        
+        # 转换为灰度图
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if len(img1.shape) == 3 else img1
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if len(img2.shape) == 3 else img2
+        
+        # 提取感兴趣区域（减少计算量）
+        h1, w1 = gray1.shape
+        h2, w2 = gray2.shape
+        
+        if direction == 'vertical':
+            # 垂直拼接：比较img1底部30%和img2顶部30%
+            roi1 = gray1[int(h1*0.7):, :]
+            roi2 = gray2[:int(h2*0.3), :]
+            roi1_offset = (0, int(h1*0.7))
+            roi2_offset = (0, 0)
+        else:
+            # 水平拼接：比较img1右侧30%和img2左侧30%
+            roi1 = gray1[:, int(w1*0.7):]
+            roi2 = gray2[:, :int(w2*0.3)]
+            roi1_offset = (int(w1*0.7), 0)
+            roi2_offset = (0, 0)
+        
+        # 检测特征点
+        kp1, des1 = self.detector.detectAndCompute(roi1, None)
+        kp2, des2 = self.detector.detectAndCompute(roi2, None)
+        
+        if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+            return result
+        
+        # 特征匹配
+        try:
+            matches = self.matcher.knnMatch(des1, des2, k=2)
+        except:
+            return result
+        
+        # Lowe's ratio test
+        good_matches = []
+        for m_n in matches:
+            if len(m_n) == 2:
+                m, n = m_n
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
+        
+        # 至少需要4个好的匹配点
+        if len(good_matches) < 4:
+            return result
+        
+        # 提取匹配点坐标
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+        
+        # 调整坐标到原图
+        pts1[:, 0] += roi1_offset[0]
+        pts1[:, 1] += roi1_offset[1]
+        pts2[:, 0] += roi2_offset[0]
+        pts2[:, 1] += roi2_offset[1]
+        
+        # 计算单应性矩阵（用于处理缩放、旋转）
+        try:
+            H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
+            if H is None:
+                return result
+            
+            # 统计内点
+            inliers = np.sum(mask)
+            if inliers < 4:
+                return result
+            
+            result['found'] = True
+            result['homography'] = H
+            
+            # 计算偏移量
+            if direction == 'vertical':
+                # 计算img2需要向上移动多少才能对齐
+                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
+                transformed = cv2.perspectiveTransform(corners2, H)
+                # 取顶部边缘的平均y坐标作为重叠位置
+                top_y = np.mean(transformed[0:2, 0, 1])
+                result['overlap'] = max(0, int(h1 - top_y))
+                result['offset'] = (0, int(top_y))
+            else:
+                # 水平拼接
+                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
+                transformed = cv2.perspectiveTransform(corners2, H)
+                # 取左侧边缘的平均x坐标作为重叠位置
+                left_x = np.mean(transformed[[0, 3], 0, 0])
+                result['overlap'] = max(0, int(w1 - left_x))
+                result['offset'] = (int(left_x), 0)
+            
+            return result
+            
+        except Exception as e:
+            return result
+
+    def _stitch_two_precise(self, img1: np.ndarray, img2: np.ndarray, direction='vertical', progress_callback=None) -> np.ndarray:
+        """精确拼接两张图片
+        
+        使用特征匹配找到精确的重叠位置，支持缩放和旋转
+        """
+        if progress_callback:
+            progress_callback(1, 2, f"正在分析图片重叠区域...")
+        
+        # 查找重叠
+        overlap_info = self._find_overlap_precise(img1, img2, direction)
+        
+        if not overlap_info['found']:
+            # 如果找不到重叠，使用简单拼接
+            if progress_callback:
+                progress_callback(1, 2, f"未检测到重叠，使用简单拼接...")
+            return self._simple_stitch_two(img1, img2, direction)
+        
+        if progress_callback:
+            progress_callback(1, 2, f"✓ 检测到{overlap_info['overlap']}px重叠，正在精确拼接...")
+        
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        H = overlap_info['homography']
+        
+        if direction == 'vertical':
+            # 垂直拼接
+            offset_y = overlap_info['offset'][1]
+            
+            # 如果有单应性变换，先对img2进行变换
+            if H is not None and not np.allclose(H, np.eye(3)):
+                # 计算变换后的尺寸
+                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
+                transformed = cv2.perspectiveTransform(corners2, H)
+                
+                x_coords = transformed[:, 0, 0]
+                y_coords = transformed[:, 0, 1]
+                
+                min_x, max_x = int(np.floor(x_coords.min())), int(np.ceil(x_coords.max()))
+                min_y, max_y = int(np.floor(y_coords.min())), int(np.ceil(y_coords.max()))
+                
+                # 创建变换矩阵（加上平移）
+                translation = np.array([[1, 0, -min_x], [0, 1, -min_y], [0, 0, 1]])
+                H_translated = translation @ H
+                
+                # 变换img2
+                out_w = max_x - min_x
+                out_h = max_y - min_y
+                img2_warped = cv2.warpPerspective(img2, H_translated, (out_w, out_h))
+                
+                # 调整offset
+                offset_y = offset_y - min_y
+            else:
+                img2_warped = img2
+            
+            # 创建画布
+            canvas_h = max(h1, offset_y + img2_warped.shape[0])
+            canvas_w = max(w1, img2_warped.shape[1])
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+            
+            # 放置img1
+            canvas[:h1, :w1] = img1
+            
+            # 放置img2（融合重叠区域）
+            y_start = max(0, offset_y)
+            y_end = min(canvas_h, offset_y + img2_warped.shape[0])
+            
+            if y_start < h1:
+                # 有重叠，使用alpha融合
+                overlap_h = min(h1 - y_start, img2_warped.shape[0])
+                for i in range(overlap_h):
+                    alpha = i / overlap_h  # 线性融合
+                    y = y_start + i
+                    canvas[y, :img2_warped.shape[1]] = (
+                        canvas[y, :img2_warped.shape[1]] * (1 - alpha) +
+                        img2_warped[i, :] * alpha
+                    ).astype(np.uint8)
+                
+                # 放置非重叠部分
+                if offset_y + overlap_h < offset_y + img2_warped.shape[0]:
+                    canvas[y_start + overlap_h:y_end, :img2_warped.shape[1]] = \
+                        img2_warped[overlap_h:y_end - y_start, :]
+            else:
+                # 无重叠
+                canvas[y_start:y_end, :img2_warped.shape[1]] = img2_warped[:y_end - y_start, :]
+            
+            return canvas
+            
+        else:
+            # 水平拼接（类似逻辑）
+            offset_x = overlap_info['offset'][0]
+            
+            if H is not None and not np.allclose(H, np.eye(3)):
+                corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
+                transformed = cv2.perspectiveTransform(corners2, H)
+                
+                x_coords = transformed[:, 0, 0]
+                y_coords = transformed[:, 0, 1]
+                
+                min_x, max_x = int(np.floor(x_coords.min())), int(np.ceil(x_coords.max()))
+                min_y, max_y = int(np.floor(y_coords.min())), int(np.ceil(y_coords.max()))
+                
+                translation = np.array([[1, 0, -min_x], [0, 1, -min_y], [0, 0, 1]])
+                H_translated = translation @ H
+                
+                out_w = max_x - min_x
+                out_h = max_y - min_y
+                img2_warped = cv2.warpPerspective(img2, H_translated, (out_w, out_h))
+                
+                offset_x = offset_x - min_x
+            else:
+                img2_warped = img2
+            
+            canvas_h = max(h1, img2_warped.shape[0])
+            canvas_w = max(w1, offset_x + img2_warped.shape[1])
+            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+            
+            canvas[:h1, :w1] = img1
+            
+            x_start = max(0, offset_x)
+            x_end = min(canvas_w, offset_x + img2_warped.shape[1])
+            
+            if x_start < w1:
+                overlap_w = min(w1 - x_start, img2_warped.shape[1])
+                for i in range(overlap_w):
+                    alpha = i / overlap_w
+                    x = x_start + i
+                    canvas[:img2_warped.shape[0], x] = (
+                        canvas[:img2_warped.shape[0], x] * (1 - alpha) +
+                        img2_warped[:, i] * alpha
+                    ).astype(np.uint8)
+                
+                if offset_x + overlap_w < offset_x + img2_warped.shape[1]:
+                    canvas[:img2_warped.shape[0], x_start + overlap_w:x_end] = \
+                        img2_warped[:, overlap_w:x_end - x_start]
+            else:
+                canvas[:img2_warped.shape[0], x_start:x_end] = img2_warped[:, :x_end - x_start]
+            
+            return canvas
+
+    def _simple_stitch_two(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> np.ndarray:
+        """简单拼接两张图片（无特征匹配）"""
+        if direction == 'vertical':
+            max_w = max(img1.shape[1], img2.shape[1])
+            if img1.shape[1] < max_w:
+                img1 = np.pad(img1, ((0, 0), (0, max_w - img1.shape[1]), (0, 0)), mode='constant')
+            if img2.shape[1] < max_w:
+                img2 = np.pad(img2, ((0, 0), (0, max_w - img2.shape[1]), (0, 0)), mode='constant')
+            return np.vstack([img1, img2])
+        else:
+            max_h = max(img1.shape[0], img2.shape[0])
+            if img1.shape[0] < max_h:
+                img1 = np.pad(img1, ((0, max_h - img1.shape[0]), (0, 0), (0, 0)), mode='constant')
+            if img2.shape[0] < max_h:
+                img2 = np.pad(img2, ((0, max_h - img2.shape[0]), (0, 0), (0, 0)), mode='constant')
+            return np.hstack([img1, img2])
+
+    def _detect_stitch_direction(self, images: List[np.ndarray]) -> str:
+        """智能检测拼接方向
+        
+        策略：
+        1. 如果所有图片宽度相同或接近，且高度不同 -> 垂直拼接
+        2. 如果所有图片高度相同或接近，且宽度不同 -> 水平拼接
+        3. 如果图片尺寸差异很大 -> 网格拼接
+        4. 默认 -> 垂直拼接
+        """
+        if len(images) <= 1:
+            return 'vertical'
+        
+        widths = [img.shape[1] for img in images]
+        heights = [img.shape[0] for img in images]
+        
+        # 计算尺寸变化系数
+        w_var = np.std(widths) / (np.mean(widths) + 1e-6)
+        h_var = np.std(heights) / (np.mean(heights) + 1e-6)
+        
+        # 判断逻辑
+        if w_var < 0.1 and h_var > 0.2:  # 宽度相近，高度差异大
+            return 'vertical'
+        elif h_var < 0.1 and w_var > 0.2:  # 高度相近，宽度差异大
+            return 'horizontal'
+        elif w_var > 0.5 or h_var > 0.5:  # 尺寸差异很大
+            return 'grid'
+        else:
+            # 默认垂直（最常见的截图场景）
+            return 'vertical'
+
+    def _stitch_sequence_precise(self, images: List[np.ndarray], direction: str, progress_callback=None) -> np.ndarray:
+        """精确拼接多张图片序列"""
+        if len(images) == 1:
+            return images[0]
+        
+        result = images[0]
+        for i, img in enumerate(images[1:], start=1):
+            if progress_callback:
+                progress_callback(i, len(images)-1, f"正在精确拼接第 {i}/{len(images)-1} 张...")
+            result = self._stitch_two_precise(result, img, direction, progress_callback)
+        
+        return result
+
+    def _grid_stitch(self, images: List[np.ndarray], progress_callback=None) -> np.ndarray:
+        """网格拼接"""
+        n = len(images)
+        cols = int(np.ceil(np.sqrt(n)))
+        rows = int(np.ceil(n / cols))
+        
+        # 找到最大宽高
+        max_h = max(img.shape[0] for img in images)
+        max_w = max(img.shape[1] for img in images)
+        
+        # 创建网格
+        grid_rows = []
+        for r in range(rows):
+            if progress_callback:
+                progress_callback(r+1, rows, f"正在创建网格第 {r+1}/{rows} 行...")
+            
+            row_images = []
+            for c in range(cols):
+                idx = r * cols + c
+                if idx < n:
+                    img = images[idx]
+                    # 居中填充到统一大小
+                    padded = np.zeros((max_h, max_w, 3), dtype=np.uint8)
+                    y_offset = (max_h - img.shape[0]) // 2
+                    x_offset = (max_w - img.shape[1]) // 2
+                    padded[y_offset:y_offset+img.shape[0], x_offset:x_offset+img.shape[1]] = img
+                    row_images.append(padded)
+                else:
+                    # 空白填充
+                    row_images.append(np.zeros((max_h, max_w, 3), dtype=np.uint8))
+            grid_rows.append(np.hstack(row_images))
+        
+        result = np.vstack(grid_rows)
+        return result
+
+    def stitch_images(self, image_paths: List[str], progress_callback=None, fallback_mode='vertical') -> Optional[np.ndarray]:
+        """拼接图片 - 精确特征匹配实现
+        
+        Args:
+            image_paths: 图片路径列表
+            progress_callback: 进度回调函数
+            fallback_mode: 备选拼接模式 ('vertical', 'horizontal', 'grid', None)
+        """
         if not image_paths:
             return None
 
-        # 加载所有图片
+        # 1. 加载所有图片
         images = []
         for i, path in enumerate(image_paths):
             if progress_callback:
@@ -261,61 +585,62 @@ class ImageStitcher:
 
                 if img is not None:
                     images.append(img)
+                    if progress_callback:
+                        progress_callback(i + 1, len(image_paths), f"✓ 已加载: {Path(path).name} ({img.shape[1]}x{img.shape[0]})")
                 else:
                     if progress_callback:
-                        progress_callback(i + 1, len(image_paths), f"警告: 无法解码 {Path(path).name}")
-            except Exception:
+                        progress_callback(i + 1, len(image_paths), f"⚠ 无法解码: {Path(path).name}")
+            except Exception as e:
                 if progress_callback:
-                    progress_callback(i + 1, len(image_paths), f"警告: 加载失败 {Path(path).name}")
+                    progress_callback(i + 1, len(image_paths), f"⚠ 加载失败: {Path(path).name} - {e}")
 
         if not images:
             return None
 
         if len(images) == 1:
-            # 单张图也做一次透明化处理，保持输出一致
-            return self._make_transparent(images[0])
+            if progress_callback:
+                progress_callback(1, 1, "单张图片，无需拼接")
+            return images[0]
 
-        if self.mode == 'scans':
-            stitcher = cv2.Stitcher_create(cv2.Stitcher_SCANS)
+        # 2. 确定拼接方向
+        if self.mode == 'smart':
+            # 使用fallback_mode作为智能模式的指导
+            if fallback_mode == 'vertical':
+                direction = 'vertical'
+            elif fallback_mode == 'horizontal':
+                direction = 'horizontal'
+            elif fallback_mode == 'grid':
+                direction = 'grid'
+            else:
+                # 真正的智能检测
+                direction = self._detect_stitch_direction(images)
         else:
-            stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
-        
-        # 配置更宽松的参数以提高成功率
-        try:
-            # 设置特征检测器使用更多特征点 - 使用5000与ImageGrouper一致
-            detector = cv2.ORB_create(nfeatures=5000)
-            stitcher.setFeaturesFinder(cv2.detail.OrbFeaturesFinder_create(5000))
-            
-            # 极限宽松配置
-            stitcher.setRegistrationResol(0.6)
-            stitcher.setSeamEstimationResol(0.1)
-            stitcher.setCompositingResol(-1)  # 使用原始分辨率
-            stitcher.setPanoConfidenceThresh(0.1)  # 从0.3进一步降低到0.1,接近禁用置信度检查
-        except Exception as e:
-            # 某些OpenCV版本可能不支持这些方法，静默失败
-            if progress_callback:
-                progress_callback(len(image_paths), len(image_paths), f"使用默认配置 ({e})")
+            direction = self.mode if self.mode in ['vertical', 'horizontal', 'grid'] else fallback_mode or 'vertical'
 
-        status, pano = stitcher.stitch(images)
-        
-        # 提供详细的错误信息
-        if status != cv2.Stitcher_OK:
-            error_msgs = {
-                cv2.Stitcher_ERR_NEED_MORE_IMGS: "需要更多图片",
-                cv2.Stitcher_ERR_HOMOGRAPHY_EST_FAIL: "单应性估计失败（图片重叠不足或特征点太少）",
-                cv2.Stitcher_ERR_CAMERA_PARAMS_ADJUST_FAIL: "相机参数调整失败"
-            }
-            err_msg = error_msgs.get(status, f"未知错误 (状态码: {status})")
-            if progress_callback:
-                progress_callback(len(image_paths), len(image_paths), f"拼接失败: {err_msg}")
-            return None
-        
         if progress_callback:
-            progress_callback(len(image_paths), len(image_paths), "拼接完成")
-        if status == cv2.Stitcher_OK and pano is not None:
-            transparent_pano = self._make_transparent(pano)
-            return crop_transparent_border(transparent_pano)
-        return None
+            direction_name = {'vertical': '垂直', 'horizontal': '水平', 'grid': '网格'}.get(direction, direction)
+            progress_callback(len(image_paths), len(image_paths), f"开始{direction_name}拼接 {len(images)} 张图片...")
+            progress_callback(len(image_paths), len(image_paths), f"使用 {self.feature_type} 特征检测器进行精确匹配...")
+
+        # 3. 执行拼接
+        try:
+            if direction == 'grid':
+                result = self._grid_stitch(images, progress_callback)
+            else:
+                # 使用精确特征匹配拼接
+                result = self._stitch_sequence_precise(images, direction, progress_callback)
+            
+            if progress_callback:
+                progress_callback(len(image_paths), len(image_paths), f"✓ 拼接完成！结果尺寸: {result.shape[1]}x{result.shape[0]}")
+            
+            return result
+            
+        except Exception as e:
+            import traceback
+            if progress_callback:
+                progress_callback(len(image_paths), len(image_paths), f"✗ 拼接失败: {e}")
+                progress_callback(len(image_paths), len(image_paths), traceback.format_exc())
+            return None
 
 class ProgressDialog(QDialog):
     """下载/处理进度弹窗：显示当前进度、状态信息与耗时。
@@ -395,290 +720,63 @@ class ProgressDialog(QDialog):
         self.btn_cancel.setEnabled(False)
         self.label_status.setText("已发出取消请求，等待当前步骤完成…")
 
-class ImageGrouper:
-    """基于特征匹配的图片分组器：将可拼合的图片划为同一连通分量"""
-    def __init__(self, feature: str = 'ORB'):
-        self.feature = feature.upper()
-        if self.feature == 'SIFT' and hasattr(cv2, 'SIFT_create'):
-            # 优先使用SIFT - 对截图更有效
-            self.detector = cv2.SIFT_create(nfeatures=5000)
-            self.norm = cv2.NORM_L2
-            print("[DEBUG] 使用SIFT特征检测器, nfeatures=5000")
-        else:
-            # 回到更稳定的ORB配置
-            self.detector = cv2.ORB_create(nfeatures=5000)
-            self.norm = cv2.NORM_HAMMING
-            print("[DEBUG] 使用ORB特征检测器, nfeatures=5000")
-
-    def _compute_desc(self, img_gray: np.ndarray):
-        # 简化预处理 - 只使用轻度增强,避免过度处理
-        # CLAHE对比度增强
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(img_gray)
-        
-        # 直接提取特征,不做过多处理
-        kp, des = self.detector.detectAndCompute(enhanced, None)
-        
-        # 调试信息:输出特征点数量
-        if des is not None:
-            print(f"[DEBUG] 提取到 {len(kp)} 个特征点, 描述符形状: {des.shape}")
-        else:
-            print(f"[DEBUG] 未提取到任何特征点!")
-        
-        return kp, des
-
-    def _good_pair(self, des1, des2, debug_info=None) -> bool:
-        if des1 is None or des2 is None:
-            if debug_info is not None:
-                debug_info['error'] = 'des为None'
-            return False
-        
-        # 使用BFMatcher进行暴力匹配
-        bf = cv2.BFMatcher(self.norm, crossCheck=False)
-        try:
-            matches = bf.knnMatch(des1, des2, k=2)
-        except cv2.error as e:
-            if debug_info is not None:
-                debug_info['error'] = f'knnMatch失败: {e}'
-            return False
-        
-        # 极度宽松的Lowe ratio test
-        good = []
-        single_matches = 0
-        for m in matches:
-            if len(m) == 2:
-                m1, m2 = m
-                # 使用0.95的极宽松阈值
-                if m1.distance < 0.95 * m2.distance:
-                    good.append(m1)
-            elif len(m) == 1:
-                # 接受单匹配且距离足够小
-                single_matches += 1
-                if m[0].distance < 100:  # 极宽松的距离阈值
-                    good.append(m[0])
-        
-        # 添加详细调试信息
-        if debug_info is not None:
-            debug_info['total_matches'] = len(matches)
-            debug_info['good_matches'] = len(good)
-            debug_info['single_matches'] = single_matches
-            debug_info['des1_count'] = len(des1) if des1 is not None else 0
-            debug_info['des2_count'] = len(des2) if des2 is not None else 0
-        
-        # 只需要2个good matches就认为可以拼接!
-        is_good = len(good) >= 2
-        
-        # 输出每次匹配的结果
-        print(f"[DEBUG] 匹配结果: good={len(good)}, total={len(matches)}, "
-              f"single={single_matches}, 判定={'✓可拼接' if is_good else '✗不可拼接'}")
-        
-        return is_good
-
-    def group_images(self, paths: List[str], progress=None):
-        """将图片分组为若干可拼合的连通分量。返回 (groups: List[List[str]], discarded: List[str])"""
-        n = len(paths)
-        if n <= 1:
-            return ([], paths)
-        # 读取灰度并计算描述符
-        grays = []
-        descs = []
-        for i, p in enumerate(paths):
-            if progress:
-                progress(i+1, max(1, n), f"分组: 读取与特征提取 {Path(p).name}")
-            try:
-                data = np.fromfile(p, dtype=np.uint8)
-                img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
-            except Exception:
-                img = None
-            if img is None:
-                grays.append(None)
-                descs.append(None)
-                continue
-            _, des = self._compute_desc(img)
-            grays.append(img)
-            descs.append(des)
-        # 构建邻接
-        adj = {i: set() for i in range(n)}
-        total_pairs = n*(n-1)//2
-        pair_idx = 0
-        match_stats = []  # 记录匹配统计
-        
-        for i in range(n):
-            for j in range(i+1, n):
-                pair_idx += 1
-                if progress:
-                    progress(pair_idx, max(1, total_pairs), f"分组: 匹配 {Path(paths[i]).name} ↔ {Path(paths[j]).name}")
-                if grays[i] is None or grays[j] is None:
-                    continue
-                
-                debug_info = {}
-                is_match = self._good_pair(descs[i], descs[j], debug_info)
-                
-                # 记录匹配信息（用于调试）- 增强版
-                match_info = {
-                    'pair': (Path(paths[i]).name, Path(paths[j]).name),
-                    'matched': is_match,
-                    'total': debug_info.get('total_matches', 0),
-                    'good': debug_info.get('good_matches', 0),
-                    'des1': debug_info.get('des1_count', 0),
-                    'des2': debug_info.get('des2_count', 0)
-                }
-                match_stats.append(match_info)
-                
-                # 实时输出每对图片的匹配结果（方便调试）
-                if progress:
-                    status = "✓匹配" if is_match else "✗无匹配"
-                    progress(pair_idx, max(1, total_pairs), 
-                            f"{status}: {match_info['pair'][0]} ↔ {match_info['pair'][1]} "
-                            f"(good: {match_info['good']}, total: {match_info['total']}, "
-                            f"features: {match_info['des1']}/{match_info['des2']})")
-                
-                if is_match:
-                    adj[i].add(j)
-                    adj[j].add(i)
-        
-        # 通过 progress 报告匹配统计
-        if progress and match_stats:
-            matched_count = sum(1 for s in match_stats if s['matched'])
-            avg_good = sum(s['good'] for s in match_stats) / len(match_stats) if match_stats else 0
-            progress(total_pairs, total_pairs, 
-                    f"匹配完成: {matched_count}/{len(match_stats)} 对图片有重叠 (平均 {avg_good:.1f} 个good matches)")
-        
-        # 连通分量
-        visited = [False]*n
-        groups_idx = []
-        for i in range(n):
-            if visited[i]:
-                continue
-            stack = [i]
-            comp = []
-            while stack:
-                u = stack.pop()
-                if visited[u]:
-                    continue
-                visited[u] = True
-                comp.append(u)
-                for v in adj[u]:
-                    if not visited[v]:
-                        stack.append(v)
-            groups_idx.append(comp)
-        # 过滤掉孤立点（不可拼合）
-        groups = []
-        discarded = []
-        for comp in groups_idx:
-            if len(comp) >= 2:
-                groups.append([paths[k] for k in comp])
-            else:
-                discarded.append(paths[comp[0]])
-        
-        # 🔴 FALLBACK: 如果完全没有检测到任何组,强制将所有图片作为一组尝试拼接
-        if not groups and len(paths) >= 2:
-            print(f"[WARNING] 特征匹配未检测到任何重叠,启用FALLBACK模式:强制将所有{len(paths)}张图片作为一组尝试拼接")
-            if progress:
-                progress(n, n, f"⚠️ 未检测到重叠,强制尝试拼接所有{len(paths)}张图片...")
-            groups = [paths]  # 所有图片作为一组
-            discarded = []
-        
-        return groups, discarded
-
-
 class StitchThread(QThread):
     """拼接工作线程"""
     progress = Signal(int, int, str)
     finished = Signal(object)
     error = Signal(str)
     
-    def __init__(self, directory: str, mode: str = 'scans', image_paths: Optional[List[str]] = None):
+    def __init__(self, directory: str, mode: str = 'scans', image_paths: Optional[List[str]] = None, fallback_mode: str = 'vertical'):
         super().__init__()
         self.directory = directory
         self.mode = mode
         self.stitcher = ImageStitcher(mode=mode)
-        # 🔴 尝试使用SIFT代替ORB - SIFT对截图/文档更有效
-        try:
-            self.grouper = ImageGrouper(feature='SIFT')
-            print("[INFO] StitchThread 使用SIFT特征检测器")
-        except:
-            self.grouper = ImageGrouper(feature='ORB')
-            print("[INFO] StitchThread 使用ORB特征检测器(SIFT不可用)")
         self.image_paths = image_paths or []
+        self.fallback_mode = fallback_mode
     
     def run(self):
-        """执行拼接任务"""
+        """执行拼接任务 - 简化版本，直接拼接所有图片"""
         try:
-            self.progress.emit(0, 100, "扫描目录...")
+            self.progress.emit(0, 100, "准备拼接...")
             image_paths = list(self.image_paths) if self.image_paths else self.stitcher.load_images(self.directory)
             
             if not image_paths:
                 self.error.emit("未在目录中找到图片文件")
                 return
-
-            # 使用字典来跟踪图片，路径 -> cv::Mat
-            image_pool = {path: cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in image_paths}
             
-            # 记录原始图片路径，用于区分新生成的拼接图
-            original_paths_set = set(image_paths)
+            if len(image_paths) < 1:
+                self.error.emit("需要至少1张图片")
+                return
 
-            while True:
-                current_paths = list(image_pool.keys())
-                if len(current_paths) < 2:
-                    self.progress.emit(len(current_paths), len(current_paths), f"图片数量不足（{len(current_paths)}），结束")
-                    break
-
-                self.progress.emit(0, 100, f"处理 {len(current_paths)} 张图片，开始分组...")
-                groups, discarded_paths = self.grouper.group_images(current_paths, progress=self.progress.emit)
-
-                if not groups:
-                    self.progress.emit(0, 0, "未找到新的可拼接组，结束")
-                    break
-
-                newly_stitched_count = 0
-                temp_dir = Path(self.directory) / "stitch_temp"
-                temp_dir.mkdir(exist_ok=True)
-
-                for i, grp_paths in enumerate(groups, 1):
-                    self.progress.emit(i, len(groups), f"拼接组 {i}/{len(groups)} ({len(grp_paths)} 张)...")
-                    
-                    # 从池中获取图像数据
-                    grp_images = [image_pool[p] for p in grp_paths if p in image_pool and image_pool[p] is not None]
-                    
-                    if len(grp_images) < 2:
-                        continue
-
-                    pano = self.stitcher.stitch_images(grp_paths, progress_callback=None)
-                    
-                    if pano is not None:
-                        newly_stitched_count += 1
-                        # 从池中移除已使用的旧图片
-                        for p in grp_paths:
-                            image_pool.pop(p, None)
-                        
-                        # 将新生成的图片加入池中
-                        temp_path = str(temp_dir / f"stitched_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png")
-                        cv2.imwrite(temp_path, pano)
-                        image_pool[temp_path] = pano
-                    else:
-                        # 如果拼接失败，暂时不处理，它们仍在池中
-                        self.progress.emit(i, len(groups), f"组 {i} 拼接失败 ({len(grp_paths)} 张)")
-
-                if newly_stitched_count == 0:
-                    self.progress.emit(0, 0, "本轮未产生新的拼接图，结束循环")
-                    break
+            self.progress.emit(0, 100, f"将拼接 {len(image_paths)} 张图片...")
+            self.progress.emit(0, 100, f"图片列表: {[os.path.basename(p) for p in image_paths[:5]]}" + ("..." if len(image_paths) > 5 else ""))
             
-            # 循环结束后，池中剩下的就是最终结果
-            # 只保存新生成的拼接图（不在原始路径中的）
-            final_results = []
-            for path, img_data in image_pool.items():
-                if path not in original_paths_set:  # 只保存新生成的拼接图
-                    final_results.append(([path], img_data))
-
-            if final_results:
-                self.finished.emit(final_results)
+            # 直接尝试拼接所有图片
+            pano = self.stitcher.stitch_images(
+                image_paths, 
+                progress_callback=self.progress.emit,
+                fallback_mode=self.fallback_mode
+            )
+            
+            self.progress.emit(100, 100, f"拼接方法返回: type={type(pano)}, is None={pano is None}")
+            if pano is not None and hasattr(pano, 'shape'):
+                self.progress.emit(100, 100, f"返回图像信息: shape={pano.shape}, dtype={pano.dtype}")
+            
+            if pano is not None:
+                self.progress.emit(100, 100, "拼接完成，准备发送结果...")
+                # 返回格式: [(paths, image)]
+                result_data = [([str(p) for p in image_paths], pano)]
+                self.progress.emit(100, 100, f"发送finished信号: len={len(result_data)}, 第一项类型={type(result_data[0])}")
+                self.finished.emit(result_data)
             else:
-                self.error.emit("没有生成任何拼接结果。所有图片可能无法拼接或没有足够的重叠区域。")
+                self.progress.emit(100, 100, "拼接返回None，发送错误...")
+                self.error.emit("拼接失败。请尝试选择其他拼接模式或确保图片有重叠区域。")
 
         except Exception as e:
             import traceback
-            self.error.emit(f"拼接过程出错: {str(e)}\n{traceback.format_exc()}")
+            err_msg = f"拼接过程出错: {str(e)}\n{traceback.format_exc()}"
+            self.progress.emit(100, 100, f"发生异常: {str(e)}")
+            self.error.emit(err_msg)
 
 
 class MainWindow(QMainWindow):
@@ -700,6 +798,9 @@ class MainWindow(QMainWindow):
         self.ROLE_MARK = Qt.UserRole + 2
         # 进度弹窗实例（运行时创建/销毁）
         self._progress_dialog = None
+        # 文件系统监控器
+        self.file_watcher = QFileSystemWatcher()
+        self.file_watcher.directoryChanged.connect(self._on_directory_changed)
         # 初始化界面
         self.init_ui()
         
@@ -735,6 +836,15 @@ class MainWindow(QMainWindow):
         self.format_combo = QComboBox()
         self.format_combo.addItems(["PNG", "JPEG", "WebP (无损)"])
         format_row.addWidget(self.format_combo)
+        format_row.addStretch()
+        
+        # 拼接模式选择
+        format_row.addWidget(QLabel("失败时备选:"))
+        self.fallback_combo = QComboBox()
+        self.fallback_combo.addItems(["垂直拼接", "水平拼接", "网格拼接", "不使用备选"])
+        self.fallback_combo.setCurrentIndex(0)
+        self.fallback_combo.setToolTip("当OpenCV智能拼接失败时使用的备选方案")
+        format_row.addWidget(self.fallback_combo)
         format_row.addStretch(1)
         top_settings.addLayout(format_row)
 
@@ -763,13 +873,6 @@ class MainWindow(QMainWindow):
         self.btn_invert.setMinimumHeight(28)
         self.btn_invert.setProperty("btn", "secondary")
         top_bar.addWidget(self.btn_invert)
-        # 添加刷新按钮
-        self.btn_refresh = QPushButton("刷新")
-        self.btn_refresh.setMinimumHeight(28)
-        self.btn_refresh.setProperty("btn", "secondary")
-        self.btn_refresh.setToolTip("重新从当前目录加载图片列表")
-        self.btn_refresh.clicked.connect(self.refresh_image_list)
-        top_bar.addWidget(self.btn_refresh)
         # 右侧：开始拼接（动态占据余下宽度并贴右侧）
         self.start_btn = QPushButton("🚀 开始拼接")
         self.start_btn.clicked.connect(self.start_stitching)
@@ -1131,15 +1234,10 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self):
         self._update_summary()
 
-    def refresh_image_list(self):
-        """刷新按钮的槽函数，重新加载图片"""
-        current_dir = self.dir_edit.text().strip()
-        if current_dir and os.path.isdir(current_dir):
-            self.log("🔄 正在刷新图片列表...")
-            self._load_images_for_preview(current_dir)
-            self.log("✅ 刷新完成。")
-        else:
-            self.log("⚠️ 请先选择一个有效的目录。")
+    def _on_directory_changed(self, path):
+        """目录内容发生变化时自动刷新"""
+        self.log(f"🔄 检测到目录变化，自动刷新图片列表...")
+        QTimer.singleShot(500, lambda: self._load_images_for_preview(path))  # 延迟500ms避免频繁刷新
 
     def _on_item_double_clicked(self, item: QListWidgetItem):
         """双击缩略图：用系统默认程序打开图片文件"""
@@ -1274,8 +1372,17 @@ class MainWindow(QMainWindow):
             self.dir_edit.text() or str(Path.home())
         )
         if directory:
+            # 移除旧的监控
+            old_dirs = self.file_watcher.directories()
+            if old_dirs:
+                self.file_watcher.removePaths(old_dirs)
+            
+            # 添加新的监控
+            self.file_watcher.addPath(directory)
+            
             self.dir_edit.setText(directory)
             self.log(f"📁 已选择目录: {directory}")
+            self.log("👁️ 已启用实时监控，目录变化将自动刷新")
             self.selection_order = [] # 清空旧目录的选择顺序
             self._load_images_for_preview(directory)
     
@@ -1315,11 +1422,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "没有要处理的图片。请选择图片或确保目录不为空。")
             self.start_btn.setEnabled(True); self.browse_btn.setEnabled(True); return
         
+        # 获取备选模式
+        fallback_map = {
+            "垂直拼接": "vertical",
+            "水平拼接": "horizontal", 
+            "网格拼接": "grid",
+            "不使用备选": None
+        }
+        fallback_mode = fallback_map.get(self.fallback_combo.currentText(), "vertical")
+        fallback_name = self.fallback_combo.currentText()
+        
         # 直接开始，不再弹出确认对话框
-        self.log(f"🚀 开始拼接 {len(image_paths_for_job)} 张图片（{mode_name}）...")
+        self.log(f"🚀 开始拼接 {len(image_paths_for_job)} 张图片")
+        self.log(f"  模式: {mode_name}")
+        self.log(f"  备选方案: {fallback_name}")
         
         # 启动线程
-        self.stitch_thread = StitchThread(directory, mode, image_paths=image_paths_for_job)
+        self.stitch_thread = StitchThread(directory, mode, image_paths=image_paths_for_job, fallback_mode=fallback_mode)
         self.stitch_thread.progress.connect(self.update_progress)
         self.stitch_thread.finished.connect(self.on_stitch_finished)
         self.stitch_thread.error.connect(self.on_stitch_error)
@@ -1347,16 +1466,41 @@ class MainWindow(QMainWindow):
         """拼接完成后的处理"""
         self.progress_bar.setValue(100)
         
+        self.log(f"📊 收到拼接结果，类型: {type(results)}, 长度: {len(results) if isinstance(results, list) else 'N/A'}")
+        
         # 从results(列表的[(paths, image)])中提取纯图像列表
         image_list = []
-        if isinstance(results, list):
-            for paths, img in results:
-                if img is not None:
-                    image_list.append(img)
+        if isinstance(results, list) and len(results) > 0:
+            for idx, item in enumerate(results):
+                self.log(f"  结果 {idx+1}: 类型={type(item)}, 是元组={isinstance(item, tuple)}, len={len(item) if isinstance(item, (list, tuple)) else 'N/A'}")
+                # item 是 (paths, img) 元组
+                if isinstance(item, tuple) and len(item) == 2:
+                    paths, img = item
+                    self.log(f"  - 路径数: {len(paths) if isinstance(paths, list) else 'N/A'}")
+                    self.log(f"  - 图像: {type(img)}, shape: {img.shape if img is not None and hasattr(img, 'shape') else 'None'}")
+                    if img is not None and hasattr(img, 'shape'):
+                        image_list.append(img)
+                    else:
+                        self.log(f"  - 警告: 图像为空或无效")
+                elif isinstance(item, np.ndarray):  # 如果直接是图像数组
+                    self.log(f"  - 直接图像数组: shape={item.shape}")
+                    image_list.append(item)
+                else:
+                    self.log(f"  - 警告: 无法识别的结果类型")
+        else:
+            self.log(f"  警告: results 不是列表或为空")
+        
+        if not image_list:
+            self.log("❌ 拼接完成但没有生成任何结果图像")
+            self.log("   请检查图片是否有足够的重叠区域，或尝试使用备选拼接模式")
+            QMessageBox.warning(self, "拼接失败", "没有生成任何拼接结果\n\n请检查：\n1. 图片是否有重叠区域\n2. 尝试选择备选拼接模式（垂直/水平/网格）")
+            self.start_btn.setEnabled(True)
+            self.start_btn.setText("🚀 开始拼接")
+            return
         
         self.log(f"✅ 拼接完成！共生成 {len(image_list)} 张图片。")
         
-        self.result_images = image_list  # 保存纯图像列表（与备份文件逻辑一致）
+        self.result_images = image_list  # 保存纯图像列表
         self._refresh_results_preview() # 刷新多结果网格
 
         # 保存所有结果到文件
@@ -1371,9 +1515,9 @@ class MainWindow(QMainWindow):
             try:
                 import shutil
                 shutil.rmtree(temp_dir)
-                self.log("清理了临时文件。")
+                self.log("🧹 清理了临时文件。")
             except Exception as e:
-                self.log(f"清理临时文件失败: {e}")
+                self.log(f"⚠️ 清理临时文件失败: {e}")
 
     def on_stitch_error(self, message):
         """拼接出错的处理"""
@@ -1431,14 +1575,24 @@ class MainWindow(QMainWindow):
             label.setAlignment(Qt.AlignCenter)
             
             # 将OpenCV图像转为QPixmap
-            if pano is None: continue
+            if pano is None: 
+                continue
+            
+            # 确保图像是连续的内存布局
+            pano = np.ascontiguousarray(pano)
             h, w = pano.shape[:2]
+            
             if pano.ndim == 3:
-                q_img = QImage(pano.data, w, h, pano.strides[0], QImage.Format_BGR888).rgbSwapped()
-            elif pano.ndim == 4: # BGRA
-                q_img = QImage(pano.data, w, h, pano.strides[0], QImage.Format_BGRA888)
-            else: # Grayscale
+                if pano.shape[2] == 4: # BGRA
+                    q_img = QImage(pano.data, w, h, pano.strides[0], QImage.Format_BGRA8888)
+                elif pano.shape[2] == 3: # BGR
+                    q_img = QImage(pano.data, w, h, pano.strides[0], QImage.Format_BGR888).rgbSwapped()
+                else:
+                    continue
+            elif pano.ndim == 2: # Grayscale
                 q_img = QImage(pano.data, w, h, pano.strides[0], QImage.Format_Grayscale8)
+            else:
+                continue
 
             pixmap = QPixmap.fromImage(q_img)
             label.setPixmap(pixmap.scaled(180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1463,8 +1617,14 @@ class MainWindow(QMainWindow):
             return
         
         output_dir = Path(base_dir) / "stitch"
-        output_dir.mkdir(exist_ok=True)
-        self.log(f"📁 输出目录: {output_dir}")
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.log(f"📁 输出目录: {output_dir}")
+            self.log(f"📁 输出目录(绝对路径): {output_dir.absolute()}")
+        except Exception as e:
+            self.log(f"❌ 无法创建输出目录: {e}")
+            QMessageBox.critical(self, "错误", f"无法创建输出目录:\n{e}")
+            return
 
         # 获取选择的格式
         output_format = self.format_combo.currentText().split(" ")[0].lower()
@@ -1481,33 +1641,82 @@ class MainWindow(QMainWindow):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         saved_count = 0
         
-        # 直接遍历图像列表（不再是元组）
+        # 直接遍历图像列表
         for i, pano in enumerate(self.result_images, start=1):
             if pano is None: 
                 self.log(f"⚠️ 跳过空结果 {i}")
                 continue
+            
             filename = output_dir / f"stitched_{timestamp}_{i}{ext}"
+            self.log(f"💾 正在保存 {i}/{len(self.result_images)}: {filename.name}")
+            self.log(f"   图像信息: shape={pano.shape}, dtype={pano.dtype}")
+            
             try:
-                # 对于有透明通道的PNG/WebP，直接保存
-                if len(pano.shape) > 2 and pano.shape[2] == 4 and (output_format in ['png', 'webp']):
-                    success = cv2.imwrite(str(filename), pano, params)
-                # 对于JPEG，需要先转为BGR
-                else:
-                    if len(pano.shape) > 2 and pano.shape[2] == 4:
-                        bgr_pano = cv2.cvtColor(pano, cv2.COLOR_BGRA2BGR)
+                # 检查图像维度
+                if len(pano.shape) < 2:
+                    self.log(f"❌ 图像 {i} 维度错误: {pano.shape}")
+                    continue
+                
+                # 确保图像是连续的内存布局
+                pano = np.ascontiguousarray(pano)
+                
+                # 根据格式和通道数选择保存方式
+                save_img = None
+                if output_format in ['png', 'webp']:
+                    # PNG和WebP支持透明通道
+                    if len(pano.shape) == 3 and pano.shape[2] == 4:
+                        # BGRA格式，直接保存
+                        save_img = pano
+                        self.log(f"   使用BGRA格式保存")
+                    elif len(pano.shape) == 3 and pano.shape[2] == 3:
+                        # BGR格式，直接保存
+                        save_img = pano
+                        self.log(f"   使用BGR格式保存")
                     else:
-                        bgr_pano = pano
-                    success = cv2.imwrite(str(filename), bgr_pano, params)
-
-                if success:
-                    saved_count += 1
-                    self.log(f"💾 已保存结果到: {filename}")
+                        # 灰度图
+                        save_img = pano
+                        self.log(f"   使用灰度格式保存")
                 else:
-                    self.log(f"❌ cv2.imwrite 返回 False: {filename}")
+                    # JPEG不支持透明通道
+                    if len(pano.shape) == 3 and pano.shape[2] == 4:
+                        # BGRA转BGR
+                        save_img = cv2.cvtColor(pano, cv2.COLOR_BGRA2BGR)
+                        self.log(f"   BGRA转BGR后保存")
+                    elif len(pano.shape) == 3 and pano.shape[2] == 3:
+                        save_img = pano
+                        self.log(f"   使用BGR格式保存")
+                    else:
+                        save_img = pano
+                        self.log(f"   使用灰度格式保存")
+                
+                # 保存文件
+                self.log(f"   调用cv2.imwrite: {filename.absolute()}")
+                success = cv2.imwrite(str(filename.absolute()), save_img, params)
+                
+                if success:
+                    # 验证文件是否真的被创建
+                    if filename.exists():
+                        file_size = filename.stat().st_size
+                        saved_count += 1
+                        self.log(f"✅ 成功保存: {filename.name} ({file_size / 1024:.1f} KB)")
+                    else:
+                        self.log(f"❌ cv2.imwrite返回True但文件不存在: {filename}")
+                        self.log(f"   请检查磁盘空间和文件权限")
+                else:
+                    self.log(f"❌ cv2.imwrite返回False: {filename}")
+                    
             except Exception as e:
-                self.log(f"❌ 保存失败 {filename}: {e}")
+                import traceback
+                self.log(f"❌ 保存异常 {filename.name}: {e}")
+                self.log(f"   详细错误:\n{traceback.format_exc()}")
         
-        self.log(f"✅ 保存完成，共保存 {saved_count} 个文件到 {output_dir}")
+        if saved_count > 0:
+            self.log(f"🎉 保存完成！共保存 {saved_count}/{len(self.result_images)} 个文件")
+            self.log(f"📂 文件位置: {output_dir.absolute()}")
+            QMessageBox.information(self, "保存成功", f"成功保存 {saved_count} 张拼接图片到:\n{output_dir.absolute()}")
+        else:
+            self.log(f"❌ 没有成功保存任何文件，请检查上述错误信息")
+            QMessageBox.warning(self, "保存失败", "没有成功保存任何文件，请查看日志了解详情")
 
     def display_image(self, cv_img):
         """在预览标签中显示OpenCV图像"""
@@ -1516,17 +1725,27 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             return
 
+        # 确保图像是连续的内存布局
+        cv_img = np.ascontiguousarray(cv_img)
         self.result_image = cv_img.copy()
         
         h, w = cv_img.shape[:2]
         
-        # 根据维度确定格式
-        if cv_img.ndim == 4: # BGRA
-            q_img = QImage(cv_img.data, w, h, cv_img.strides[0], QImage.Format_BGRA888)
-        elif cv_img.ndim == 3: # BGR
-            q_img = QImage(cv_img.data, w, h, cv_img.strides[0], QImage.Format_BGR888).rgbSwapped()
-        else: # Grayscale
+        # 根据维度和通道数确定格式
+        if cv_img.ndim == 3:
+            if cv_img.shape[2] == 4: # BGRA
+                q_img = QImage(cv_img.data, w, h, cv_img.strides[0], QImage.Format_BGRA8888)
+            elif cv_img.shape[2] == 3: # BGR
+                q_img = QImage(cv_img.data, w, h, cv_img.strides[0], QImage.Format_BGR888).rgbSwapped()
+            else:
+                # 不支持的通道数，转换为BGR
+                cv_img_bgr = cv2.cvtColor(cv_img, cv2.COLOR_GRAY2BGR)
+                q_img = QImage(cv_img_bgr.data, w, h, cv_img_bgr.strides[0], QImage.Format_BGR888).rgbSwapped()
+        elif cv_img.ndim == 2: # Grayscale
             q_img = QImage(cv_img.data, w, h, cv_img.strides[0], QImage.Format_Grayscale8)
+        else:
+            self.preview_label.setText(f"不支持的图像格式: {cv_img.shape}")
+            return
 
         pixmap = QPixmap.fromImage(q_img)
         
@@ -1568,13 +1787,18 @@ class MainWindow(QMainWindow):
         """恢复上次关闭时的设置"""
         settings = QSettings("AYE", "OpenCVStitcher")
         self.restoreGeometry(settings.value("geometry"))
-        self.dir_edit.setText(settings.value("last_dir", ""))
-        if self.dir_edit.text():
-            self._load_images_for_preview(self.dir_edit.text())
+        last_dir = settings.value("last_dir", "")
+        self.dir_edit.setText(last_dir)
+        if last_dir and os.path.isdir(last_dir):
+            # 添加文件监控
+            self.file_watcher.addPath(last_dir)
+            self.log(f"👁️ 已启用实时监控: {last_dir}")
+            self._load_images_for_preview(last_dir)
         self.h_splitter.restoreState(settings.value("hsplitter_state"))
         self.vsplitter.restoreState(settings.value("vsplitter_state"))
         self.thumb_slider.setValue(int(settings.value("thumb_size", self._thumb_size)))
         self.format_combo.setCurrentText(settings.value("output_format", "PNG"))
+        self.fallback_combo.setCurrentText(settings.value("fallback_mode", "垂直拼接"))
 
     def closeEvent(self, event):
         """关闭窗口时保存设置"""
@@ -1585,6 +1809,7 @@ class MainWindow(QMainWindow):
         settings.setValue("vsplitter_state", self.vsplitter.saveState())
         settings.setValue("thumb_size", self.thumb_slider.value())
         settings.setValue("output_format", self.format_combo.currentText())
+        settings.setValue("fallback_mode", self.fallback_combo.currentText())
         super().closeEvent(event)
 
 if __name__ == '__main__':

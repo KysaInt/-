@@ -10,10 +10,10 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTextEdit,
-    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame
+    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame, QMenu, QMessageBox
 )
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette
+from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette, QAction
 
 
 def format_seconds(seconds):
@@ -383,6 +383,9 @@ class C4DMonitorWidget(QWidget):
         self.stats['highlight_color'] = highlight_color
         # Ctrl+滚轮缩放字号
         self.history_view.wheelEvent = self.history_view_wheel_event
+        # 设置右键菜单策略
+        self.history_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.history_view.customContextMenuRequested.connect(self._show_context_menu)
 
         self._init_settings_panel(layout)
 
@@ -679,6 +682,59 @@ class C4DMonitorWidget(QWidget):
         self._suppress_scroll_signal = True
         self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         self._suppress_scroll_signal = False
+
+    # -------------------- 右键菜单功能 --------------------
+    def _show_context_menu(self, position):
+        """显示右键上下文菜单"""
+        menu = QMenu(self.history_view)
+        
+        # 创建清空日志动作
+        clear_action = QAction("清空日志文件", self.history_view)
+        clear_action.triggered.connect(self._clear_log_file)
+        menu.addAction(clear_action)
+        
+        # 显示菜单
+        menu.exec_(self.history_view.mapToGlobal(position))
+    
+    def _clear_log_file(self):
+        """清空日志文件"""
+        # 弹出确认对话框
+        reply = QMessageBox.question(
+            self,
+            '确认清空',
+            '确定要清空当前的日志文件吗?\n此操作将永久删除所有历史记录,无法恢复!',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # 清空内存中的历史记录
+                self.stats['history'].clear()
+                self._loaded_history_count = 0
+                
+                # 清空日志文件
+                if self.log_file_path.exists():
+                    self.log_file_path.unlink()
+                
+                # 清空显示
+                self._suppress_scroll_signal = True
+                self.history_view.clear()
+                self._suppress_scroll_signal = False
+                
+                # 重置统计数据
+                self.stats['moved_count'] = 0
+                self.stats['max_interval'] = 0
+                self.stats['total_interval'] = 0
+                self.stats['first_run_moved'] = 0
+                self.stats['second_run_moved'] = 0
+                
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                self.log_message(f"日志已清空")
+                
+            except Exception as e:
+                QMessageBox.warning(self, '错误', f'清空日志失败: {e}')
+                print(f"清空日志失败: {e}")
 
 class CollapsibleBox(QWidget):
     def __init__(self, title="", parent=None):
