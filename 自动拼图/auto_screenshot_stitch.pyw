@@ -1,693 +1,1127 @@
 """
-自动截图拼接工具
-支持自定义快捷键、区域选择、连续截图和自动拼接
+自动截图拼接工具 (Auto Screenshot Stitch)
+用于连续截取屏幕指定区域的截图,然后自动拼接成一张全景图
 """
 
 import sys
 import os
+import subprocess
+import importlib.util
+from pathlib import Path
+
+# ============================================================================
+# 阶段 1: 依赖检查与自动安装
+# ============================================================================
+
+# 定义必需依赖及其版本要求
+REQUIRED_DEPENDENCIES = {
+    'PySide6': '6.5.0',
+    'cv2': '4.8.0',  # opencv-contrib-python
+    'numpy': '1.24.0',
+    'PIL': '10.0.0',  # Pillow
+    'win32clipboard': '306',  # pywin32
+    'keyboard': '0.13.5'
+}
+
+# 包名映射 (import名 -> pip包名)
+PACKAGE_NAMES = {
+    'cv2': 'opencv-contrib-python',
+    'PIL': 'Pillow',
+    'win32clipboard': 'pywin32'
+}
+
+
+def check_missing_dependencies():
+    """检查缺失的依赖包"""
+    missing = []
+    outdated = []
+    
+    for module_name, required_version in REQUIRED_DEPENDENCIES.items():
+        try:
+            # 尝试导入模块
+            spec = importlib.util.find_spec(module_name)
+            if spec is None:
+                missing.append((module_name, required_version))
+                continue
+            
+            # 检查版本
+            try:
+                module = __import__(module_name)
+                current_version = getattr(module, '__version__', '0.0.0')
+                
+                # 简单版本比较
+                if compare_versions(current_version, required_version) < 0:
+                    outdated.append((module_name, current_version, required_version))
+            except Exception:
+                # 如果无法获取版本，认为模块存在但版本未知，不强制升级
+                pass
+                
+        except (ImportError, ModuleNotFoundError):
+            missing.append((module_name, required_version))
+        except Exception:
+            # 其他异常忽略，避免误报
+            pass
+    
+    return missing, outdated
+
+
+def compare_versions(v1, v2):
+    """比较版本号 返回: -1(v1<v2), 0(v1==v2), 1(v1>v2)"""
+    def normalize(v):
+        # 提取版本号中的数字部分
+        parts = []
+        for part in str(v).split('.')[:3]:
+            # 只提取数字
+            import re
+            num = re.findall(r'\d+', part)
+            if num:
+                parts.append(int(num[0]))
+        return parts
+    
+    try:
+        parts1 = normalize(v1)
+        parts2 = normalize(v2)
+        
+        # 补齐长度
+        max_len = max(len(parts1), len(parts2))
+        parts1 += [0] * (max_len - len(parts1))
+        parts2 += [0] * (max_len - len(parts2))
+        
+        for p1, p2 in zip(parts1, parts2):
+            if p1 < p2:
+                return -1
+            elif p1 > p2:
+                return 1
+        return 0
+    except Exception:
+        # 如果比较失败，认为版本满足要求
+        return 0
+
+
+def get_pip_package_name(module_name):
+    """获取 pip 包名"""
+    return PACKAGE_NAMES.get(module_name, module_name)
+
+
+# 在导入其他依赖前检查（每次都检查，但只在有问题时才提示）
+# 添加调试模式：设置环境变量 DEBUG=1 可以看到详细的依赖检查信息
+DEBUG = os.environ.get('DEBUG', '0') == '1'
+
+if DEBUG:
+    print("=" * 60)
+    print("依赖检查开始...")
+    print("=" * 60)
+
+missing, outdated = check_missing_dependencies()
+
+if DEBUG:
+    print(f"\n检查结果:")
+    print(f"  缺失: {len(missing)} 个")
+    print(f"  过期: {len(outdated)} 个")
+    for module_name, version in missing:
+        print(f"    - 缺失: {module_name} (需要 >= {version})")
+    for module_name, current, required in outdated:
+        print(f"    - 过期: {module_name} ({current} -> {required})")
+    print("=" * 60)
+
+if missing or outdated:
+        # 需要安装依赖,使用 tkinter 显示安装对话框(tkinter 是 Python 内置的)
+        try:
+            import tkinter as tk
+            from tkinter import ttk, scrolledtext
+            import threading
+            
+            class DependencyInstallDialog:
+                """依赖安装对话框"""
+                def __init__(self, missing, outdated):
+                    self.missing = missing
+                    self.outdated = outdated
+                    self.root = tk.Tk()
+                    self.root.title("依赖检查 - Auto Screenshot Stitch")
+                    self.root.geometry("600x400")
+                    self.root.resizable(False, False)
+                    
+                    self.setup_ui()
+                    
+                def setup_ui(self):
+                    """设置界面"""
+                    # 标题
+                    title_frame = tk.Frame(self.root, bg='#2196F3', height=60)
+                    title_frame.pack(fill='x')
+                    title_frame.pack_propagate(False)
+                    
+                    title_label = tk.Label(
+                        title_frame,
+                        text="⚠️ 正在自动安装依赖",
+                        font=('Microsoft YaHei', 14, 'bold'),
+                        bg='#2196F3',
+                        fg='white'
+                    )
+                    title_label.pack(pady=15)
+                    
+                    # 信息区域
+                    info_frame = tk.Frame(self.root, padx=20, pady=10)
+                    info_frame.pack(fill='both', expand=True)
+                    
+                    info_text = "程序需要以下依赖才能正常运行，正在自动安装:\n\n"
+                    
+                    if self.missing:
+                        info_text += "❌ 缺失的依赖:\n"
+                        for module_name, version in self.missing:
+                            pkg_name = get_pip_package_name(module_name)
+                            info_text += f"   • {pkg_name} >= {version}\n"
+                        info_text += "\n"
+                    
+                    if self.outdated:
+                        info_text += "⚠️ 版本过低的依赖:\n"
+                        for module_name, current, required in self.outdated:
+                            pkg_name = get_pip_package_name(module_name)
+                            info_text += f"   • {pkg_name}: {current} -> {required}\n"
+                        info_text += "\n"
+                    
+                    info_text += "⏳ 请稍候，正在后台安装..."
+                    
+                    info_label = tk.Label(
+                        info_frame,
+                        text=info_text,
+                        font=('Microsoft YaHei', 10),
+                        justify='left',
+                        anchor='w'
+                    )
+                    info_label.pack(fill='x')
+                    
+                    # 日志区域
+                    log_label = tk.Label(
+                        info_frame,
+                        text="安装日志:",
+                        font=('Microsoft YaHei', 10, 'bold')
+                    )
+                    log_label.pack(anchor='w', pady=(10, 5))
+                    
+                    self.log_text = scrolledtext.ScrolledText(
+                        info_frame,
+                        height=8,
+                        font=('Consolas', 9),
+                        state='disabled'
+                    )
+                    self.log_text.pack(fill='both', expand=True)
+                    
+                    # 按钮区域
+                    button_frame = tk.Frame(self.root, padx=20, pady=15)
+                    button_frame.pack(fill='x')
+                    
+                    self.cancel_btn = tk.Button(
+                        button_frame,
+                        text="取消安装",
+                        command=self.cancel_install,
+                        font=('Microsoft YaHei', 10),
+                        padx=20,
+                        pady=5
+                    )
+                    self.cancel_btn.pack(side='left', padx=5)
+                    
+                    self.status_label = tk.Label(
+                        button_frame,
+                        text="正在准备安装...",
+                        font=('Microsoft YaHei', 9),
+                        fg='#FF9800'
+                    )
+                    self.status_label.pack(side='right', padx=5)
+                    
+                    # 自动开始安装
+                    self.root.after(500, self.start_install)
+                
+                def log(self, message):
+                    """添加日志"""
+                    self.log_text.config(state='normal')
+                    self.log_text.insert('end', message + '\n')
+                    self.log_text.see('end')
+                    self.log_text.config(state='disabled')
+                    self.root.update()
+                
+                def cancel_install(self):
+                    """取消安装"""
+                    self.root.quit()
+                    sys.exit(1)
+                
+                def start_install(self):
+                    """开始安装"""
+                    self.cancel_btn.config(state='disabled')
+                    self.status_label.config(text="正在安装...", fg='#FF9800')
+                    
+                    # 在新线程中安装
+                    thread = threading.Thread(target=self.install_dependencies)
+                    thread.daemon = True
+                    thread.start()
+                
+                def install_dependencies(self):
+                    """安装依赖"""
+                    try:
+                        # 收集所有需要安装的包
+                        packages = []
+                        
+                        for module_name, version in self.missing:
+                            pkg_name = get_pip_package_name(module_name)
+                            packages.append(f"{pkg_name}>={version}")
+                        
+                        for module_name, current, required in self.outdated:
+                            pkg_name = get_pip_package_name(module_name)
+                            packages.append(f"{pkg_name}>={required}")
+                        
+                        if not packages:
+                            self.log("没有需要安装的包")
+                            return
+                        
+                        self.log(f"准备安装 {len(packages)} 个包...\n")
+                        
+                        # 使用 pip 安装
+                        for package in packages:
+                            self.log(f"正在安装 {package}...")
+                            
+                            try:
+                                result = subprocess.run(
+                                    [sys.executable, '-m', 'pip', 'install', package],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=300
+                                )
+                                
+                                if result.returncode == 0:
+                                    self.log(f"✓ {package} 安装成功")
+                                else:
+                                    self.log(f"✗ {package} 安装失败: {result.stderr}")
+                                    raise Exception(f"安装失败: {result.stderr}")
+                            except subprocess.TimeoutExpired:
+                                self.log(f"✗ {package} 安装超时")
+                                raise Exception("安装超时")
+                        
+                        self.log("\n✅ 所有依赖安装完成! 程序将在 2 秒后自动重启...")
+                        self.status_label.config(text="✅ 安装完成", fg='#4CAF50')
+                        
+                        # 等待 2 秒后重启程序
+                        self.root.after(2000, self.restart_program)
+                        
+                    except Exception as e:
+                        self.log(f"\n❌ 安装失败: {str(e)}")
+                        self.status_label.config(text="❌ 安装失败", fg='#F44336')
+                        self.cancel_btn.config(state='normal', text="关闭")
+                
+                def restart_program(self):
+                    """重启程序"""
+                    self.root.destroy()
+                    
+                    # 直接重启，不需要特殊参数（依赖已安装，下次启动会自动跳过）
+                    args = [sys.executable, sys.argv[0]]
+                    
+                    if sys.platform == 'win32':
+                        # Windows: 使用 pythonw.exe 运行 .pyw 文件
+                        pythonw = sys.executable.replace('python.exe', 'pythonw.exe')
+                        if os.path.exists(pythonw):
+                            args[0] = pythonw
+                    
+                    subprocess.Popen(args)
+                    sys.exit(0)
+                
+                def run(self):
+                    """运行对话框"""
+                    self.root.mainloop()
+            
+            # 显示安装对话框
+            dialog = DependencyInstallDialog(missing, outdated)
+            dialog.run()
+            sys.exit(0)
+            
+        except Exception as e:
+            print(f"依赖检查失败: {e}")
+            sys.exit(1)
+
+
+# ============================================================================
+# 阶段 2: 导入所有依赖
+# ============================================================================
+
 import tempfile
 import shutil
-from pathlib import Path
-from datetime import datetime
-from typing import List, Optional
-import json
-import subprocess
-import re
+import datetime
+import time
+from typing import List, Tuple, Optional
 
-# =============================================================================
-# 依赖自检与自动安装模块
-# =============================================================================
-
-def _parse_version_tuple(ver: str) -> tuple:
-    """将版本号字符串提取为最多三段的整数元组，例如 '4.8.1.23' -> (4,8,1)。"""
-    # 修正正则表达式，移除不必要的转义
-    nums = re.findall(r"\d+", ver or "0")
-    if not nums:
-        return (0,)
-    parts = [int(x) for x in nums[:3]]
-    return tuple(parts)
-
-def _version_satisfied(installed: str, minimal: str) -> bool:
-    """检查版本是否满足要求"""
-    return _parse_version_tuple(installed) >= _parse_version_tuple(minimal)
-
-def _tk_confirm(title: str, message: str) -> bool:
-    """使用 Tk 弹出确认窗口；若 Tk 不可用，则返回 False。"""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        res = messagebox.askyesno(title, message)
-        root.destroy()
-        return bool(res)
-    except Exception:
-        return False
-
-def _tk_info(title: str, message: str) -> None:
-    """使用 Tk 弹出信息窗口。"""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        messagebox.showinfo(title, message)
-        root.destroy()
-    except Exception:
-        pass
-
-def _pip_install(packages: List[str]) -> tuple[bool, str]:
-    """通过当前 Python 解释器执行 pip 安装。"""
-    # 关键修复：确保使用 python.exe 而不是 pythonw.exe
-    python_exe = sys.executable.replace("pythonw.exe", "python.exe")
-    
-    cmd = [python_exe, "-m", "pip", "install", "-U", *packages]
-    try:
-        # 在 Windows 上隐藏弹出的命令行窗口
-        startupinfo = None
-        if sys.platform == "win32":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', startupinfo=startupinfo)
-        
-        if proc.returncode == 0:
-            return True, proc.stdout
-            
-        # 权限问题，尝试 --user
-        if "Permission" in (proc.stderr or "") or "denied" in (proc.stderr or ""):
-            cmd_user = [python_exe, "-m", "pip", "install", "--user", "-U", *packages]
-            proc2 = subprocess.run(cmd_user, capture_output=True, text=True, encoding='utf-8', startupinfo=startupinfo)
-            if proc2.returncode == 0:
-                return True, proc2.stdout
-            return False, (proc.stderr or "") + "\n" + (proc2.stderr or "")
-            
-        return False, (proc.stderr or proc.stdout or "pip 执行失败")
-    except Exception as e:
-        return False, str(e)
-
-def ensure_dependencies() -> bool:
-    """检查并在用户确认后安装/升级依赖。"""
-    to_install: List[str] = []
-    tips: List[str] = []
-    
-    required = {
-        "PySide6": ("6.5.0", "PySide6>=6.5.0", "GUI 框架"),
-        "cv2": ("4.8.0", "opencv-contrib-python>=4.8.0", "图像拼接"),
-        "numpy": ("1.24.0", "numpy>=1.24.0", "图像处理"),
-        "PIL": ("10.0.0", "Pillow>=10.0.0", "截图"),
-        "win32clipboard": (None, "pywin32>=306", "剪贴板操作"),
-        "keyboard": ("0.13.5", "keyboard>=0.13.5", "全局快捷键"),
-    }
-
-    import importlib
-    for mod_name, (min_ver, pkg_name, desc) in required.items():
-        try:
-            if mod_name == 'win32clipboard':
-                importlib.import_module('win32clipboard')
-            else:
-                mod = importlib.import_module(mod_name)
-                if min_ver:
-                    ver = getattr(mod, '__version__', '0')
-                    if not _version_satisfied(ver, min_ver):
-                        to_install.append(pkg_name)
-                        tips.append(f"{pkg_name} ({desc})")
-        except ImportError:
-            to_install.append(pkg_name)
-            tips.append(f"{pkg_name} ({desc})")
-
-    if not to_install:
-        return True
-
-    pkg_text = "\n".join(f"- {t}" for t in tips)
-    confirm_msg = (
-        "检测到以下依赖缺失或版本过低：\n\n"
-        f"{pkg_text}\n\n"
-        "是否现在自动安装/升级？\n\n"
-        f"将执行：pip install -U {' '.join(to_install)}"
-    )
-    if not _tk_confirm("依赖安装确认", confirm_msg):
-        _tk_info("已取消", "已取消依赖安装，程序将退出。")
-        return False
-
-    ok, out = _pip_install(to_install)
-    if ok:
-        _tk_info("安装成功", "依赖已安装/升级完成，请重新启动程序。")
-    else:
-        _tk_info("安装失败", "自动安装失败，请手动安装：\n\n" + "pip install -U " + " ".join(to_install) + "\n\n错误信息:\n" + out)
-    return False # 总是返回 False，让用户重启
-
-# 在导入其他库之前执行依赖检查
-if not ensure_dependencies():
-    sys.exit(0)
-
-# =============================================================================
-# 主程序
-# =============================================================================
-
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QSpinBox, QMessageBox, QGroupBox, 
-    QKeySequenceEdit, QFormLayout, QFileDialog, QCheckBox
-)
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QRect, QPoint, QSize, QTimer, QSettings
+    Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer
 )
 from PySide6.QtGui import (
-    QKeySequence, QScreen, QPixmap, QImage, QPainter, QColor, QPen, QCursor
+    QPainter, QColor, QPen, QFont, QPixmap, QImage, QKeySequence, QIcon
 )
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox, QProgressBar,
+    QGroupBox, QFormLayout, QCheckBox
+)
+
 import cv2
 import numpy as np
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 import win32clipboard
-from io import BytesIO
 import keyboard
 
 
+# ============================================================================
+# 阶段 3: 区域选择蒙版窗口
+# ============================================================================
 
 class OverlayWindow(QWidget):
-    """全屏蒙版窗口，用于选择截图区域"""
-    region_selected = Signal(QRect)
-    cancelled = Signal()
-
+    """全屏半透明蒙版窗口,用于选择截图区域"""
+    
+    area_selected = Signal(tuple)  # (x, y, width, height)
+    
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 150);")
-        
         self.start_pos = None
-        self.current_pos = None
-        self.selection_rect = None
+        self.end_pos = None
+        self.is_selecting = False
         
-        # 获取主屏幕尺寸
-        screen = QApplication.primaryScreen().geometry()
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """设置窗口"""
+        # 设置为全屏无边框窗口
+        self.setWindowFlags(
+            Qt.WindowStaysOnTopHint |
+            Qt.FramelessWindowHint |
+            Qt.Tool
+        )
+        
+        # 获取所有屏幕的总尺寸
+        screen = QApplication.primaryScreen().virtualGeometry()
         self.setGeometry(screen)
         
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        # 设置窗口为半透明
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowOpacity(0.3)
         
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.start_pos = event.pos()
-            self.current_pos = event.pos()
-            self.update()
-        elif event.button() == Qt.MouseButton.RightButton:
-            self.cancelled.emit()
-            self.close()
-            
-    def mouseMoveEvent(self, event):
-        if self.start_pos:
-            self.current_pos = event.pos()
-            self.update()
-            
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.start_pos:
-            self.current_pos = event.pos()
-            
-            # 计算选择的矩形区域
-            x1 = min(self.start_pos.x(), self.current_pos.x())
-            y1 = min(self.start_pos.y(), self.current_pos.y())
-            x2 = max(self.start_pos.x(), self.current_pos.x())
-            y2 = max(self.start_pos.y(), self.current_pos.y())
-            
-            if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:  # 最小尺寸检查
-                self.selection_rect = QRect(x1, y1, x2 - x1, y2 - y1)
-                self.region_selected.emit(self.selection_rect)
-                self.close()
-            else:
-                self.cancelled.emit()
-                self.close()
-                
+        # 设置鼠标光标
+        self.setCursor(Qt.CrossCursor)
+    
     def paintEvent(self, event):
-        if self.start_pos and self.current_pos:
-            painter = QPainter(self)
+        """绘制事件"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制半透明黑色背景
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
+        
+        # 如果正在选择,绘制选择区域
+        if self.start_pos and self.end_pos:
+            # 选择区域矩形
+            rect = QRect(self.start_pos, self.end_pos).normalized()
             
-            # 绘制选择框
-            x1 = min(self.start_pos.x(), self.current_pos.x())
-            y1 = min(self.start_pos.y(), self.current_pos.y())
-            x2 = max(self.start_pos.x(), self.current_pos.x())
-            y2 = max(self.start_pos.y(), self.current_pos.y())
-            
-            # 使用主题高亮色
-            palette = QApplication.palette()
-            highlight_color = palette.highlight().color()
+            # 清除选择区域的蒙版(显示原始屏幕)
+            painter.setCompositionMode(QPainter.CompositionMode_Clear)
+            painter.fillRect(rect, Qt.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
             
             # 绘制边框
-            pen = QPen(highlight_color, 2, Qt.PenStyle.SolidLine)
+            pen = QPen(QColor(0, 255, 0), 2, Qt.SolidLine)
             painter.setPen(pen)
-            painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+            painter.drawRect(rect)
             
-            # 绘制半透明填充
-            fill_color = QColor(highlight_color)
-            fill_color.setAlpha(30)
-            painter.fillRect(x1, y1, x2 - x1, y2 - y1, fill_color)
+            # 绘制尺寸信息
+            text = f"{rect.width()} × {rect.height()}"
+            painter.setPen(QColor(255, 255, 255))
+            painter.setFont(QFont("Arial", 12, QFont.Bold))
             
-            # 显示尺寸信息
-            painter.setPen(QPen(Qt.GlobalColor.white))
-            size_text = f"{x2 - x1} × {y2 - y1}"
-            painter.drawText(x1 + 5, y1 + 20, size_text)
+            # 计算文本位置(在矩形上方居中)
+            text_rect = painter.fontMetrics().boundingRect(text)
+            text_x = rect.x() + (rect.width() - text_rect.width()) // 2
+            text_y = rect.y() - 10
+            
+            # 绘制文本背景
+            bg_rect = QRect(
+                text_x - 5,
+                text_y - text_rect.height() - 5,
+                text_rect.width() + 10,
+                text_rect.height() + 10
+            )
+            painter.fillRect(bg_rect, QColor(0, 0, 0, 180))
+            
+            # 绘制文本
+            painter.drawText(text_x, text_y, text)
+        
+        # 绘制提示信息
+        if not self.is_selecting:
+            hint_text = "拖拽鼠标选择截图区域 | 按 ESC 取消"
+            painter.setPen(QColor(255, 255, 255))
+            painter.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+            
+            text_rect = painter.fontMetrics().boundingRect(hint_text)
+            text_x = (self.width() - text_rect.width()) // 2
+            text_y = 50
+            
+            # 绘制文本背景
+            bg_rect = QRect(
+                text_x - 10,
+                text_y - text_rect.height() - 10,
+                text_rect.width() + 20,
+                text_rect.height() + 20
+            )
+            painter.fillRect(bg_rect, QColor(0, 0, 0, 200))
+            
+            # 绘制文本
+            painter.drawText(text_x, text_y, hint_text)
+    
+    def mousePressEvent(self, event):
+        """鼠标按下事件"""
+        if event.button() == Qt.LeftButton:
+            self.start_pos = event.pos()
+            self.end_pos = event.pos()
+            self.is_selecting = True
+            self.update()
+    
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件"""
+        if self.is_selecting:
+            self.end_pos = event.pos()
+            self.update()
+    
+    def mouseReleaseEvent(self, event):
+        """鼠标释放事件"""
+        if event.button() == Qt.LeftButton and self.is_selecting:
+            self.end_pos = event.pos()
+            self.is_selecting = False
+            
+            # 计算选择区域
+            rect = QRect(self.start_pos, self.end_pos).normalized()
+            
+            # 检查区域大小
+            if rect.width() > 10 and rect.height() > 10:
+                self.area_selected.emit((
+                    rect.x(),
+                    rect.y(),
+                    rect.width(),
+                    rect.height()
+                ))
+                self.close()
+            else:
+                QMessageBox.warning(self, "提示", "选择区域太小,请重新选择")
+                self.start_pos = None
+                self.end_pos = None
+                self.update()
+    
+    def keyPressEvent(self, event):
+        """键盘事件"""
+        if event.key() == Qt.Key_Escape:
+            self.close()
 
+
+# ============================================================================
+# 阶段 4: 截图工作线程
+# ============================================================================
 
 class ScreenshotThread(QThread):
-    """连续截图线程"""
-    progress = Signal(int)
-    finished = Signal()
+    """截图线程"""
     
-    def __init__(self, region: QRect, interval: int, output_dir: str):
+    screenshot_taken = Signal(int)  # 已截取的图片数量
+    error_occurred = Signal(str)
+    
+    def __init__(self, area: Tuple[int, int, int, int], interval: float, output_dir: str):
         super().__init__()
-        self.region = region
-        self.interval = interval  # 毫秒
+        self.area = area  # (x, y, width, height)
+        self.interval = interval
         self.output_dir = output_dir
-        self.running = True
-        self.count = 0
-        
+        self.is_running = True
+        self.screenshot_count = 0
+    
     def run(self):
-        while self.running:
-            try:
-                # 截图
-                screenshot = ImageGrab.grab(bbox=(
-                    self.region.x(),
-                    self.region.y(),
-                    self.region.x() + self.region.width(),
-                    self.region.y() + self.region.height()
-                ))
+        """运行截图"""
+        try:
+            x, y, width, height = self.area
+            
+            while self.is_running:
+                # 截取屏幕区域
+                screenshot = ImageGrab.grab(bbox=(x, y, x + width, y + height))
                 
-                # 保存
+                # 保存截图
+                self.screenshot_count += 1
                 filename = os.path.join(
                     self.output_dir,
-                    f"screenshot_{self.count:04d}.png"
+                    f"screenshot_{self.screenshot_count:04d}.png"
                 )
                 screenshot.save(filename)
                 
-                self.count += 1
-                self.progress.emit(self.count)
+                # 发送信号
+                self.screenshot_taken.emit(self.screenshot_count)
                 
-                # 等待
-                self.msleep(self.interval)
-                
-            except Exception as e:
-                print(f"截图错误: {e}")
-                break
-                
-        self.finished.emit()
+                # 等待间隔时间
+                time.sleep(self.interval)
         
+        except Exception as e:
+            self.error_occurred.emit(f"截图失败: {str(e)}")
+    
     def stop(self):
-        self.running = False
+        """停止截图"""
+        self.is_running = False
 
+
+# ============================================================================
+# 阶段 5: 图像拼接线程
+# ============================================================================
 
 class StitchThread(QThread):
-    """图片拼接线程"""
-    progress = Signal(str)
-    finished = Signal(np.ndarray)
-    error = Signal(str)
+    """图像拼接线程"""
+    
+    progress_updated = Signal(int)  # 进度百分比
+    stitch_completed = Signal(str)  # 拼接完成,返回结果图片路径
+    error_occurred = Signal(str)
     
     def __init__(self, image_dir: str):
         super().__init__()
         self.image_dir = image_dir
-        
+    
     def run(self):
+        """运行拼接"""
         try:
-            self.progress.emit("加载图片...")
+            # 读取所有图片
+            self.progress_updated.emit(10)
             
-            # 获取所有图片文件
             image_files = sorted([
-                os.path.join(self.image_dir, f)
-                for f in os.listdir(self.image_dir)
+                f for f in os.listdir(self.image_dir)
                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))
             ])
             
-            if not image_files:
-                self.error.emit("未找到截图文件")
+            if len(image_files) < 2:
+                self.error_occurred.emit("至少需要 2 张图片才能拼接")
                 return
-                
-            if len(image_files) == 1:
-                # 只有一张图片，直接返回
-                img = cv2.imread(image_files[0])
-                if img is not None:
-                    self.finished.emit(img)
-                else:
-                    self.error.emit("无法读取图片")
-                return
-                
+            
             # 加载图片
+            self.progress_updated.emit(30)
             images = []
-            for img_path in image_files:
-                img = cv2.imread(img_path)
+            
+            for idx, filename in enumerate(image_files):
+                filepath = os.path.join(self.image_dir, filename)
+                img = cv2.imread(filepath)
+                
                 if img is not None:
                     images.append(img)
-                    
-            if len(images) < 2:
-                self.error.emit("可用图片数量不足")
-                return
-                
-            self.progress.emit(f"正在拼接 {len(images)} 张图片...")
             
-            # 使用 OpenCV Stitcher
-            stitcher = cv2.Stitcher_create(cv2.Stitcher_SCANS)
-            status, pano = stitcher.stitch(images)
+            if len(images) < 2:
+                self.error_occurred.emit("没有足够的有效图片")
+                return
+            
+            # 创建拼接器
+            self.progress_updated.emit(50)
+            
+            # 使用 SCANS 模式(扫描模式,适合有序截图)
+            stitcher = cv2.Stitcher.create(cv2.Stitcher_SCANS)
+            
+            # 执行拼接
+            self.progress_updated.emit(70)
+            status, stitched = stitcher.stitch(images)
             
             if status == cv2.Stitcher_OK:
-                self.progress.emit("拼接完成")
-                self.finished.emit(pano)
+                # 保存结果
+                self.progress_updated.emit(90)
+                output_path = os.path.join(self.image_dir, "stitched_result.png")
+                cv2.imwrite(output_path, stitched)
+                
+                self.progress_updated.emit(100)
+                self.stitch_completed.emit(output_path)
             else:
                 error_messages = {
                     cv2.Stitcher_ERR_NEED_MORE_IMGS: "需要更多图片",
-                    cv2.Stitcher_ERR_HOMOGRAPHY_EST_FAIL: "图片匹配失败，请确保图片有重叠区域",
+                    cv2.Stitcher_ERR_HOMOGRAPHY_EST_FAIL: "特征匹配失败(图片重叠不足)",
                     cv2.Stitcher_ERR_CAMERA_PARAMS_ADJUST_FAIL: "相机参数调整失败"
                 }
-                error_msg = error_messages.get(status, f"拼接失败 (错误码: {status})")
-                self.error.emit(error_msg)
-                
+                error_msg = error_messages.get(status, f"拼接失败(错误码: {status})")
+                self.error_occurred.emit(error_msg)
+        
         except Exception as e:
-            self.error.emit(f"拼接异常: {str(e)}")
+            self.error_occurred.emit(f"拼接过程出错: {str(e)}")
 
+
+# ============================================================================
+# 阶段 6: 剪贴板工具
+# ============================================================================
+
+def copy_image_to_clipboard(image_path: str) -> bool:
+    """将图片复制到 Windows 剪贴板"""
+    try:
+        # 读取图片
+        image = Image.open(image_path)
+        
+        # 转换为 BMP 格式(剪贴板需要)
+        output = io.BytesIO()
+        image.convert('RGB').save(output, 'BMP')
+        data = output.getvalue()[14:]  # BMP 文件头是 14 字节,剪贴板不需要
+        output.close()
+        
+        # 复制到剪贴板
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+        win32clipboard.CloseClipboard()
+        
+        return True
+    except Exception as e:
+        print(f"复制到剪贴板失败: {e}")
+        return False
+
+
+# 需要导入 io
+import io
+
+
+# ============================================================================
+# 阶段 7: 主窗口
+# ============================================================================
 
 class MainWindow(QMainWindow):
     """主窗口"""
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("自动截图拼接工具")
-        self.setMinimumSize(500, 400)
         
-        # 设置
-        self.settings = QSettings("AutoStitch", "Config")
-        self.load_settings()
+        # 配置
+        self.settings = QSettings('AutoStitch', 'Config')
         
-        # 状态变量
+        # 状态
+        self.selected_area = None
         self.temp_dir = None
         self.screenshot_thread = None
         self.stitch_thread = None
-        self.selected_region = None
-        self.is_capturing = False
-        self.current_hotkey_str = "" # 用于存储当前注册的快捷键字符串
+        self.overlay_window = None
         
-        # 创建UI
+        # 全局快捷键
+        self.hotkey = self.settings.value('hotkey', 'ctrl+shift+a')
+        
         self.setup_ui()
-        
-        # 注册全局快捷键
-        self.register_hotkey()
-        
+        self.load_settings()
+        self.setup_hotkey()
+    
     def setup_ui(self):
-        """创建用户界面"""
+        """设置界面"""
+        self.setWindowTitle("截图拼接")
+        self.setMinimumSize(380, 360)
+        self.setMaximumSize(420, 400)
+        
+        # 中心部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        layout = QVBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(12, 12, 12, 12)
         
-        # 快捷键设置组
-        hotkey_group = QGroupBox("快捷键设置")
-        hotkey_layout = QFormLayout()
+        # 设置组 - 紧凑布局
+        settings_group = QGroupBox("设置")
+        settings_group.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        settings_layout = QFormLayout()
+        settings_layout.setSpacing(6)
+        settings_layout.setContentsMargins(8, 8, 8, 8)
         
-        self.hotkey_edit = QKeySequenceEdit()
-        self.hotkey_edit.setKeySequence(self.hotkey)
-        hotkey_layout.addRow("触发快捷键:", self.hotkey_edit)
+        # 截图间隔
+        interval_widget = QWidget()
+        interval_layout = QHBoxLayout(interval_widget)
+        interval_layout.setContentsMargins(0, 0, 0, 0)
+        interval_layout.setSpacing(4)
         
-        save_hotkey_btn = QPushButton("保存快捷键")
-        save_hotkey_btn.clicked.connect(self.save_hotkey)
-        hotkey_layout.addRow(save_hotkey_btn)
+        self.interval_spinbox = QDoubleSpinBox()
+        self.interval_spinbox.setRange(0.1, 10.0)
+        self.interval_spinbox.setDecimals(1)
+        self.interval_spinbox.setSingleStep(0.1)
+        self.interval_spinbox.setValue(0.2)  # 默认0.2秒
+        self.interval_spinbox.setSuffix(" 秒")
+        self.interval_spinbox.setFont(QFont("Microsoft YaHei", 9))
+        self.interval_spinbox.setMaximumWidth(80)
+        interval_layout.addWidget(self.interval_spinbox)
         
-        hotkey_group.setLayout(hotkey_layout)
-        layout.addWidget(hotkey_group)
+        self.auto_copy_checkbox = QCheckBox("自动复制")
+        self.auto_copy_checkbox.setChecked(True)
+        self.auto_copy_checkbox.setFont(QFont("Microsoft YaHei", 9))
+        interval_layout.addWidget(self.auto_copy_checkbox)
+        interval_layout.addStretch()
         
-        # 截图设置组
-        screenshot_group = QGroupBox("截图设置")
-        screenshot_layout = QFormLayout()
+        settings_layout.addRow("间隔:", interval_widget)
         
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(100, 10000)
-        self.interval_spin.setValue(self.interval)
-        self.interval_spin.setSuffix(" 毫秒")
-        screenshot_layout.addRow("截图间隔:", self.interval_spin)
+        # 快捷键 - 更紧凑
+        hotkey_layout = QHBoxLayout()
+        hotkey_layout.setSpacing(4)
+        self.hotkey_edit = QLineEdit(self.hotkey)
+        self.hotkey_edit.setFont(QFont("Microsoft YaHei", 9))
+        self.hotkey_edit.setPlaceholderText("ctrl+shift+a")
+        hotkey_layout.addWidget(self.hotkey_edit)
         
-        screenshot_group.setLayout(screenshot_layout)
-        layout.addWidget(screenshot_group)
+        update_hotkey_btn = QPushButton("更新")
+        update_hotkey_btn.setFont(QFont("Microsoft YaHei", 8))
+        update_hotkey_btn.setMaximumWidth(50)
+        update_hotkey_btn.clicked.connect(self.update_hotkey)
+        hotkey_layout.addWidget(update_hotkey_btn)
         
-        # 状态显示
+        settings_layout.addRow("快捷键:", hotkey_layout)
+        
+        settings_group.setLayout(settings_layout)
+        main_layout.addWidget(settings_group)
+        
+        # 选择区域按钮
+        self.select_area_btn = QPushButton("选择区域")
+        self.select_area_btn.setFont(QFont("Microsoft YaHei", 10))
+        self.select_area_btn.setMinimumHeight(40)
+        self.select_area_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:disabled {
+                background-color: #BDBDBD;
+            }
+        """)
+        self.select_area_btn.clicked.connect(self.select_area)
+        main_layout.addWidget(self.select_area_btn)
+        
+        # 区域信息 - 更紧凑
+        self.area_label = QLabel("未选择")
+        self.area_label.setFont(QFont("Microsoft YaHei", 8))
+        self.area_label.setStyleSheet("color: #666; padding: 2px;")
+        self.area_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.area_label)
+        
+        # 隐藏的开始和停止按钮（保留逻辑，但不显示）
+        self.start_screenshot_btn = QPushButton()
+        self.start_screenshot_btn.setVisible(False)
+        self.start_screenshot_btn.clicked.connect(self.start_screenshot)
+        
+        self.stop_and_stitch_btn = QPushButton()
+        self.stop_and_stitch_btn.setVisible(False)
+        self.stop_and_stitch_btn.clicked.connect(self.stop_and_stitch)
+        
+        # 状态组 - 紧凑
         status_group = QGroupBox("状态")
+        status_group.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
         status_layout = QVBoxLayout()
+        status_layout.setSpacing(6)
+        status_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 截图计数和状态合并到一行
+        status_row = QHBoxLayout()
+        self.screenshot_count_label = QLabel("0 张")
+        self.screenshot_count_label.setFont(QFont("Microsoft YaHei", 9))
+        status_row.addWidget(QLabel("已截:"))
+        status_row.addWidget(self.screenshot_count_label)
+        status_row.addStretch()
         
         self.status_label = QLabel("就绪")
-        self.status_label.setWordWrap(True)
-        status_layout.addWidget(self.status_label)
+        self.status_label.setFont(QFont("Microsoft YaHei", 9))
+        self.status_label.setStyleSheet("color: #666;")
+        status_row.addWidget(self.status_label)
         
-        self.count_label = QLabel("截图数量: 0")
-        status_layout.addWidget(self.count_label)
+        status_layout.addLayout(status_row)
+        
+        # 进度条 - 更细
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFont(QFont("Microsoft YaHei", 8))
+        self.progress_bar.setMaximumHeight(16)
+        status_layout.addWidget(self.progress_bar)
         
         status_group.setLayout(status_layout)
-        layout.addWidget(status_group)
+        main_layout.addWidget(status_group)
         
-        # 操作按钮
-        button_layout = QHBoxLayout()
+        # 底部提示 - 更紧凑
+        hint_label = QLabel(f"按 {self.hotkey} 启动/停止")
+        hint_label.setFont(QFont("Microsoft YaHei", 8))
+        hint_label.setStyleSheet("color: #999; padding: 4px;")
+        hint_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(hint_label)
+        self.hint_label = hint_label
         
-        self.start_btn = QPushButton("开始选择区域")
-        self.start_btn.clicked.connect(self.start_selection)
-        button_layout.addWidget(self.start_btn)
-        
-        self.stop_btn = QPushButton("停止并拼接")
-        self.stop_btn.clicked.connect(self.stop_and_stitch)
-        self.stop_btn.setEnabled(False)
-        button_layout.addWidget(self.stop_btn)
-        
-        layout.addLayout(button_layout)
-        
-        # 说明
-        help_label = QLabel(
-            "使用说明:\n"
-            "1. 设置快捷键并保存\n"
-            "2. 按下快捷键,全屏出现蒙版\n"
-            "3. 用鼠标拖动选择截图区域\n"
-            "4. 松开鼠标后自动开始连续截图\n"
-            "5. 再次按下快捷键停止并自动拼接\n"
-            "6. 拼接结果自动复制到剪贴板"
-        )
-        help_label.setStyleSheet("color: gray; font-size: 10pt;")
-        help_label.setWordWrap(True)
-        layout.addWidget(help_label)
-        
-        layout.addStretch()
-        
+        main_layout.addStretch()
+    
     def load_settings(self):
         """加载设置"""
-        self.hotkey = QKeySequence(
-            self.settings.value("hotkey", "Ctrl+Shift+A")
-        )
-        self.interval = int(self.settings.value("interval", 500))
+        interval = self.settings.value('interval', 0.2, type=float)
+        self.interval_spinbox.setValue(interval)
         
+        auto_copy = self.settings.value('auto_copy', True, type=bool)
+        self.auto_copy_checkbox.setChecked(auto_copy)
+    
     def save_settings(self):
         """保存设置"""
-        self.settings.setValue("hotkey", self.hotkey.toString())
-        self.settings.setValue("interval", self.interval)
-        
-    def save_hotkey(self):
-        """保存快捷键"""
-        new_hotkey = self.hotkey_edit.keySequence()
-        if new_hotkey.isEmpty():
-            QMessageBox.warning(self, "警告", "快捷键不能为空")
-            return
-            
-        self.hotkey = new_hotkey
-        self.settings.setValue("hotkey", self.hotkey.toString())
-        self.register_hotkey()
-        QMessageBox.information(self, "成功", f"快捷键已设置为: {self.hotkey.toString()}")
-        
-    def register_hotkey(self):
-        """注册全局快捷键"""
+        self.settings.setValue('interval', self.interval_spinbox.value())
+        self.settings.setValue('auto_copy', self.auto_copy_checkbox.isChecked())
+        self.settings.setValue('hotkey', self.hotkey)
+    
+    def setup_hotkey(self):
+        """设置全局快捷键"""
         try:
-            # 移除之前的快捷键
-            if self.current_hotkey_str:
-                keyboard.remove_hotkey(self.current_hotkey_str)
-
-            hotkey_str = self.hotkey.toString().lower()
+            # 移除旧的快捷键
+            keyboard.unhook_all()
             
-            # keyboard 库在 Windows 下可能需要管理员权限才能监听
-            keyboard.add_hotkey(
-                hotkey_str,
-                lambda: QTimer.singleShot(0, self.toggle_capture)
-            )
+            # 添加新的快捷键
+            keyboard.add_hotkey(self.hotkey, self.hotkey_triggered)
             
-            self.current_hotkey_str = hotkey_str
-            self.status_label.setText(f"就绪。快捷键: {self.hotkey.toString()}")
-
         except Exception as e:
-            self.status_label.setText(f"快捷键注册失败: {e}")
             QMessageBox.warning(
-                self, "快捷键错误", 
-                f"无法注册全局快捷键: {e}\n\n"
-                "请尝试以管理员身份运行此程序。\n"
-                "你也可以更换快捷键或使用界面按钮操作。"
+                self,
+                "快捷键设置失败",
+                f"无法设置全局快捷键: {str(e)}\n\n"
+                "请尝试以管理员权限运行程序,或更改快捷键。"
             )
-            
-    def toggle_capture(self):
-        """切换截图状态"""
-        # 确保窗口不在最小化状态
-        if self.isMinimized():
-            self.showNormal()
-        self.activateWindow()
-
-        if self.is_capturing:
-            # 正在截图，停止并拼接
-            self.stop_and_stitch()
-        else:
-            # 开始选择区域
-            self.start_selection()
-            
-    def start_selection(self):
-        """开始选择区域"""
-        # 隐藏主窗口以避免干扰
-        self.hide()
-        # 稍作延迟以确保窗口完全隐藏
-        QTimer.singleShot(150, self._show_overlay)
-
-    def _show_overlay(self):
-        """显示蒙版"""
-        self.overlay = OverlayWindow()
-        self.overlay.region_selected.connect(self.on_region_selected)
-        self.overlay.cancelled.connect(self.on_selection_cancelled)
-        self.overlay.showFullScreen()
+    
+    def update_hotkey(self):
+        """更新快捷键"""
+        new_hotkey = self.hotkey_edit.text().strip().lower()
         
-    def on_region_selected(self, region: QRect):
-        """区域选择完成"""
-        self.show() # 恢复主窗口
-        self.selected_region = region
-        self.start_screenshot()
-        
-    def on_selection_cancelled(self):
-        """区域选择取消"""
-        self.show() # 恢复主窗口
-        self.status_label.setText("已取消选择")
-        
-    def on_screenshot_progress(self, count: int):
-        """截图进度更新"""
-        self.count_label.setText(f"截图数量: {count}")
-        
-    def on_screenshot_finished(self):
-        """截图完成"""
-        pass
-        
-    def stop_and_stitch(self):
-        """停止截图并开始拼接"""
-        if not self.is_capturing:
+        if not new_hotkey:
+            QMessageBox.warning(self, "提示", "快捷键不能为空")
             return
-            
-        # 停止截图
-        if self.screenshot_thread:
+        
+        self.hotkey = new_hotkey
+        self.save_settings()
+        self.setup_hotkey()
+        self.hint_label.setText(f"按 {self.hotkey} 启动/停止")
+        
+        QMessageBox.information(self, "成功", f"快捷键已更新为: {self.hotkey}")
+    
+    def hotkey_triggered(self):
+        """快捷键触发"""
+        # 根据当前状态执行不同操作
+        if self.screenshot_thread and self.screenshot_thread.isRunning():
+            # 正在截图 -> 停止并拼接
+            self.stop_and_stitch()
+        elif self.selected_area:
+            # 已选择区域 -> 开始截图
+            self.start_screenshot()
+        else:
+            # 未选择区域 -> 选择区域
+            self.select_area()
+    
+    def select_area(self):
+        """选择截图区域"""
+        self.status_label.setText("选择区域...")
+        
+        # 隐藏主窗口
+        self.hide()
+        
+        # 延迟显示蒙版窗口
+        QTimer.singleShot(200, self.show_overlay)
+    
+    def show_overlay(self):
+        """显示蒙版窗口"""
+        self.overlay_window = OverlayWindow()
+        self.overlay_window.area_selected.connect(self.on_area_selected)
+        self.overlay_window.show()
+    
+    def on_area_selected(self, area):
+        """区域选择完成"""
+        self.selected_area = area
+        x, y, width, height = area
+        
+        self.area_label.setText(f"{width} × {height}")
+        self.start_screenshot_btn.setEnabled(True)
+        self.status_label.setText("已选择")
+        
+        # 显示主窗口
+        self.show()
+        self.activateWindow()
+    
+    def start_screenshot(self):
+        """开始自动截图"""
+        if not self.selected_area:
+            QMessageBox.warning(self, "提示", "请先选择截图区域")
+            return
+        
+        # 保存设置
+        self.save_settings()
+        
+        # 创建临时目录
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.temp_dir = os.path.join(
+            tempfile.gettempdir(),
+            f"autostitch_{timestamp}"
+        )
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # 更新界面
+        self.select_area_btn.setEnabled(False)
+        self.start_screenshot_btn.setEnabled(False)
+        self.stop_and_stitch_btn.setEnabled(True)
+        self.screenshot_count_label.setText("0 张")
+        self.status_label.setText("截图中...")
+        
+        # 启动截图线程
+        interval = self.interval_spinbox.value()
+        self.screenshot_thread = ScreenshotThread(
+            self.selected_area,
+            interval,
+            self.temp_dir
+        )
+        self.screenshot_thread.screenshot_taken.connect(self.on_screenshot_taken)
+        self.screenshot_thread.error_occurred.connect(self.on_screenshot_error)
+        self.screenshot_thread.start()
+    
+    def on_screenshot_taken(self, count):
+        """截图完成"""
+        self.screenshot_count_label.setText(f"{count} 张")
+    
+    def on_screenshot_error(self, error):
+        """截图错误"""
+        QMessageBox.critical(self, "错误", error)
+        self.reset_ui()
+    
+    def stop_and_stitch(self):
+        """停止截图并拼接"""
+        # 停止截图线程
+        if self.screenshot_thread and self.screenshot_thread.isRunning():
             self.screenshot_thread.stop()
             self.screenshot_thread.wait()
-            
-        self.is_capturing = False
-        self.stop_btn.setEnabled(False)
-        self.status_label.setText("正在拼接...")
         
-        # 开始拼接
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            self.stitch_thread = StitchThread(self.temp_dir)
-            self.stitch_thread.progress.connect(self.on_stitch_progress)
-            self.stitch_thread.finished.connect(self.on_stitch_finished)
-            self.stitch_thread.error.connect(self.on_stitch_error)
-            self.stitch_thread.start()
-        else:
-            self.on_stitch_error("临时目录不存在")
-            
-    def on_stitch_progress(self, message: str):
-        """拼接进度更新"""
-        self.status_label.setText(message)
+        # 检查截图数量
+        if self.screenshot_thread.screenshot_count < 2:
+            QMessageBox.warning(self, "提示", "至少需要 2 张截图才能拼接")
+            self.reset_ui()
+            return
         
-    def on_stitch_finished(self, result: np.ndarray):
+        # 更新界面
+        self.stop_and_stitch_btn.setEnabled(False)
+        self.status_label.setText("拼接中...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        # 启动拼接线程
+        self.stitch_thread = StitchThread(self.temp_dir)
+        self.stitch_thread.progress_updated.connect(self.on_stitch_progress)
+        self.stitch_thread.stitch_completed.connect(self.on_stitch_completed)
+        self.stitch_thread.error_occurred.connect(self.on_stitch_error)
+        self.stitch_thread.start()
+    
+    def on_stitch_progress(self, progress):
+        """拼接进度"""
+        self.progress_bar.setValue(progress)
+    
+    def on_stitch_completed(self, result_path):
         """拼接完成"""
-        self.status_label.setText("拼接完成，正在复制到剪贴板...")
-        
-        # 保存临时文件
-        temp_output = os.path.join(self.temp_dir, "stitched_result.png")
-        cv2.imwrite(temp_output, result)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("完成")
         
         # 复制到剪贴板
-        self.copy_image_to_clipboard(temp_output)
+        if self.auto_copy_checkbox.isChecked():
+            if copy_image_to_clipboard(result_path):
+                self.status_label.setText("完成 (已复制)")
+                
+                QMessageBox.information(
+                    self,
+                    "完成",
+                    f"拼接完成!\n\n"
+                    f"已复制到剪贴板,可直接粘贴。\n\n"
+                    f"保存位置:\n{result_path}"
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "完成",
+                    f"拼接完成!\n\n"
+                    f"保存位置:\n{result_path}"
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "完成",
+                f"拼接完成!\n\n"
+                f"保存位置:\n{result_path}"
+            )
         
-        self.status_label.setText("完成！图片已复制到剪贴板")
-        self.start_btn.setEnabled(True)
-        
-        # 清理临时文件（延迟删除）
-        QTimer.singleShot(5000, lambda: self.cleanup_temp_dir())
-        
-        QMessageBox.information(self, "成功", "拼接完成！图片已复制到剪贴板")
-        
-    def on_stitch_error(self, error: str):
+        self.reset_ui()
+    
+    def on_stitch_error(self, error):
         """拼接错误"""
-        self.status_label.setText(f"错误: {error}")
-        self.start_btn.setEnabled(True)
-        QMessageBox.warning(self, "拼接失败", error)
-        self.cleanup_temp_dir()
+        self.progress_bar.setVisible(False)
         
-    def copy_image_to_clipboard(self, image_path: str):
-        """将图片复制到剪贴板"""
-        try:
-            from PIL import Image
-            
-            # 读取图片
-            image = Image.open(image_path)
-            
-            # 转换为 BMP 格式（Windows 剪贴板）
-            output = BytesIO()
-            image.convert('RGB').save(output, 'BMP')
-            data = output.getvalue()[14:]  # BMP 文件头是 14 字节
-            output.close()
-            
-            # 复制到剪贴板
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-            win32clipboard.CloseClipboard()
-            
-        except Exception as e:
-            print(f"复制到剪贴板失败: {e}")
-            QMessageBox.warning(self, "警告", f"复制到剪贴板失败: {e}")
-            
-    def cleanup_temp_dir(self):
-        """清理临时目录"""
+        QMessageBox.critical(
+            self,
+            "拼接失败",
+            f"{error}\n\n"
+            "可能原因:\n"
+            "• 图片重叠不足\n"
+            "• 间隔过长\n"
+            "• 数量不足\n\n"
+            "建议:\n"
+            "• 减小截图间隔\n"
+            "• 确保30%以上重叠"
+        )
+        
+        self.reset_ui()
+    
+    def reset_ui(self):
+        """重置界面"""
+        self.select_area_btn.setEnabled(True)
+        self.start_screenshot_btn.setEnabled(bool(self.selected_area))
+        self.stop_and_stitch_btn.setEnabled(False)
+        self.status_label.setText("就绪")
+        self.progress_bar.setVisible(False)
+        
+        # 清理临时目录
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
-                shutil.rmtree(self.temp_dir)
+                # 保留拼接结果,删除其他文件
+                for file in os.listdir(self.temp_dir):
+                    if file != "stitched_result.png":
+                        filepath = os.path.join(self.temp_dir, file)
+                        try:
+                            os.remove(filepath)
+                        except:
+                            pass
             except Exception as e:
-                print(f"清理临时目录失败: {e}")
-                
+                print(f"清理临时文件失败: {e}")
+    
     def closeEvent(self, event):
         """关闭事件"""
-        # 清理所有快捷键
-        keyboard.unhook_all()
-            
         # 停止线程
         if self.screenshot_thread and self.screenshot_thread.isRunning():
             self.screenshot_thread.stop()
             self.screenshot_thread.wait()
-            
+        
         if self.stitch_thread and self.stitch_thread.isRunning():
             self.stitch_thread.wait()
-            
-        # 清理临时文件
-        self.cleanup_temp_dir()
+        
+        # 移除快捷键
+        try:
+            keyboard.unhook_all()
+        except:
+            pass
+        
+        # 清理临时目录
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+            except:
+                pass
         
         event.accept()
 
 
+# ============================================================================
+# 主程序入口
+# ============================================================================
+
 def main():
+    """主函数"""
     app = QApplication(sys.argv)
-    app.setApplicationName("自动截图拼接工具")
     
+    # 设置应用信息
+    app.setApplicationName("Auto Screenshot Stitch")
+    app.setOrganizationName("AutoStitch")
+    
+    # 创建主窗口
     window = MainWindow()
     window.show()
     
     sys.exit(app.exec())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

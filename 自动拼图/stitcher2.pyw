@@ -30,49 +30,286 @@ def _version_satisfied(installed: str, minimal: str) -> bool:
     return _parse_version_tuple(installed) >= _parse_version_tuple(minimal)
 
 
-def _tk_confirm(title: str, message: str) -> bool:
-    """使用 Tk 弹出确认窗口；若 Tk 不可用，则返回 False（避免静默安装）。"""
+def _qt_confirm(title: str, message: str) -> bool:
+    """使用 PySide6 弹出确认窗口；若 PySide6 不可用，则尝试使用 tkinter 作为降级方案。"""
+    # 首先尝试使用 PySide6
     try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        res = messagebox.askyesno(title, message)
-        root.destroy()
-        return bool(res)
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtCore import Qt
+        
+        # 检查是否已有 QApplication 实例
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+            app_created = True
+        else:
+            app_created = False
+        
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        msg_box.setWindowFlags(msg_box.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        result = msg_box.exec() == QMessageBox.Yes
+        
+        # 如果是我们创建的 app，不要退出（会影响后续使用）
+        return result
     except Exception:
-        return False
+        # 降级到 tkinter
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            res = messagebox.askyesno(title, message)
+            root.destroy()
+            return bool(res)
+        except Exception:
+            return False
 
 
-def _tk_info(title: str, message: str) -> None:
+def _qt_info(title: str, message: str) -> None:
+    """使用 PySide6 显示信息窗口；若 PySide6 不可用，则尝试使用 tkinter 作为降级方案。"""
+    # 首先尝试使用 PySide6
     try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        messagebox.showinfo(title, message)
-        root.destroy()
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtCore import Qt
+        
+        # 检查是否已有 QApplication 实例
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+            app_created = True
+        else:
+            app_created = False
+        
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setWindowFlags(msg_box.windowFlags() | Qt.WindowStaysOnTopHint)
+        msg_box.exec()
     except Exception:
-        pass
+        # 降级到 tkinter
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            messagebox.showinfo(title, message)
+            root.destroy()
+        except Exception:
+            pass
 
 
-def _pip_install(packages: List[str]) -> tuple[bool, str]:
-    """通过当前 Python 解释器执行 pip 安装，返回 (成功与否, 输出/错误)。"""
+class DependencyInstallDialog:
+    """PySide6 依赖安装对话框（带进度显示）"""
+    
+    def __init__(self, packages_to_install: List[str], package_tips: List[str]):
+        """
+        Args:
+            packages_to_install: 要安装的包列表，如 ['numpy>=1.24.0']
+            package_tips: 包的说明列表，如 ['numpy>=1.24.0（数组/图像处理）']
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                       QTextEdit, QPushButton, QProgressBar, QApplication)
+        from PySide6.QtCore import Qt, QThread, Signal
+        from PySide6.QtGui import QFont
+        
+        self.packages = packages_to_install
+        self.tips = package_tips
+        self.success = False
+        
+        # 确保有 QApplication 实例
+        app = QApplication.instance()
+        if app is None:
+            self.app = QApplication(sys.argv)
+        else:
+            self.app = app
+        
+        # 创建对话框
+        self.dialog = QDialog()
+        self.dialog.setWindowTitle("安装依赖")
+        self.dialog.setMinimumSize(600, 400)
+        self.dialog.setWindowFlags(self.dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        layout = QVBoxLayout(self.dialog)
+        
+        # 标题
+        title_label = QLabel("⚠️ 正在自动安装依赖")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("color: #2196F3; padding: 10px;")
+        layout.addWidget(title_label)
+        
+        # 说明文本
+        info_text = "程序需要以下依赖才能正常运行，正在自动安装:\n\n"
+        for tip in package_tips:
+            info_text += f"• {tip}\n"
+        info_text += "\n⏳ 请稍候，正在后台安装..."
+        
+        info_label = QLabel(info_text)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("padding: 10px;")
+        layout.addWidget(info_label)
+        
+        # 日志区域
+        log_label = QLabel("安装日志:")
+        log_label.setStyleSheet("font-weight: bold; padding: 5px;")
+        layout.addWidget(log_label)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.log_text)
+        
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        
+        # 按钮区域
+        button_layout = QHBoxLayout()
+        
+        self.status_label = QLabel("正在准备安装...")
+        self.status_label.setStyleSheet("color: #FF9800;")
+        button_layout.addWidget(self.status_label)
+        
+        button_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.dialog.reject)
+        button_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # 安装线程
+        self.install_thread = None
+    
+    def log(self, message: str):
+        """添加日志"""
+        self.log_text.append(message)
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+        self.app.processEvents()
+    
+    def start_install(self):
+        """开始安装"""
+        from PySide6.QtCore import QThread, Signal
+        
+        class InstallThread(QThread):
+            """安装线程"""
+            progress = Signal(int)
+            log_signal = Signal(str)
+            finished_signal = Signal(bool, str)
+            
+            def __init__(self, packages):
+                super().__init__()
+                self.packages = packages
+            
+            def run(self):
+                try:
+                    total = len(self.packages)
+                    
+                    for idx, package in enumerate(self.packages):
+                        self.log_signal.emit(f"\n[{idx+1}/{total}] 正在安装 {package}...")
+                        self.progress.emit(int((idx / total) * 90))
+                        
+                        def progress_cb(msg):
+                            self.log_signal.emit(f"  {msg}")
+                        
+                        ok, out = _pip_install([package], progress_callback=progress_cb)
+                        
+                        if not ok:
+                            self.finished_signal.emit(False, f"安装 {package} 失败:\n{out}")
+                            return
+                    
+                    self.progress.emit(100)
+                    self.log_signal.emit("\n✅ 所有依赖安装完成!")
+                    self.finished_signal.emit(True, "")
+                    
+                except Exception as e:
+                    self.finished_signal.emit(False, f"安装过程出错: {str(e)}")
+        
+        self.install_thread = InstallThread(self.packages)
+        self.install_thread.progress.connect(self.progress_bar.setValue)
+        self.install_thread.log_signal.connect(self.log)
+        self.install_thread.finished_signal.connect(self.on_install_finished)
+        
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("正在安装...")
+        self.install_thread.start()
+    
+    def on_install_finished(self, success: bool, error_msg: str):
+        """安装完成回调"""
+        if success:
+            self.success = True
+            self.status_label.setText("✅ 安装完成")
+            self.status_label.setStyleSheet("color: #4CAF50;")
+            self.log("\n程序将继续启动...")
+            # 延迟关闭对话框
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self.dialog.accept)
+        else:
+            self.status_label.setText("❌ 安装失败")
+            self.status_label.setStyleSheet("color: #F44336;")
+            self.log(f"\n❌ {error_msg}")
+            self.cancel_btn.setEnabled(True)
+            self.cancel_btn.setText("关闭")
+    
+    def exec(self) -> bool:
+        """显示对话框并执行安装，返回是否成功"""
+        # 延迟启动安装
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, self.start_install)
+        
+        result = self.dialog.exec()
+        return self.success and result == self.dialog.Accepted
+
+
+def _pip_install(packages: List[str], progress_callback=None) -> tuple[bool, str]:
+    """通过当前 Python 解释器执行 pip 安装，返回 (成功与否, 输出/错误)。
+    
+    Args:
+        packages: 要安装的包列表
+        progress_callback: 可选的进度回调函数，接收 (message: str) 参数
+    """
     cmd = [sys.executable, "-m", "pip", "install", "-U", *packages]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if progress_callback:
+            progress_callback(f"正在执行: {' '.join(cmd)}")
+        
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode == 0:
+            if progress_callback:
+                progress_callback("✓ 安装成功")
             return True, proc.stdout
+        
         # 若权限问题，尝试 --user 再来一次
         if "Permission" in (proc.stderr or "") or "permission" in (proc.stderr or ""):
+            if progress_callback:
+                progress_callback("⚠ 权限不足，尝试使用 --user 参数...")
             cmd_user = [sys.executable, "-m", "pip", "install", "--user", "-U", *packages]
-            proc2 = subprocess.run(cmd_user, capture_output=True, text=True)
+            proc2 = subprocess.run(cmd_user, capture_output=True, text=True, timeout=300)
             if proc2.returncode == 0:
+                if progress_callback:
+                    progress_callback("✓ 使用 --user 参数安装成功")
                 return True, proc2.stdout
             return False, (proc.stderr or "") + "\n" + (proc2.stderr or "")
         return False, (proc.stderr or proc.stdout or "pip 执行失败")
+    except subprocess.TimeoutExpired:
+        return False, "安装超时（超过5分钟）"
     except Exception as e:
         return False, str(e)
 
@@ -129,25 +366,36 @@ def ensure_dependencies() -> bool:
     if not to_install:
         return True
 
-    # 弹窗确认
-    pkg_text = "\n".join(f"- {t}" for t in tips)
-    confirm_msg = (
-        "检测到以下依赖缺失或版本过低：\n\n"
-        f"{pkg_text}\n\n"
-        "是否现在安装/升级？\n\n"
-        "将执行：pip install -U " + " ".join(to_install)
-    )
-    if not _tk_confirm("安装依赖", confirm_msg):
-        _tk_info("已取消", "已取消依赖安装，程序将退出。\n\n你也可以手动安装：\n" + "pip install -U " + " ".join(to_install))
-        return False
+    # 先尝试使用 PySide6 安装对话框（如果 PySide6 已经可用）
+    try:
+        from PySide6.QtWidgets import QApplication
+        
+        # PySide6 可用，使用图形化安装界面
+        dialog = DependencyInstallDialog(to_install, tips)
+        if dialog.exec():
+            return True
+        else:
+            return False
+    except ImportError:
+        # PySide6 不可用，使用简单的确认对话框
+        pkg_text = "\n".join(f"- {t}" for t in tips)
+        confirm_msg = (
+            "检测到以下依赖缺失或版本过低：\n\n"
+            f"{pkg_text}\n\n"
+            "是否现在安装/升级？\n\n"
+            "将执行：pip install -U " + " ".join(to_install)
+        )
+        if not _qt_confirm("安装依赖", confirm_msg):
+            _qt_info("已取消", "已取消依赖安装，程序将退出。\n\n你也可以手动安装：\n" + "pip install -U " + " ".join(to_install))
+            return False
 
-    ok, out = _pip_install(to_install)
-    if ok:
-        _tk_info("安装成功", "依赖已安装/升级完成，将继续启动程序。")
-        return True
-    else:
-        _tk_info("安装失败", "安装/升级失败。可尝试手动安装：\n\n" + out)
-        return False
+        ok, out = _pip_install(to_install)
+        if ok:
+            _qt_info("安装成功", "依赖已安装/升级完成，将继续启动程序。")
+            return True
+        else:
+            _qt_info("安装失败", "安装/升级失败。可尝试手动安装：\n\n" + out)
+            return False
 
 
 # 依赖检查：若失败则直接退出
@@ -445,6 +693,7 @@ class MainWindow(QMainWindow):
         self.result_image = None
         self.stitch_thread = None
         self._thumb_size = 60
+        self._output_thumb_size = 120  # 初始化输出目录缩略图大小
         self.selection_order = []  # 用于跟踪点击选择的顺序
         # QListWidget item roles
         self.ROLE_PATH = Qt.UserRole
@@ -544,20 +793,7 @@ class MainWindow(QMainWindow):
         preview_select_layout.setContentsMargins(6,6,6,6)
         preview_select_layout.setSpacing(4)
 
-        # 第二行：缩放
-        zoom_row = QHBoxLayout()
-        zoom_row.addWidget(QLabel("缩放:"))
-        self.thumb_size_label = QLabel(f"{self._thumb_size}px")
-        zoom_row.addWidget(self.thumb_size_label)
-        self.thumb_slider = QSlider(Qt.Horizontal)
-        self.thumb_slider.setMinimum(10)
-        self.thumb_slider.setMaximum(300)
-        self.thumb_slider.setValue(self._thumb_size)
-        self.thumb_slider.setToolTip("调整预览缩略图大小 (Ctrl+滚轮 也可缩放)")
-        self.thumb_slider.valueChanged.connect(self._on_thumb_size_changed)
-        zoom_row.addWidget(self.thumb_slider, 1)
-        preview_select_layout.addLayout(zoom_row)
-        # 更细的进度条：紧贴缩放行下方
+        # 进度条（更细）
         self.progress_bar = QProgressBar()
         pal = self.palette()
         try:
@@ -624,7 +860,7 @@ class MainWindow(QMainWindow):
             self._refresh_results_preview()
         self.result_container.resizeEvent = _rc_resize
 
-        # 左右结构：左（缩略图+操作）| 分隔线 | 右（结果预览）
+        # 三栏结构：左（源目录缩略图）| 中（输出目录预览）| 右（大图预览）
         self.h_splitter = QSplitter(Qt.Horizontal)
         self.h_splitter.setChildrenCollapsible(False)
         
@@ -633,15 +869,79 @@ class MainWindow(QMainWindow):
         left_col.setContentsMargins(0,0,0,0)
         left_col.addWidget(self.image_list, 1)
         
+        # 中间：输出目录预览
+        self.output_container = QWidget()
+        # 设置容器的 SizePolicy
+        self.output_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        output_layout = QVBoxLayout(self.output_container)
+        output_layout.setContentsMargins(0,0,0,0)  # 改为0边距，与左侧一致
+        output_layout.setSpacing(0)
+        
+        # 输出目录图片列表（移除标题）
+        self.output_list = self._create_output_list()
+        output_layout.addWidget(self.output_list, 1)
+        
+        # 右侧：临时大图预览（不再是拼接结果预览）
+        self.temp_preview_container = QWidget()
+        # 关键：设置容器的 SizePolicy，让它可以被压缩但不会主动扩展
+        self.temp_preview_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        temp_preview_layout = QVBoxLayout(self.temp_preview_container)
+        temp_preview_layout.setContentsMargins(0,0,0,0)  # 改为0边距，与左侧一致
+        temp_preview_layout.setSpacing(0)
+        
+        # 创建一个固定的预览标签（移除标题文字）
+        self.temp_preview_label = QLabel("")
+        self.temp_preview_label.setAlignment(Qt.AlignCenter)
+        self.temp_preview_label.setScaledContents(False)  # 不自动缩放内容
+        # 关键：设置 SizePolicy 为 Ignored，这样 QLabel 不会根据 pixmap 大小改变
+        self.temp_preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # 设置最小尺寸，防止缩得太小
+        self.temp_preview_label.setMinimumSize(50, 50)
+        # 关键：不设置 maximumSize，让它可以自由扩展，但不会主动要求空间
+        
+        pal = self.palette()
+        try:
+            win_col = pal.color(pal.ColorRole.Window)
+            mid_col = pal.color(pal.ColorRole.Mid)
+            txt_col = pal.color(pal.ColorRole.Text)
+        except Exception:
+            win_col = pal.window().color()
+            mid_col = pal.mid().color()
+            txt_col = pal.text().color()
+        self.temp_preview_label.setStyleSheet(
+            "QLabel { "
+            f"background-color: rgb({win_col.red()},{win_col.green()},{win_col.blue()}); "
+            f"border: 2px dashed rgb({mid_col.red()},{mid_col.green()},{mid_col.blue()}); "
+            "padding: 16px; "
+            f"color: rgb({txt_col.red()},{txt_col.green()},{txt_col.blue()}); "
+            "font-size: 13px; }"
+        )
+        temp_preview_layout.addWidget(self.temp_preview_label, 1)
+        
+        # 为大图预览添加双击打开功能和resize事件
+        self.temp_preview_label.mouseDoubleClickEvent = self._on_temp_preview_double_clicked
+        
+        # 为预览容器添加 resize 事件处理，动态调整预览图片大小
+        def _temp_preview_resize(ev):
+            QWidget.resizeEvent(self.temp_preview_container, ev)
+            # 当容器大小改变时，重新缩放图片以适应新尺寸
+            if hasattr(self, '_update_temp_preview'):
+                self._update_temp_preview()
+        self.temp_preview_container.resizeEvent = _temp_preview_resize
+        
         self.h_splitter.addWidget(left_widget)
-        self.h_splitter.addWidget(self.result_container)
+        self.h_splitter.addWidget(self.output_container)
+        self.h_splitter.addWidget(self.temp_preview_container)
         self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
+        self.h_splitter.setStretchFactor(2, 1)
         
         preview_select_layout.addWidget(self.h_splitter)
 
         # 双击打开：为缩略图列表启用双击打开文件
         self.image_list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        # 点击左侧列表项时更新右侧大图预览
+        self.image_list.itemClicked.connect(self._on_item_clicked_for_preview)
 
         # 日志面板
         log_container = QWidget()
@@ -697,6 +997,83 @@ class MainWindow(QMainWindow):
         # 自定义选中叠加序号
         lw.setItemDelegate(self.ThumbDelegate(self))
         return lw
+
+    def _create_output_list(self) -> QListWidget:
+        """创建输出目录预览列表（样式和源目录列表相同，但不显示序号）"""
+        lw = QListWidget()
+        lw.setViewMode(QListView.IconMode)
+        lw.setIconSize(QSize(self._output_thumb_size, self._output_thumb_size))
+        lw.setResizeMode(QListView.Adjust)
+        lw.setMovement(QListView.Static)
+        lw.setSpacing(1)
+        lw.setUniformItemSizes(True)
+        lw.setSelectionMode(QListWidget.MultiSelection)  # 改为多选
+        lw.setContextMenuPolicy(Qt.CustomContextMenu)
+        lw.customContextMenuRequested.connect(self._on_output_list_context_menu)
+        lw.setStyleSheet("QListView{padding:0px; margin:0px;} QListView::item{margin:0px; padding:0px;}")
+        # Ctrl+滚轮缩放
+        lw.wheelEvent = self._make_output_ctrl_wheel_zoom(lw.wheelEvent)
+        # 双击打开
+        lw.itemDoubleClicked.connect(self._on_output_item_double_clicked)
+        # 点击更新右侧大图
+        lw.itemClicked.connect(self._on_output_item_clicked)
+        self._apply_output_list_grid(lw)
+        # 使用自定义委托绘制边框（不显示序号）
+        lw.setItemDelegate(self.OutputThumbDelegate(self))
+        return lw
+
+    class OutputThumbDelegate(QStyledItemDelegate):
+        """输出目录缩略图委托：只绘制边框，不显示序号"""
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.parent = parent
+        
+        def sizeHint(self, option, index):
+            s = self.parent._output_thumb_size
+            pad = 8
+            return QSize(s + pad, s + pad)
+        
+        def paint(self, painter: QPainter, option, index):
+            r = option.rect
+            # 1) 正方形边框
+            painter.save()
+            side_frame = max(2, min(r.width(), r.height()) - 1)
+            fx = r.x() + (r.width() - side_frame) // 2
+            fy = r.y() + (r.height() - side_frame) // 2
+            frame_rect = QRect(fx, fy, side_frame, side_frame)
+            pal = self.parent.palette()
+            try:
+                mid_col = pal.color(pal.ColorRole.Mid)
+                hi_col = pal.color(pal.ColorRole.Highlight)
+            except Exception:
+                mid_col = pal.mid().color()
+                hi_col = pal.highlight().color()
+            pen = QPen(hi_col if (option.state & QStyle.State_Selected) else mid_col)
+            pen.setWidth(2 if (option.state & QStyle.State_Selected) else 1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(frame_rect)
+            painter.restore()
+
+            # 2) 图片
+            painter.save()
+            try:
+                item = self.parent.output_list.item(index.row())
+                icon = item.icon() if item is not None else QIcon()
+            except Exception:
+                icon = QIcon()
+            side = min(r.width(), r.height()) - 2
+            if side < 2:
+                side = max(1, side)
+            base_pix = icon.pixmap(512, 512) if not icon.isNull() else QPixmap()
+            if not base_pix.isNull():
+                scaled = base_pix.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = r.x() + (r.width() - scaled.width()) // 2
+                y = r.y() + (r.height() - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+            painter.restore()
+            # 不绘制序号
+
 
     def _calc_icon_size(self):
         # 允许最小到 10px，最大 512px
@@ -799,9 +1176,10 @@ class MainWindow(QMainWindow):
             if event.modifiers() & Qt.ControlModifier:
                 delta = event.angleDelta().y()
                 step = 10 if delta > 0 else -10
-                new_val = max(10, min(300, self.thumb_slider.value() + step))
-                if new_val != self.thumb_slider.value():
-                    self.thumb_slider.setValue(new_val)
+                new_val = max(10, min(300, self._thumb_size + step))
+                if new_val != self._thumb_size:
+                    self._thumb_size = new_val
+                    self._on_thumb_size_changed(new_val)
                 event.accept()
             else:
                 original_handler(event)
@@ -809,7 +1187,6 @@ class MainWindow(QMainWindow):
 
     def _on_thumb_size_changed(self, value: int):
         self._thumb_size = value
-        self.thumb_size_label.setText(f"{value}px")
         # 更新图标大小
         if hasattr(self, 'image_list'):
             self.image_list.setIconSize(self._calc_icon_size())
@@ -820,6 +1197,45 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.image_list.viewport().update()
+
+    def _on_output_thumb_size_changed(self, value: int):
+        """输出目录缩略图大小变化"""
+        self._output_thumb_size = value
+        if hasattr(self, 'output_list'):
+            self.output_list.setIconSize(QSize(value, value))
+            self._apply_output_list_grid(self.output_list)
+            try:
+                self.output_list.updateGeometries()
+            except Exception:
+                pass
+            self.output_list.viewport().update()
+
+    def _apply_output_list_grid(self, lw: QListWidget):
+        """应用输出列表网格大小"""
+        s = self._output_thumb_size
+        pad = 8
+        lw.setGridSize(QSize(s + pad, s + pad))
+        try:
+            lw.updateGeometries()
+        except Exception:
+            pass
+        lw.viewport().update()
+
+    def _make_output_ctrl_wheel_zoom(self, original_handler):
+        """输出列表的 Ctrl+滚轮缩放"""
+        def handler(event):
+            if event.modifiers() & Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                step = 10 if delta > 0 else -10
+                new_val = max(10, min(300, self._output_thumb_size + step))
+                if new_val != self._output_thumb_size:
+                    self._output_thumb_size = new_val
+                    self._on_output_thumb_size_changed(new_val)
+                event.accept()
+            else:
+                original_handler(event)
+        return handler
+
 
     def _style_accent_button(self, btn: QPushButton):
         # 使用当前主题的高亮色作为按钮底色，保证文字可读性
@@ -886,7 +1302,21 @@ class MainWindow(QMainWindow):
         self.image_list.viewport().update()
 
     def _on_selection_changed(self):
+        """选择变化时重新整理序号列表，确保自动补位"""
+        # 获取当前选中的项（使用列表而不是集合）
+        current_selected = self.image_list.selectedItems()
+        
+        # 清理不存在或未选中的项
+        self.selection_order = [item for item in self.selection_order if item in current_selected]
+        
+        # 添加新选中但不在列表中的项
+        for item in current_selected:
+            if item not in self.selection_order:
+                self.selection_order.append(item)
+        
         self._update_summary()
+        # 强制重绘以更新序号显示
+        self.image_list.viewport().update()
 
     def _on_item_double_clicked(self, item: QListWidgetItem):
         """双击缩略图：用系统默认程序打开图片文件"""
@@ -901,6 +1331,208 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "未找到有效的文件路径")
         except Exception as e:
             QMessageBox.warning(self, "打开失败", f"无法打开文件:\n{path}\n\n{e}")
+
+    def _on_item_clicked_for_preview(self, item: QListWidgetItem):
+        """点击左侧列表项时，在右侧显示大图预览"""
+        try:
+            path = item.data(self.ROLE_PATH) if item else None
+            if path and os.path.exists(path):
+                self._current_preview_path = path
+                self._current_preview_pixmap = QPixmap(path)
+                self._update_temp_preview()
+            else:
+                self._current_preview_pixmap = None
+                self.temp_preview_label.clear()
+        except Exception as e:
+            self._current_preview_pixmap = None
+            self.temp_preview_label.clear()
+
+    def _update_temp_preview(self):
+        """更新右侧预览图片以适应当前容器大小"""
+        if hasattr(self, '_current_preview_pixmap') and self._current_preview_pixmap and not self._current_preview_pixmap.isNull():
+            avail = self.temp_preview_label.size()
+            # 确保有有效的尺寸
+            if avail.width() > 10 and avail.height() > 10:
+                scaled = self._current_preview_pixmap.scaled(
+                    avail, 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.temp_preview_label.setPixmap(scaled)
+
+    def _on_temp_preview_double_clicked(self, event):
+        """双击右侧大图预览时打开文件"""
+        if hasattr(self, '_current_preview_path') and self._current_preview_path:
+            try:
+                if os.path.exists(self._current_preview_path):
+                    if sys.platform.startswith('win'):
+                        os.startfile(self._current_preview_path)
+                    else:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(self._current_preview_path))
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", f"无法打开文件:\n{e}")
+
+    def _on_output_item_double_clicked(self, item: QListWidgetItem):
+        """双击输出目录图片：用系统默认程序打开"""
+        try:
+            path = item.data(Qt.UserRole) if item else None
+            if path and os.path.exists(path):
+                if sys.platform.startswith('win'):
+                    os.startfile(path)
+                else:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            else:
+                QMessageBox.information(self, "提示", "未找到有效的文件路径")
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"无法打开文件:\n{e}")
+
+    def _on_output_item_clicked(self, item: QListWidgetItem):
+        """点击输出目录图片时，在右侧显示大图预览"""
+        try:
+            path = item.data(Qt.UserRole) if item else None
+            if path and os.path.exists(path):
+                self._current_preview_path = path
+                self._current_preview_pixmap = QPixmap(path)
+                self._update_temp_preview()
+            else:
+                self._current_preview_pixmap = None
+                self.temp_preview_label.clear()
+        except Exception as e:
+            self._current_preview_pixmap = None
+            self.temp_preview_label.clear()
+
+    def _on_output_list_context_menu(self, pos: QPoint):
+        """输出目录列表右键菜单（支持批量操作）"""
+        item = self.output_list.itemAt(pos)
+        selected_items = self.output_list.selectedItems()
+        menu = QMenu(self)
+        
+        act_copy = QAction("复制文件路径", self)
+        act_copy_file = QAction("复制文件", self)
+        act_open = QAction("打开文件", self)
+        act_open_folder = QAction("打开所在文件夹", self)
+        act_delete = QAction(f"删除文件 ({len(selected_items)} 项)" if len(selected_items) > 1 else "删除文件", self)
+        act_refresh = QAction("刷新输出目录", self)
+        
+        menu.addAction(act_copy)
+        menu.addAction(act_copy_file)
+        menu.addSeparator()
+        menu.addAction(act_open)
+        menu.addAction(act_open_folder)
+        menu.addSeparator()
+        menu.addAction(act_delete)
+        menu.addSeparator()
+        menu.addAction(act_refresh)
+        
+        def do_copy_path():
+            """复制所有选中项的路径"""
+            if selected_items:
+                paths = [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole)]
+                if paths:
+                    clipboard = QApplication.clipboard()
+                    clipboard.setText('\n'.join(paths))
+                    self.log(f"📋 已复制 {len(paths)} 个文件路径")
+        
+        def do_copy_file():
+            """复制所有选中项的文件"""
+            if selected_items:
+                paths = [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole) and os.path.exists(item.data(Qt.UserRole))]
+                if paths:
+                    clipboard = QApplication.clipboard()
+                    from PySide6.QtCore import QMimeData
+                    mime = QMimeData()
+                    mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+                    clipboard.setMimeData(mime)
+                    self.log(f"📋 已复制 {len(paths)} 个文件")
+        
+        def do_open():
+            """打开单个文件"""
+            if item:
+                path = item.data(Qt.UserRole)
+                if path and os.path.exists(path):
+                    try:
+                        if sys.platform.startswith('win'):
+                            os.startfile(path)
+                        else:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                    except Exception as e:
+                        QMessageBox.warning(self, "打开失败", f"无法打开文件:\n{e}")
+        
+        def do_open_folder():
+            """打开单个文件所在文件夹"""
+            if item:
+                path = item.data(Qt.UserRole)
+                if path and os.path.exists(path):
+                    folder = os.path.dirname(path)
+                    try:
+                        if sys.platform.startswith('win'):
+                            os.startfile(folder)
+                        else:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+                    except Exception as e:
+                        QMessageBox.warning(self, "打开失败", f"无法打开文件夹:\n{e}")
+        
+        def do_delete():
+            """批量删除选中的文件"""
+            if selected_items:
+                paths = [(item, item.data(Qt.UserRole)) for item in selected_items if item.data(Qt.UserRole) and os.path.exists(item.data(Qt.UserRole))]
+                if not paths:
+                    QMessageBox.information(self, "提示", "没有有效的文件可删除")
+                    return
+                
+                # 确认删除
+                file_list = '\n'.join([os.path.basename(p) for _, p in paths[:10]])
+                if len(paths) > 10:
+                    file_list += f"\n... 还有 {len(paths) - 10} 个文件"
+                
+                reply = QMessageBox.question(
+                    self, "确认批量删除", 
+                    f"确定要删除 {len(paths)} 个文件吗？\n\n{file_list}\n\n此操作不可恢复！",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    success_count = 0
+                    failed_files = []
+                    for item, path in paths:
+                        try:
+                            os.remove(path)
+                            success_count += 1
+                        except Exception as e:
+                            failed_files.append(f"{os.path.basename(path)}: {e}")
+                    
+                    self.log(f"🗑️ 成功删除 {success_count}/{len(paths)} 个文件")
+                    if failed_files:
+                        error_msg = '\n'.join(failed_files[:5])
+                        if len(failed_files) > 5:
+                            error_msg += f"\n... 还有 {len(failed_files) - 5} 个失败"
+                        QMessageBox.warning(self, "部分删除失败", f"以下文件删除失败:\n\n{error_msg}")
+                    
+                    # 刷新列表
+                    self._load_output_images()
+        
+        def do_refresh():
+            self._load_output_images()
+            self.log("🔄 已刷新输出目录")
+        
+        act_copy.triggered.connect(do_copy_path)
+        act_copy_file.triggered.connect(do_copy_file)
+        act_open.triggered.connect(do_open)
+        act_open_folder.triggered.connect(do_open_folder)
+        act_delete.triggered.connect(do_delete)
+        act_refresh.triggered.connect(do_refresh)
+        
+        # 禁用无效操作
+        if not selected_items:
+            act_copy.setEnabled(False)
+            act_copy_file.setEnabled(False)
+            act_delete.setEnabled(False)
+        if not item:
+            act_open.setEnabled(False)
+            act_open_folder.setEnabled(False)
+        
+        menu.exec(self.output_list.mapToGlobal(pos))
+
 
     def open_output_dir(self):
         """打开输出目录（所选目录下的 stitch），不存在则创建"""
@@ -949,6 +1581,35 @@ class MainWindow(QMainWindow):
         # 清空旧的选择序列
         self.selection_order = []
         self.image_list.clearSelection()
+        # 加载输出目录预览
+        self._load_output_images()
+
+    def _load_output_images(self):
+        """加载输出目录的图片到中间预览列表"""
+        if not hasattr(self, 'output_list'):
+            return
+        self.output_list.clear()
+        directory = self.dir_edit.text().strip()
+        if not directory:
+            return
+        output_dir = Path(directory) / "stitch"
+        if not output_dir.exists():
+            return
+        
+        supported = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
+        try:
+            for f in sorted(os.listdir(str(output_dir)), reverse=True):  # 最新的在前
+                p = output_dir / f
+                if p.is_file() and p.suffix.lower() in supported:
+                    pix = QPixmap(str(p))
+                    icon = QIcon(pix)
+                    item = QListWidgetItem(icon, "")
+                    item.setData(Qt.UserRole, str(p))
+                    item.setToolTip(f)
+                    self.output_list.addItem(item)
+        except Exception as e:
+            self.log(f"⚠️ 加载输出目录失败: {e}")
+
 
     def _scan_images(self, directory: str, include_subdirs: bool) -> List[str]:
         """扫描目录中的图片文件。
@@ -985,37 +1646,165 @@ class MainWindow(QMainWindow):
         item.setText("")
 
     def _on_list_context_menu(self, pos: QPoint):
+        """左侧列表右键菜单：复制、粘贴、删除等操作（支持批量）"""
         item = self.image_list.itemAt(pos)
-        if not item:
-            return
+        selected_items = self.image_list.selectedItems()
         menu = QMenu(self)
-        act_set_order = QAction("设置序号…", self)
-        act_clear_order = QAction("清除序号", self)
-        act_toggle_mark = QAction("切换标记", self)
-        menu.addAction(act_set_order)
-        menu.addAction(act_clear_order)
+        
+        # 基本文件操作
+        act_copy = QAction("复制文件路径", self)
+        act_copy_file = QAction("复制文件", self)
+        act_open = QAction("打开文件", self)
+        act_open_folder = QAction("打开所在文件夹", self)
+        act_delete = QAction(f"删除文件 ({len(selected_items)} 项)" if len(selected_items) > 1 else "删除文件", self)
+        
+        menu.addAction(act_copy)
+        menu.addAction(act_copy_file)
         menu.addSeparator()
-        menu.addAction(act_toggle_mark)
+        menu.addAction(act_open)
+        menu.addAction(act_open_folder)
+        menu.addSeparator()
+        menu.addAction(act_delete)
+        
+        # 旧的序号和标记功能
+        if item:
+            menu.addSeparator()
+            act_set_order = QAction("设置序号…", self)
+            act_clear_order = QAction("清除序号", self)
+            act_toggle_mark = QAction("切换标记", self)
+            menu.addAction(act_set_order)
+            menu.addAction(act_clear_order)
+            menu.addAction(act_toggle_mark)
 
-        def do_set_order():
-            val, ok = QInputDialog.getInt(self, "设置序号", "序号 (>=1):", value=max(1, int(item.data(self.ROLE_ORDER) or 1)), min=1, max=9999)
-            if ok:
-                item.setData(self.ROLE_ORDER, int(val))
+        def do_copy_path():
+            """复制所有选中项的路径"""
+            if selected_items:
+                paths = [item.data(self.ROLE_PATH) for item in selected_items if item.data(self.ROLE_PATH)]
+                if paths:
+                    clipboard = QApplication.clipboard()
+                    clipboard.setText('\n'.join(paths))
+                    self.log(f"📋 已复制 {len(paths)} 个文件路径")
+        
+        def do_copy_file():
+            """复制所有选中项的文件"""
+            if selected_items:
+                paths = [item.data(self.ROLE_PATH) for item in selected_items if item.data(self.ROLE_PATH) and os.path.exists(item.data(self.ROLE_PATH))]
+                if paths:
+                    clipboard = QApplication.clipboard()
+                    from PySide6.QtCore import QMimeData
+                    mime = QMimeData()
+                    mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+                    clipboard.setMimeData(mime)
+                    self.log(f"📋 已复制 {len(paths)} 个文件")
+        
+        def do_open():
+            """打开单个文件"""
+            if item:
+                path = item.data(self.ROLE_PATH)
+                if path and os.path.exists(path):
+                    try:
+                        if sys.platform.startswith('win'):
+                            os.startfile(path)
+                        else:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                    except Exception as e:
+                        QMessageBox.warning(self, "打开失败", f"无法打开文件:\n{e}")
+        
+        def do_open_folder():
+            """打开单个文件所在文件夹"""
+            if item:
+                path = item.data(self.ROLE_PATH)
+                if path and os.path.exists(path):
+                    folder = os.path.dirname(path)
+                    try:
+                        if sys.platform.startswith('win'):
+                            os.startfile(folder)
+                        else:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+                    except Exception as e:
+                        QMessageBox.warning(self, "打开失败", f"无法打开文件夹:\n{e}")
+        
+        def do_delete():
+            """批量删除选中的文件"""
+            if selected_items:
+                paths = [(item, item.data(self.ROLE_PATH)) for item in selected_items if item.data(self.ROLE_PATH) and os.path.exists(item.data(self.ROLE_PATH))]
+                if not paths:
+                    QMessageBox.information(self, "提示", "没有有效的文件可删除")
+                    return
+                
+                # 确认删除
+                file_list = '\n'.join([os.path.basename(p) for _, p in paths[:10]])
+                if len(paths) > 10:
+                    file_list += f"\n... 还有 {len(paths) - 10} 个文件"
+                
+                reply = QMessageBox.question(
+                    self, "确认批量删除", 
+                    f"确定要删除 {len(paths)} 个文件吗？\n\n{file_list}\n\n此操作不可恢复！",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    success_count = 0
+                    failed_files = []
+                    for item, path in paths:
+                        try:
+                            os.remove(path)
+                            # 从列表中移除
+                            row = self.image_list.row(item)
+                            self.image_list.takeItem(row)
+                            # 从选择顺序中移除
+                            if item in self.selection_order:
+                                self.selection_order.remove(item)
+                            success_count += 1
+                        except Exception as e:
+                            failed_files.append(f"{os.path.basename(path)}: {e}")
+                    
+                    self.log(f"🗑️ 成功删除 {success_count}/{len(paths)} 个文件")
+                    if failed_files:
+                        error_msg = '\n'.join(failed_files[:5])
+                        if len(failed_files) > 5:
+                            error_msg += f"\n... 还有 {len(failed_files) - 5} 个失败"
+                        QMessageBox.warning(self, "部分删除失败", f"以下文件删除失败:\n\n{error_msg}")
+                    
+                    self._update_summary()
+
+        if item:
+            def do_set_order():
+                val, ok = QInputDialog.getInt(self, "设置序号", "序号 (>=1):", value=max(1, int(item.data(self.ROLE_ORDER) or 1)), min=1, max=9999)
+                if ok:
+                    item.setData(self.ROLE_ORDER, int(val))
+                    self._update_item_text(item)
+
+            def do_clear_order():
+                item.setData(self.ROLE_ORDER, 0)
                 self._update_item_text(item)
 
-        def do_clear_order():
-            item.setData(self.ROLE_ORDER, 0)
-            self._update_item_text(item)
+            def do_toggle_mark():
+                cur = bool(item.data(self.ROLE_MARK))
+                item.setData(self.ROLE_MARK, (not cur))
+                self._update_item_text(item)
 
-        def do_toggle_mark():
-            cur = bool(item.data(self.ROLE_MARK))
-            item.setData(self.ROLE_MARK, (not cur))
-            self._update_item_text(item)
+            act_set_order.triggered.connect(do_set_order)
+            act_clear_order.triggered.connect(do_clear_order)
+            act_toggle_mark.triggered.connect(do_toggle_mark)
 
-        act_set_order.triggered.connect(do_set_order)
-        act_clear_order.triggered.connect(do_clear_order)
-        act_toggle_mark.triggered.connect(do_toggle_mark)
+        act_copy.triggered.connect(do_copy_path)
+        act_copy_file.triggered.connect(do_copy_file)
+        act_open.triggered.connect(do_open)
+        act_open_folder.triggered.connect(do_open_folder)
+        act_delete.triggered.connect(do_delete)
+        
+        # 禁用无效操作
+        if not selected_items:
+            act_copy.setEnabled(False)
+            act_copy_file.setEnabled(False)
+            act_delete.setEnabled(False)
+        if not item:
+            act_open.setEnabled(False)
+            act_open_folder.setEnabled(False)
+        
         menu.exec(self.image_list.mapToGlobal(pos))
+
     
     def log(self, message: str):
         """添加日志（始终自动滚动到底部）"""
@@ -1163,6 +1952,8 @@ class MainWindow(QMainWindow):
         # 自动保存所有结果（按输出格式设置）
         try:
             self.save_all_results(results)
+            # 刷新输出目录预览
+            self._load_output_images()
         except Exception as e:
             self.log(f"❌ 自动保存异常: {e}")
         
@@ -1170,6 +1961,7 @@ class MainWindow(QMainWindow):
             h, w = img.shape[:2]
             self.log(f"✅ 结果 {i}: {w} x {h} 像素")
         self.log("="*60)
+
         
         # 使用主题窗口底色 + 高亮色边框，避免硬编码白色
         pal = self.palette()
@@ -1454,11 +2246,11 @@ class MainWindow(QMainWindow):
                 self.vsplitter.setSizes([int(sizes[0]), int(sizes[1])])
         except Exception:
             pass
-        # 还原 h_splitter 比例
+        # 还原 h_splitter 比例（现在是三栏）
         try:
             hs = self._settings.value('hsplitter', None)
-            if isinstance(hs, list) and len(hs) == 2 and hasattr(self, 'h_splitter'):
-                self.h_splitter.setSizes([int(hs[0]), int(hs[1])])
+            if isinstance(hs, list) and len(hs) == 3 and hasattr(self, 'h_splitter'):
+                self.h_splitter.setSizes([int(hs[0]), int(hs[1]), int(hs[2])])
         except Exception:
             pass
         # 还原“包含子目录”和输出格式
