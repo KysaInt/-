@@ -168,23 +168,20 @@ from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QPainter, QColor, QPe
 
 
 class ImageStitcher:
-    """精确图片拼接器 - 基于特征匹配的高精度拼接
-    
-    新特性:
-    1. 使用SIFT/ORB特征点精确定位重叠区域
-    2. 支持任意角度和比例的图片拼接
-    3. 智能裁剪，生成不规则边界
-    4. 多种拼接模式：智能、垂直、水平、网格
+    """
+    使用 OpenCV Stitcher 的稳定拼接实现，尽量保持旧版核心逻辑；
+    同时保留新版提供的回退（垂直/水平/网格）能力，仅在 Stitcher 失败时启用。
     """
 
-    def __init__(self, mode='smart'):
+    def __init__(self, mode='scans', enable_transparent=False):
         """
-        mode: 'smart'      自动检测最佳拼接方式
-              'vertical'   强制垂直拼接
-              'horizontal' 强制水平拼接
-              'grid'       网格拼接
+        mode:
+          'scans'    适合扫描/截图（更精确）
+          'panorama' 适合全景照片
+        enable_transparent: 是否启用透明通道（默认False，保持最高画质）
         """
         self.mode = mode
+        self.enable_transparent = enable_transparent
 
     def load_images(self, directory: str, include_subdirs: bool = False) -> List[str]:
         """加载目录下的所有图片
@@ -217,8 +214,24 @@ class ImageStitcher:
 
         return image_files
 
-
-
+    def _make_transparent(self, pano: np.ndarray) -> np.ndarray:
+        """
+        将拼接结果的纯黑背景转为透明（BGRA）。
+        注意：以接近黑色(0~1)作为空白判断阈值，可能会把真实黑色像素也当作透明。
+        仅在 enable_transparent=True 时生效。
+        """
+        if pano is None or pano.ndim != 3:
+            return pano
+        # 如果未启用透明通道，直接返回原图（保持最高画质）
+        if not self.enable_transparent:
+            return pano
+        # 确保是 BGR
+        bgr = pano[:, :, :3] if pano.shape[2] == 4 else pano
+        mask = cv2.inRange(bgr, (0, 0, 0), (1, 1, 1))
+        bgra = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
+        bgra[:, :, 3] = 255
+        bgra[mask > 0, 3] = 0
+        return bgra
 
     def _grid_stitch(self, images: List[np.ndarray], progress_callback=None) -> np.ndarray:
         """网格拼接"""
@@ -255,32 +268,36 @@ class ImageStitcher:
         result = np.vstack(grid_rows)
         return result
 
-    def stitch_images(self, image_paths: List[str], progress_callback=None, fallback_mode='vertical') -> Optional[np.ndarray]:
-        """拼接图片 - 使用模板匹配方法，专门处理有重叠的截图
-        
+    def stitch_images(self, image_paths: List[str], progress_callback=None, fallback_mode: Optional[str] = None) -> Optional[np.ndarray]:
+        """
+        先使用 OpenCV Stitcher（旧版稳定逻辑）进行拼接；若失败且提供了回退模式，
+        再使用简易的垂直/水平/网格方式回退。
+
         Args:
             image_paths: 图片路径列表
-            progress_callback: 进度回调函数
-            fallback_mode: 拼接模式 ('vertical', 'horizontal', 'grid')
-        
-        Returns:
-            拼接后的图片，失败返回None
+            progress_callback: 进度回调函数 (cur, total, msg)
+            fallback_mode: 回退拼接模式 ('vertical'|'horizontal'|'grid'|None)
         """
         if not image_paths:
             return None
 
-        # 1. 加载所有图片
-        images = []
+        # 加载图片（使用 IMREAD_UNCHANGED 保留原始质量和通道）
+        images: List[np.ndarray] = []
         for i, path in enumerate(image_paths):
             if progress_callback:
                 progress_callback(i + 1, len(image_paths), f"加载图片: {Path(path).name}")
-
             try:
-                img = cv2.imread(path, cv2.IMREAD_COLOR)
+                with open(path, 'rb') as f:
+                    data = f.read()
+                arr = np.frombuffer(data, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
                 if img is not None:
+                    # 转换为 BGR 格式供 Stitcher 使用（Stitcher 需要3通道）
+                    if img.ndim == 2:  # 灰度图
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    elif img.shape[2] == 4:  # BGRA
+                        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                     images.append(img)
-                    if progress_callback:
-                        progress_callback(i + 1, len(image_paths), f"✓ 已加载: {Path(path).name} ({img.shape[1]}x{img.shape[0]})")
                 else:
                     if progress_callback:
                         progress_callback(i + 1, len(image_paths), f"⚠ 无法解码: {Path(path).name}")
@@ -289,34 +306,33 @@ class ImageStitcher:
                     progress_callback(i + 1, len(image_paths), f"⚠ 加载失败: {Path(path).name} - {e}")
 
         if not images:
-            if progress_callback:
-                progress_callback(0, 0, "❌ 没有成功加载任何图片")
             return None
 
         if len(images) == 1:
-            if progress_callback:
-                progress_callback(1, 1, "✓ 单张图片，直接返回")
-            return images[0]
+            return self._make_transparent(images[0])
 
-        # 2. 根据模式执行拼接
-        mode_name = {'vertical': '垂直', 'horizontal': '水平', 'grid': '网格'}.get(fallback_mode, '垂直')
+        # 优先：OpenCV Stitcher（旧版核心）
+        stitcher = cv2.Stitcher_create(cv2.Stitcher_SCANS if self.mode == 'scans' else cv2.Stitcher_PANORAMA)
+        status, pano = stitcher.stitch(images)
         if progress_callback:
-            progress_callback(len(images), len(images), f"🔄 开始{mode_name}拼接 {len(images)} 张图片...")
-        
+            progress_callback(len(image_paths), len(image_paths), "Stitcher 拼接完成" if status == cv2.Stitcher_OK else "Stitcher 拼接失败，尝试回退…")
+        if status == cv2.Stitcher_OK and pano is not None:
+            return self._make_transparent(pano)
+
+        # 回退：仅在指定 fallback_mode 时进行
+        if not fallback_mode:
+            return None
         try:
-            if fallback_mode == 'vertical':
-                return self._stitch_vertical_with_overlap(images, progress_callback)
-            elif fallback_mode == 'horizontal':
+            mode_name = {'vertical': '垂直', 'horizontal': '水平', 'grid': '网格'}.get(fallback_mode, '垂直')
+            if progress_callback:
+                progress_callback(len(images), len(images), f"🔄 回退到{mode_name}拼接 {len(images)} 张图片…")
+            if fallback_mode == 'horizontal':
                 return self._stitch_horizontal_with_overlap(images, progress_callback)
             elif fallback_mode == 'grid':
                 return self._grid_stitch(images, progress_callback)
             else:
                 return self._stitch_vertical_with_overlap(images, progress_callback)
-        except Exception as e:
-            if progress_callback:
-                progress_callback(0, 0, f"❌ 拼接异常: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             return None
     
     def _find_overlap_offset(self, img1: np.ndarray, img2: np.ndarray, direction='vertical') -> tuple:
@@ -622,63 +638,149 @@ class ProgressDialog(QDialog):
         self.btn_cancel.setEnabled(False)
         self.label_status.setText("已发出取消请求，等待当前步骤完成…")
 
+class ImageGrouper:
+    """
+    基于特征匹配的图片分组器：将可拼合的图片划为同一连通分量
+    """
+    def __init__(self, feature: str = 'ORB'):
+        self.feature = feature.upper()
+        if self.feature == 'SIFT' and hasattr(cv2, 'SIFT_create'):
+            self.detector = cv2.SIFT_create()
+            self.norm = cv2.NORM_L2
+        else:
+            self.detector = cv2.ORB_create(nfeatures=4000)
+            self.norm = cv2.NORM_HAMMING
+
+    def _compute_desc(self, img_gray: np.ndarray):
+        kp, des = self.detector.detectAndCompute(img_gray, None)
+        return kp, des
+
+    def _good_pair(self, des1, des2) -> bool:
+        if des1 is None or des2 is None:
+            return False
+        bf = cv2.BFMatcher(self.norm, crossCheck=False)
+        try:
+            matches = bf.knnMatch(des1, des2, k=2)
+        except cv2.error:
+            return False
+        good = []
+        for m in matches:
+            if len(m) != 2:
+                continue
+            m1, m2 = m
+            if m1.distance < 0.75 * m2.distance:
+                good.append(m1)
+        return len(good) >= 12
+
+    def group_images(self, paths: List[str], progress=None):
+        n = len(paths)
+        if n <= 1:
+            return ([], paths)
+        grays = []
+        descs = []
+        for i, p in enumerate(paths):
+            if progress:
+                progress(i+1, max(1, n), f"分组: 读取与特征提取 {Path(p).name}")
+            try:
+                data = np.fromfile(p, dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                img = None
+            if img is None:
+                grays.append(None)
+                descs.append(None)
+                continue
+            _, des = self._compute_desc(img)
+            grays.append(img)
+            descs.append(des)
+        adj = {i: set() for i in range(n)}
+        total_pairs = n*(n-1)//2
+        pair_idx = 0
+        for i in range(n):
+            for j in range(i+1, n):
+                pair_idx += 1
+                if progress:
+                    progress(pair_idx, max(1, total_pairs), f"分组: 匹配 {Path(paths[i]).name} ↔ {Path(paths[j]).name}")
+                if grays[i] is None or grays[j] is None:
+                    continue
+                if self._good_pair(descs[i], descs[j]):
+                    adj[i].add(j)
+                    adj[j].add(i)
+        visited = [False]*n
+        groups_idx = []
+        for i in range(n):
+            if visited[i]:
+                continue
+            stack = [i]
+            comp = []
+            while stack:
+                u = stack.pop()
+                if visited[u]:
+                    continue
+                visited[u] = True
+                comp.append(u)
+                for v in adj[u]:
+                    if not visited[v]:
+                        stack.append(v)
+            groups_idx.append(comp)
+        groups = []
+        discarded = []
+        for comp in groups_idx:
+            if len(comp) >= 2:
+                groups.append([paths[k] for k in comp])
+            else:
+                discarded.append(paths[comp[0]])
+        return groups, discarded
+
+
 class StitchThread(QThread):
-    """拼接工作线程"""
+    """拼接工作线程（带自动分组+Stitcher优先+可选回退）"""
     progress = Signal(int, int, str)
     finished = Signal(object)
     error = Signal(str)
-    
-    def __init__(self, directory: str, mode: str = 'scans', image_paths: Optional[List[str]] = None, fallback_mode: str = 'vertical'):
+
+    def __init__(self, directory: str, mode: str = 'scans', image_paths: Optional[List[str]] = None, fallback_mode: Optional[str] = None, enable_transparent: bool = False):
         super().__init__()
         self.directory = directory
         self.mode = mode
-        self.stitcher = ImageStitcher(mode=mode)
+        self.enable_transparent = enable_transparent
+        self.stitcher = ImageStitcher(mode=mode, enable_transparent=enable_transparent)
+        self.grouper = ImageGrouper(feature='ORB')
         self.image_paths = image_paths or []
         self.fallback_mode = fallback_mode
-    
+
     def run(self):
-        """执行拼接任务 - 简化版本，直接拼接所有图片"""
         try:
-            self.progress.emit(0, 100, "准备拼接...")
+            self.progress.emit(0, 100, "扫描目录…")
             image_paths = list(self.image_paths) if self.image_paths else self.stitcher.load_images(self.directory)
-            
             if not image_paths:
                 self.error.emit("未在目录中找到图片文件")
                 return
-            
-            if len(image_paths) < 1:
-                self.error.emit("需要至少1张图片")
+
+            self.progress.emit(0, 100, f"找到 {len(image_paths)} 张图片，开始自动分组…")
+            groups, discarded = self.grouper.group_images(image_paths, progress=self.progress.emit)
+
+            if not groups:
+                self.error.emit("未能找到可拼合的图片组。\n\n建议：\n- 确保相邻图片有30%以上重叠\n- 尝试切换拼接模式\n- 减少图片数量进行测试")
                 return
 
-            self.progress.emit(0, 100, f"将拼接 {len(image_paths)} 张图片...")
-            self.progress.emit(0, 100, f"图片列表: {[os.path.basename(p) for p in image_paths[:5]]}" + ("..." if len(image_paths) > 5 else ""))
-            
-            # 直接尝试拼接所有图片
-            pano = self.stitcher.stitch_images(
-                image_paths, 
-                progress_callback=self.progress.emit,
-                fallback_mode=self.fallback_mode
-            )
-            
-            self.progress.emit(100, 100, f"拼接方法返回: type={type(pano)}, is None={pano is None}")
-            if pano is not None and hasattr(pano, 'shape'):
-                self.progress.emit(100, 100, f"返回图像信息: shape={pano.shape}, dtype={pano.dtype}")
-            
-            if pano is not None:
-                self.progress.emit(100, 100, "拼接完成，准备发送结果...")
-                # 返回格式: [(paths, image)]
-                result_data = [([str(p) for p in image_paths], pano)]
-                self.progress.emit(100, 100, f"发送finished信号: len={len(result_data)}, 第一项类型={type(result_data[0])}")
-                self.finished.emit(result_data)
+            results = []
+            total = len(groups)
+            for idx, grp in enumerate(groups, start=1):
+                self.progress.emit(idx-1, total, f"拼接分组 {idx}/{total}（{len(grp)} 张）…")
+                pano = self.stitcher.stitch_images(grp, progress_callback=None, fallback_mode=self.fallback_mode)
+                if pano is not None:
+                    results.append((grp, pano))
+                else:
+                    discarded.extend(grp)
+
+            if results:
+                self.finished.emit(results)
             else:
-                self.progress.emit(100, 100, "拼接返回None，发送错误...")
-                self.error.emit("拼接失败。请尝试选择其他拼接模式或确保图片有重叠区域。")
+                self.error.emit("分组拼接均失败，未生成结果。")
 
         except Exception as e:
-            import traceback
-            err_msg = f"拼接过程出错: {str(e)}\n{traceback.format_exc()}"
-            self.progress.emit(100, 100, f"发生异常: {str(e)}")
-            self.error.emit(err_msg)
+            self.error.emit(f"拼接过程出错: {str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -754,6 +856,13 @@ class MainWindow(QMainWindow):
         self.fallback_combo.setCurrentIndex(0)
         self.fallback_combo.setToolTip("当OpenCV智能拼接失败时使用的备选方案")
         format_row.addWidget(self.fallback_combo)
+        
+        # 添加"输出透明通道"开关（默认不勾选，保持最高画质）
+        self.transparent_checkbox = QCheckBox("输出透明通道")
+        self.transparent_checkbox.setToolTip("勾选后将黑色背景转为透明\n注意：会影响画质，建议仅在需要时启用")
+        self.transparent_checkbox.setChecked(False)  # 默认关闭
+        format_row.addWidget(self.transparent_checkbox)
+        
         format_row.addStretch(1)
         top_settings.addLayout(format_row)
 
@@ -1280,8 +1389,32 @@ class MainWindow(QMainWindow):
             pass
     
     def _apply_global_styles(self):
-        """应用全局样式（占位方法）"""
-        pass
+        """应用全局样式和复选框样式"""
+        pal = self.palette()
+        try:
+            bg = pal.color(pal.ColorRole.Window)
+            txt = pal.color(pal.ColorRole.ButtonText)
+            hi = pal.color(pal.ColorRole.Highlight)
+            mid = pal.color(pal.ColorRole.Mid)
+        except Exception:
+            bg = pal.window().color()  # type: ignore
+            txt = pal.buttonText().color()  # type: ignore
+            hi = pal.highlight().color()  # type: ignore
+            mid = pal.mid().color()  # type: ignore
+        
+        base_txt = f"rgba({txt.red()},{txt.green()},{txt.blue()},255)"
+        hi_rgb = f"rgb({hi.red()},{hi.green()},{hi.blue()})"
+        hi_hover = f"rgba({hi.red()},{hi.green()},{hi.blue()},0.85)"
+        mid_rgb = f"rgb({mid.red()},{mid.green()},{mid.blue()})"
+        
+        self.setStyleSheet(
+            # 复选框样式：未勾选时空框，勾选时填充主题高亮色
+            "QCheckBox { spacing: 5px; }"
+            f"QCheckBox::indicator {{ width: 18px; height: 18px; border: 2px solid {mid_rgb}; border-radius: 3px; background-color: transparent; }}"
+            f"QCheckBox::indicator:hover {{ border-color: {hi_rgb}; }}"
+            f"QCheckBox::indicator:checked {{ background-color: {hi_rgb}; border-color: {hi_rgb}; }}"
+            f"QCheckBox::indicator:checked:hover {{ background-color: {hi_hover}; border-color: {hi_hover}; }}"
+        )
     
     def _on_subdirs_checkbox_changed(self, state):
         """复选框状态变化时刷新图片列表"""
@@ -1358,13 +1491,17 @@ class MainWindow(QMainWindow):
         fallback_mode = fallback_map.get(self.fallback_combo.currentText(), "vertical")
         fallback_name = self.fallback_combo.currentText()
         
+        # 读取透明通道设置
+        enable_transparent = self.transparent_checkbox.isChecked() if hasattr(self, 'transparent_checkbox') else False
+        
         # 直接开始，不再弹出确认对话框
         self.log(f"🚀 开始拼接 {len(image_paths_for_job)} 张图片")
         self.log(f"  模式: {mode_name}")
         self.log(f"  备选方案: {fallback_name}")
+        self.log(f"  透明通道: {'启用' if enable_transparent else '禁用（保持最高画质）'}")
         
         # 启动线程
-        self.stitch_thread = StitchThread(directory, mode, image_paths=image_paths_for_job, fallback_mode=fallback_mode)
+        self.stitch_thread = StitchThread(directory, mode, image_paths=image_paths_for_job, fallback_mode=fallback_mode, enable_transparent=enable_transparent)
         self.stitch_thread.progress.connect(self.update_progress)
         self.stitch_thread.finished.connect(self.on_stitch_finished)
         self.stitch_thread.error.connect(self.on_stitch_error)
