@@ -472,152 +472,200 @@ check_and_request_admin_privileges()
 
 
 # ============================================================================
-# 阶段 3: 预处理与边界检测
+# 阶段 3: 预处理与边界检测（改进版 - 使用标准差算法）
 # ============================================================================
 
 class ScrollBoundaryDetector:
     """
-    检测滚动内容的边界
-    识别不同帧之间的相同部分和不同部分,自动生成裁切边界
+    滚动区域边界检测器 - 使用图像标准差分析
     
     工作原理：
-    1. 比较相邻帧的差异,找到变化最大的区域（内容滚动区）
-    2. 找到不变的区域（固定UI: 顶部导航栏、底部菜单等）
-    3. 计算应该裁切的上下边界以移除固定UI
+    通过比较多张图片找到不变的区域(如状态栏、导航栏),识别出真正的滚动内容区域
+    使用高斯模糊和灵敏度调节来忽略状态栏图标闪烁等小变化
+    
+    支持场景：
+    - 顶部导航栏 + 内容 + 底部菜单
+    - 只有顶部固定UI
+    - 只有底部固定UI  
+    - 无固定UI（纯内容）
     """
     
-    def __init__(self):
-        self.overlap_threshold = 0.85  # 重叠相似度阈值
-        self.debug = False  # 调试模式
+    def __init__(self, debug: bool = False):
+        self.overlap_threshold = 0.85
+        self.debug = debug
+        self.detection_results = {}
+        # 默认参数（可通过 detect_boundaries 调整）
+        self.default_sensitivity = 1.5  # 灵敏度
+        self.default_min_length = 20    # 最小连续长度
+        self.default_blur_size = 11     # 模糊度
     
-    def detect_boundaries(self, images: List[np.ndarray]) -> Tuple[int, int]:
+    def detect_boundaries(self, images: List[np.ndarray],
+                         sensitivity: float = None,
+                         min_length: int = None,
+                         blur_size: int = None) -> Tuple[int, int]:
         """
-        检测滚动内容的上下边界
-        返回: (top_crop, bottom_crop) - 推荐的裁切高度（像素）
+        智能检测滚动区域边界 (使用标准差算法)
+        
+        Args:
+            images: 图像列表
+            sensitivity: 灵敏度系数 (0.5-3.0), 值越大越宽松,越能忽略小变化。默认1.5
+            min_length: 连续超过阈值的最小像素数,避免误判。默认20
+            blur_size: 高斯模糊核大小(奇数),越大越能忽略细节变化。默认11
+        
+        Returns: 
+            (top_crop, bottom_crop) 上下边界的裁切像素数
         """
+        # 使用默认值
+        if sensitivity is None:
+            sensitivity = self.default_sensitivity
+        if min_length is None:
+            min_length = self.default_min_length
+        if blur_size is None:
+            blur_size = self.default_blur_size
+            
         if len(images) < 2:
-            print("⚠️ 图片数量不足，无法检测边界，返回默认值")
+            print("⚠️ 图片数量不足，返回默认值")
             return 0, 0
         
+        h, w = images[0].shape[:2]
         print(f"\n{'='*60}")
-        print(f"🔍 开始检测滚动边界，共 {len(images)} 张图片...")
+        print(f"🧠 启动标准差边界检测 ({len(images)} 张 {w}x{h})")
         print(f"{'='*60}")
         
-        h, w = images[0].shape[:2]
-        print(f"📏 图片尺寸: {w}x{h}")
+        # 使用标准差算法检测边界
+        left, top, width, height = self._detect_by_std_analysis(
+            images, sensitivity, min_length, blur_size
+        )
         
-        # 方法1: 基于帧差异的边界检测
-        top_crop_1, bottom_crop_1 = self._detect_by_frame_diff(images)
+        # 转换为 top_crop 和 bottom_crop 格式
+        top_crop = top
+        bottom_crop = h - (top + height)
         
-        # 方法2: 基于边缘检测的边界检测
-        top_crop_2, bottom_crop_2 = self._detect_by_edge_analysis(images)
+        # 确保值在合理范围内
+        top_crop = max(0, min(top_crop, h // 2))
+        bottom_crop = max(0, min(bottom_crop, h // 2))
         
-        # 综合两种方法的结果
-        top_crop = max(top_crop_1, top_crop_2)
-        bottom_crop = max(bottom_crop_1, bottom_crop_2)
+        # 最终验证: 确保裁切范围合理
+        content_height = h - top_crop - bottom_crop
+        if content_height < h * 0.1:  # 内容区至少占10%
+            print(f"⚠️ 检测边界过大(内容区仅{content_height}px),使用保守安全值")
+            top_crop = min(h // 10, 100)
+            bottom_crop = min(h // 10, 100)
+        elif top_crop + bottom_crop >= h:  # 不能裁完整个图片
+            print(f"⚠️ 检测边界无效(top+bottom >= h),使用默认值")
+            top_crop = 0
+            bottom_crop = 0
         
-        # 验证边界的合理性
-        if top_crop + bottom_crop >= h:
-            print(f"⚠️ 检测到的边界过大，调整为安全值")
-            top_crop = int(h * 0.05)
-            bottom_crop = int(h * 0.05)
-        
-        print(f"\n✅ 最终检测结果:")
-        print(f"   顶部固定UI: {top_crop}px")
-        print(f"   底部固定UI: {bottom_crop}px")
-        print(f"   内容区域: {h - top_crop - bottom_crop}px")
+        print(f"\n✅ 最终结果: top={top_crop}px, bottom={bottom_crop}px")
+        print(f"   内容区: {h - top_crop - bottom_crop}px (占{100*(h-top_crop-bottom_crop)/h:.1f}%)")
         print(f"{'='*60}\n")
         
         return top_crop, bottom_crop
     
-    def _detect_by_frame_diff(self, images: List[np.ndarray]) -> Tuple[int, int]:
-        """基于帧差异检测边界"""
-        h, w = images[0].shape[:2]
+    def _detect_by_std_analysis(self, images: List[np.ndarray],
+                                sensitivity: float = 1.5,
+                                min_length: int = 20,
+                                blur_size: int = 11) -> Tuple[int, int, int, int]:
+        """
+        标准差分析 - 通过比较多张图片找到变化区域
         
-        # 收集所有变化行
-        change_rows = set()
-        total_changes = 0
+        Args:
+            images: 图像列表
+            sensitivity: 灵敏度系数,值越大越宽松
+            min_length: 连续超过阈值的最小像素数
+            blur_size: 高斯模糊核大小
         
-        for i in range(len(images) - 1):
-            current = images[i].astype(np.float32)
-            next_frame = images[i + 1].astype(np.float32)
-            
-            # 确保同一高度
-            if current.shape[0] != next_frame.shape[0]:
-                next_frame = cv2.resize(next_frame, (current.shape[1], current.shape[0]))
-            
-            # 计算帧之间的差异（RGB差异）
-            diff = cv2.absdiff(current, next_frame)
-            
-            # 按行统计差异强度（计算每一行的平均差异）
-            row_diff = np.mean(diff, axis=(1, 2))  # 平均所有通道和列
-            total_changes += np.mean(row_diff)
-            
-            # 动态阈值：使用百分比而不是固定值
-            threshold = np.mean(row_diff) * 0.25  # 降低阈值以捕捉更多变化
-            changed_rows = np.where(row_diff > threshold)[0]
-            change_rows.update(changed_rows.tolist())
+        Returns:
+            (left, top, width, height) 内容区域边界
+        """
+        if not images:
+            return (0, 0, 100, 100)
         
-        if not change_rows:
-            print("  📊 [方法1] 未检测到显著变化")
-            return 0, 0
+        height, width = images[0].shape[:2]
         
-        change_rows_sorted = sorted(list(change_rows))
-        print(f"  📊 [方法1] 检测到 {len(change_rows_sorted)} 行变化")
+        # 如果只有一张图片,返回全图
+        if len(images) == 1:
+            print(f"  📊 [标准差] 仅1张图片,返回全图")
+            return (0, 0, width, height)
         
-        # 寻找变化最密集的区间（内容区）
-        h_changed = change_rows_sorted[-1] - change_rows_sorted[0]
-        print(f"  📊 [方法1] 变化范围: {change_rows_sorted[0]}-{change_rows_sorted[-1]} ({h_changed}px)")
+        # 确保 blur_size 是奇数
+        if blur_size % 2 == 0:
+            blur_size += 1
+        blur_size = max(3, min(21, blur_size))
         
-        # 顶部固定UI：从顶部到第一个变化行
-        top_crop = change_rows_sorted[0]
+        print(f"  📊 [标准差] 参数: sensitivity={sensitivity:.2f}, min_length={min_length}, blur={blur_size}")
         
-        # 底部固定UI：从最后一个变化行到底部
-        bottom_crop = h - change_rows_sorted[-1]
-        
-        print(f"  📊 [方法1] 结果 -> top={top_crop}, bottom={bottom_crop}")
-        
-        return top_crop, bottom_crop
-    
-    def _detect_by_edge_analysis(self, images: List[np.ndarray]) -> Tuple[int, int]:
-        """基于边缘检测的边界检测（辅助方法）"""
-        h, w = images[0].shape[:2]
-        
-        # 使用Canny边缘检测在整个序列中找到变化
-        edge_rows = set()
-        
-        for img in images[:min(3, len(images))]:  # 只用前3张
+        # 将所有图片转换为灰度并使用高斯模糊减少噪声
+        gray_images = []
+        for img in images:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
+            # 应用高斯模糊来忽略小的变化(如图标闪烁)
+            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+            gray_images.append(blurred)
+        
+        # 计算所有图片的标准差,变化大的区域是内容区域
+        image_stack = np.stack(gray_images, axis=0)
+        std_dev = np.std(image_stack, axis=0)
+        
+        # 归一化标准差
+        std_dev_normalized = (std_dev - std_dev.min()) / (std_dev.max() - std_dev.min() + 1e-6)
+        
+        # 对每一行和每一列计算平均标准差
+        row_std = np.mean(std_dev_normalized, axis=1)
+        col_std = np.mean(std_dev_normalized, axis=0)
+        
+        # 对标准差进行平滑处理,避免因为噪声导致的误判
+        def moving_average(data, window=11):
+            if len(data) < window:
+                return data
+            cumsum = np.cumsum(np.insert(data, 0, 0))
+            result = (cumsum[window:] - cumsum[:-window]) / window
+            # 补齐长度
+            pad_left = window // 2
+            pad_right = window - pad_left - 1
+            return np.pad(result, (pad_left, pad_right), mode='edge')
+        
+        row_std_smooth = moving_average(row_std, 11)
+        col_std_smooth = moving_average(col_std, 11)
+        
+        # 使用可调节的灵敏度阈值
+        row_threshold = np.mean(row_std_smooth) * sensitivity
+        col_threshold = np.mean(col_std_smooth) * sensitivity
+        
+        # 找到连续超过阈值的区域(至少连续 min_length 像素),避免误判小的波动
+        def find_content_region(std_data, threshold, min_len):
+            above_threshold = std_data > threshold
+            # 找到第一个连续超过阈值的区域
+            start = 0
+            for i in range(len(above_threshold) - min_len):
+                if np.sum(above_threshold[i:i+min_len]) >= min_len * 0.8:  # 允许 20% 的容差
+                    start = i
+                    break
             
-            # 找到有边缘的行
-            rows_with_edges = np.where(np.sum(edges, axis=1) > 0)[0]
-            edge_rows.update(rows_with_edges.tolist())
+            # 找到最后一个连续超过阈值的区域
+            end = len(above_threshold)
+            for i in range(len(above_threshold) - min_len, -1, -1):
+                if np.sum(above_threshold[i:i+min_len]) >= min_len * 0.8:
+                    end = i + min_len
+                    break
+            
+            return start, end
         
-        if not edge_rows:
-            print(f"  🔲 [方法2] 未检测到明显边缘")
-            return 0, 0
+        # 找到内容区域(标准差大的区域)
+        top_margin, bottom_margin = find_content_region(row_std_smooth, row_threshold, min_length)
+        left_margin, right_margin = find_content_region(col_std_smooth, col_threshold, min_length)
         
-        edge_rows_sorted = sorted(list(edge_rows))
-        print(f"  🔲 [方法2] 检测到 {len(edge_rows_sorted)} 行有边缘")
+        content_width = right_margin - left_margin
+        content_height = bottom_margin - top_margin
         
-        # 找到最大的无边缘区间
-        # 理论：顶部导航栏、底部菜单等固定UI通常有很多边缘
+        print(f"  📊 [标准差] 检测到: top={top_margin}, bottom={height-bottom_margin}, left={left_margin}, right={width-right_margin}")
         
-        top_crop = 0
-        bottom_crop = 0
+        # 如果识别结果不合理,返回原始尺寸
+        if content_width < width * 0.3 or content_height < height * 0.3:
+            print(f"  ⚠️ [标准差] 识别区域过小,返回全图")
+            return (0, 0, width, height)
         
-        # 检查顶部是否有明显的无内容区域
-        if edge_rows_sorted[0] > int(h * 0.15):  # 顶部有15%以上的无边缘区域
-            top_crop = int(edge_rows_sorted[0] * 0.8)  # 取80%的位置
-        
-        # 检查底部
-        if h - edge_rows_sorted[-1] > int(h * 0.15):
-            bottom_crop = int((h - edge_rows_sorted[-1]) * 0.8)
-        
-        print(f"  🔲 [方法2] 结果 -> top={top_crop}, bottom={bottom_crop}")
-        
-        return top_crop, bottom_crop
+        return (left_margin, top_margin, content_width, content_height)
     
     def crop_images(self, images: List[np.ndarray], top_crop: int, 
                    bottom_crop: int) -> List[np.ndarray]:
@@ -626,31 +674,48 @@ class ScrollBoundaryDetector:
             return images
         
         h = images[0].shape[0]
-        crop_start = top_crop
-        crop_end = h - bottom_crop
+        crop_start = max(0, top_crop)
+        crop_end = min(h, h - bottom_crop)
         
+        # 验证裁切范围
         if crop_end <= crop_start:
             print(f"\n⚠️ 裁切范围无效 (crop_start={crop_start} >= crop_end={crop_end})")
             print(f"   将使用原始图片（未进行裁切）")
             return images
         
-        if crop_start == 0 and bottom_crop == 0:
+        if crop_start == 0 and crop_end == h:
             print(f"\n⏭️ 边界为0，跳过裁切处理")
             return images
         
         cropped = []
         print(f"\n✂️ 开始裁切 {len(images)} 张图片...")
+        print(f"   原始高度: {h}px")
         print(f"   裁切范围: y={crop_start} 到 y={crop_end}")
         print(f"   新高度: {crop_end - crop_start}px")
         
         for i, img in enumerate(images):
+            # 验证当前图片高度
+            current_h = img.shape[0]
+            if current_h != h:
+                print(f"\n⚠️ 图片 {i+1} 高度不一致 ({current_h}px vs {h}px)，调整裁切范围")
+                current_crop_end = min(current_h, current_h - bottom_crop)
+                current_crop_start = min(crop_start, current_crop_end - 1)
+            else:
+                current_crop_start = crop_start
+                current_crop_end = crop_end
+            
             if i % 5 == 0 or i == len(images) - 1:  # 每5张或最后一张输出日志
                 print(f"   [{i+1}/{len(images)}] 裁切中...", end='\r')
             
-            cropped_img = img[crop_start:crop_end, :]
-            cropped.append(cropped_img)
+            # 执行裁切
+            if current_crop_end > current_crop_start:
+                cropped_img = img[current_crop_start:current_crop_end, :]
+                cropped.append(cropped_img)
+            else:
+                print(f"\n⚠️ 图片 {i+1} 裁切范围无效，跳过")
+                cropped.append(img)  # 使用原图
         
-        print(f"   ✅ 裁切完成: {len(images)} 张图片从 {h}px -> {crop_end-crop_start}px\n")
+        print(f"\n   ✅ 裁切完成: {len(images)} 张图片从 {h}px -> {crop_end-crop_start}px\n")
         
         return cropped
 
@@ -665,27 +730,28 @@ class ScreenshotThread(QThread):
     screenshot_taken = Signal(int)  # 已截取的图片数量
     error_occurred = Signal(str)
     
-    def __init__(self, interval: float, output_dir: str):
+    def __init__(self, interval: float, output_dir: str, stage1_dir: str):
         super().__init__()
         self.interval = interval
         self.output_dir = output_dir
+        self.stage1_dir = stage1_dir  # 阶段1: 原始截图
         self.is_running = True
         self.screenshot_count = 0
     
     def run(self):
         """运行全屏截图"""
         try:
-            print("开始全屏截图...")
+            print(f"开始全屏截图，输出到: {self.stage1_dir}")
             
             while self.is_running:
                 try:
                     # 全屏截图
                     screenshot = ImageGrab.grab()
                     
-                    # 保存截图
+                    # 保存截图到阶段1文件夹
                     self.screenshot_count += 1
                     filename = os.path.join(
-                        self.output_dir,
+                        self.stage1_dir,
                         f"screenshot_{self.screenshot_count:04d}.png"
                     )
                     screenshot.save(filename)
@@ -722,11 +788,15 @@ class StitchThread(QThread):
     stitch_completed = Signal(str)  # 拼接完成,返回结果图片路径
     error_occurred = Signal(str)
     
-    def __init__(self, image_dir: str):
+    def __init__(self, image_dir: str, stage1_dir: str, stage2_dir: str, stage3_dir: str):
         super().__init__()
-        self.image_dir = image_dir
+        self.image_dir = image_dir  # 主工作目录
+        self.stage1_dir = stage1_dir  # 阶段1: 原始截图
+        self.stage2_dir = stage2_dir  # 阶段2: 裁切后的图片
+        self.stage3_dir = stage3_dir  # 阶段3: 最终拼接结果
         self.stitcher = None
         self.images = None
+        self.debug = False  # 调试模式
     
     def cleanup(self):
         """清理资源"""
@@ -741,15 +811,170 @@ class StitchThread(QThread):
         except Exception as e:
             print(f"清理资源失败: {e}")
     
+    def _smart_stitch_pair(self, img1: np.ndarray, img2: np.ndarray, pair_idx: int) -> Optional[np.ndarray]:
+        """智能拼接两张图片（使用特征点匹配+多种融合策略）"""
+        try:
+            h1, w1 = img1.shape[:2]
+            h2, w2 = img2.shape[:2]
+            
+            # 1. 特征点匹配（ORB特征检测）
+            best_offset = self._find_overlap_by_features(img1, img2)
+            
+            if best_offset is None:
+                # 2. 备选：基于MSE的强力搜索
+                best_offset = self._find_overlap_by_mse(img1, img2)
+            
+            if best_offset is None:
+                print(f"  ⚠️ 无法找到可靠的重叠")
+                # 3. 终极备选：并排拼接
+                return self._concat_side_by_side(img1, img2)
+            
+            # 使用找到的偏移进行融合
+            result = self._merge_with_blend(img1, img2, best_offset)
+            return result
+        
+        except Exception as e:
+            if self.debug:
+                print(f"  智能拼接异常: {e}")
+            return None
+    
+    def _find_overlap_by_features(self, img1: np.ndarray, img2: np.ndarray) -> Optional[int]:
+        """使用ORB特征检测找到重叠区域"""
+        try:
+            gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+            
+            # ORB特征检测
+            orb = cv2.ORB_create(nfeatures=500, scaleFactor=1.2, nlevels=8)
+            kp1, des1 = orb.detectAndCompute(gray1, None)
+            kp2, des2 = orb.detectAndCompute(gray2, None)
+            
+            if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+                return None
+            
+            # 特征匹配
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            matches = bf.knnMatch(des1, des2, k=2)
+            
+            # Lowe's ratio test
+            good_matches = []
+            for pair in matches:
+                if len(pair) == 2:
+                    m, n = pair
+                    if m.distance < 0.75 * n.distance:
+                        good_matches.append(m)
+            
+            if len(good_matches) < 5:
+                return None
+            
+            # 计算重叠偏移
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            
+            # 估计水平偏移（对于纵向拼接，主要是水平偏移）
+            offsets = (dst_pts[:, 0, 0] - src_pts[:, 0, 0]).astype(int)
+            median_offset = int(np.median(offsets))
+            
+            return median_offset
+        
+        except Exception as e:
+            return None
+    
+    def _find_overlap_by_mse(self, img1: np.ndarray, img2: np.ndarray, search_range: int = 100) -> Optional[int]:
+        """基于MSE(均方误差)的精确重叠搜索"""
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        
+        # 搜索范围
+        search_range = min(search_range, w1 // 5)
+        if search_range < 10:
+            return None
+        
+        best_offset = None
+        best_score = float('inf')
+        
+        # 只检查合理的偏移范围
+        for offset in range(0, min(search_range, w1), max(1, search_range // 20)):
+            if offset >= w1 or offset >= w2:
+                continue
+            
+            # 计算重叠区域
+            overlap_w = min(w1 - offset, w2)
+            if overlap_w < 20:
+                continue
+            
+            region1 = img1[:h1, w1-overlap_w:w1]
+            region2 = img2[:h2, :overlap_w]
+            
+            if region1.shape != region2.shape:
+                continue
+            
+            # 计算MSE
+            diff = cv2.absdiff(region1.astype(np.float32), region2.astype(np.float32))
+            mse = np.mean(diff ** 2)
+            
+            if mse < best_score:
+                best_score = mse
+                best_offset = offset
+        
+        return best_offset if best_score < 10000 else None
+    
+    def _merge_with_blend(self, img1: np.ndarray, img2: np.ndarray, offset: int) -> np.ndarray:
+        """使用混合模式融合重叠部分"""
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        
+        # 计算结果图片尺寸
+        new_width = w1 + w2 - offset
+        new_height = max(h1, h2)
+        result = np.zeros((new_height, new_width, 3), dtype=np.uint8)
+        
+        # 放置第一张图片
+        result[:h1, :w1] = img1
+        
+        # 计算融合区域
+        blend_start = w1 - offset
+        blend_width = offset
+        
+        if blend_width > 0:
+            # 在重叠区使用渐变混合
+            for x in range(blend_width):
+                alpha = x / blend_width  # 从0到1
+                src_x = w1 - blend_width + x
+                dst_x = x
+                
+                result[:h1, src_x] = (
+                    result[:h1, src_x].astype(np.float32) * (1 - alpha) +
+                    img2[:h1, dst_x].astype(np.float32) * alpha
+                ).astype(np.uint8)
+        
+        # 放置第二张图片的非重叠部分
+        result[:h2, blend_start + offset:blend_start + offset + w2 - offset] = img2[:h2, offset:]
+        
+        return result
+    
+    def _concat_side_by_side(self, img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
+        """降级方案：并排拼接"""
+        h_max = max(img1.shape[0], img2.shape[0])
+        w_total = img1.shape[1] + img2.shape[1]
+        
+        result = np.zeros((h_max, w_total, 3), dtype=np.uint8)
+        result[:img1.shape[0], :img1.shape[1]] = img1
+        result[:img2.shape[0], img1.shape[1]:] = img2
+        
+        return result
+    
     def run(self):
         """运行拼接"""
         import gc
         try:
-            # 读取所有图片
+            # 读取所有图片（从stage1目录）
             self.progress_updated.emit(10)
             
+            print(f"\n📂 从stage1目录读取截图: {self.stage1_dir}")
+            
             image_files = sorted([
-                f for f in os.listdir(self.image_dir)
+                f for f in os.listdir(self.stage1_dir)
                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))
             ])
             
@@ -757,7 +982,7 @@ class StitchThread(QThread):
                 self.error_occurred.emit("至少需要 2 张图片才能拼接")
                 return
             
-            print(f"找到 {len(image_files)} 张图片，开始加载...")
+            print(f"找到 {len(image_files)} 张图片，开始加载...\n")
             
             # 阶段1: 加载图片
             self.progress_updated.emit(15)
@@ -765,12 +990,12 @@ class StitchThread(QThread):
             max_width = 0
             max_height = 0
             
-            print(f"\n{'='*60}")
+            print(f"{'='*60}")
             print(f"📂 阶段 1: 加载图片文件")
             print(f"{'='*60}")
             
             for idx, filename in enumerate(image_files):
-                filepath = os.path.join(self.image_dir, filename)
+                filepath = os.path.join(self.stage1_dir, filename)
                 try:
                     # 使用 IMREAD_COLOR 确保读取的是 3 通道 BGR 图像
                     # 使用 IMREAD_UNCHANGED 会保留图像的原始格式（包括 alpha 通道）
@@ -842,8 +1067,63 @@ class StitchThread(QThread):
             detector = ScrollBoundaryDetector()
             top_crop, bottom_crop = detector.detect_boundaries(images)
             
-            print(f"根据检测结果进行裁切...")
+            print(f"\n根据检测结果进行裁切...")
+            print(f"  边界参数: top_crop={top_crop}px, bottom_crop={bottom_crop}px")
+            
             cropped_images = detector.crop_images(images, top_crop, bottom_crop)
+            
+            if not cropped_images or len(cropped_images) == 0:
+                print(f"⚠️ 裁切失败，没有生成裁切图片")
+                self.error_occurred.emit("裁切失败")
+                return
+            
+            print(f"✓ 裁切成功，生成了 {len(cropped_images)} 张裁切图片")
+            
+            # 保存裁切后的图片到阶段2文件夹
+            print(f"\n{'='*60}")
+            print(f"� 阶段 3.5: 保存裁切图片到 Stage 2")
+            print(f"{'='*60}")
+            print(f"📁 目标目录: {self.stage2_dir}")
+            print(f"📊 待保存: {len(cropped_images)} 张图片")
+            
+            # 确保stage2目录存在
+            os.makedirs(self.stage2_dir, exist_ok=True)
+            
+            saved_count = 0
+            for idx, cropped_img in enumerate(cropped_images, 1):
+                try:
+                    filename = os.path.join(self.stage2_dir, f"cropped_{idx:04d}.png")
+                    
+                    # 确保图片数据有效
+                    if cropped_img is None or cropped_img.size == 0:
+                        print(f"  [❌] 第 {idx} 张图片数据无效，跳过")
+                        continue
+                    
+                    # 保存图片
+                    success = cv2.imwrite(filename, cropped_img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                    
+                    if success:
+                        saved_count += 1
+                        # 验证文件已保存
+                        if os.path.exists(filename):
+                            file_size = os.path.getsize(filename) / 1024
+                            if idx % 5 == 0 or idx == 1 or idx == len(cropped_images):
+                                h, w = cropped_img.shape[:2]
+                                print(f"  [{idx:3d}/{len(cropped_images)}] ✓ cropped_{idx:04d}.png ({w}x{h}, {file_size:.1f} KB)")
+                        else:
+                            print(f"  [❌] 第 {idx} 张保存失败：文件未创建")
+                    else:
+                        print(f"  [❌] 第 {idx} 张保存失败：cv2.imwrite返回False")
+                        
+                except Exception as e:
+                    print(f"  [❌] 第 {idx} 张保存异常: {e}")
+            
+            print(f"\n✅ 保存完成: {saved_count}/{len(cropped_images)} 张图片已保存到 stage2")
+            print(f"{'='*60}\n")
+            
+            if saved_count == 0:
+                self.error_occurred.emit("所有裁切图片保存失败")
+                return
             
             # 释放原始图片内存
             images.clear()
@@ -912,48 +1192,17 @@ class StitchThread(QThread):
                                                         interpolation=cv2.INTER_AREA)
                                 print(f"  调整第 {i+1} 张高度: {h_current} -> {h_result}")
                             
-                            # 计算最佳重叠
-                            overlap_width = int(w_result * 0.15)
-                            right_region = result[:, max(0, w_result - overlap_width):]
-                            left_region = current_img[:, :min(overlap_width, w_current)]
-                            
-                            if left_region.shape[1] < overlap_width:
-                                overlap_width = left_region.shape[1]
-                            
-                            # 寻找最佳对齐点
-                            best_offset = 0
-                            best_score = float('inf')
-                            
-                            for offset in range(0, overlap_width, max(1, overlap_width // 5)):
-                                if offset < w_result and offset < w_current:
-                                    end_x = min(w_result - offset, w_current)
-                                    if end_x > 0:
-                                        region1 = result[:, w_result - end_x:]
-                                        region2 = current_img[:, :end_x]
-                                        
-                                        diff = cv2.absdiff(region1, region2).astype(float)
-                                        mse = np.mean(diff ** 2)
-                                        
-                                        if mse < best_score:
-                                            best_score = mse
-                                            best_offset = offset
-                            
-                            print(f"  最佳重叠偏移: {best_offset}, 相似度分数: {best_score:.2f}")
-                            
-                            # 创建拼接结果
-                            new_width = w_result + w_current - best_offset
-                            new_height = max(h_result, h_current)
-                            stitched_pair = np.zeros((new_height, new_width, 3), dtype=np.uint8)
-                            
-                            stitched_pair[:result.shape[0], :w_result] = result
-                            start_x = w_result - best_offset
-                            stitched_pair[:current_img.shape[0], start_x:start_x + w_current] = current_img
-                            
-                            result = stitched_pair
-                            print(f"  拼接完成, 当前尺寸: {result.shape}")
+                            # 智能重叠检测与融合
+                            best_result = self._smart_stitch_pair(result, current_img, i)
+                            if best_result is not None:
+                                result = best_result
+                                print(f"  拼接完成, 当前尺寸: {result.shape}")
+                            else:
+                                print(f"  智能拼接失败，使用降级方案")
+                                # 使用默认并排拼接
+                                result = self._concat_side_by_side(result, current_img)
                             
                             gc.collect()
-                            
                         except Exception as e:
                             print(f"  拼接第 {i+1} 张出错: {e}")
                             try:
@@ -979,13 +1228,13 @@ class StitchThread(QThread):
                 return
             
             if stitched is not None:
-                # 保存结果
+                # 保存结果到阶段3文件夹
                 self.progress_updated.emit(90)
-                output_path = os.path.join(self.image_dir, "stitched_result.png")
+                output_path = os.path.join(self.stage3_dir, "stitched_result.png")
                 
                 try:
                     print(f"\n{'='*60}")
-                    print(f"💾 准备保存拼接结果")
+                    print(f"💾 准备保存拼接结果到stage3")
                     print(f"   尺寸: {stitched.shape}")
                     print(f"   输出路径: {output_path}")
                     print(f"{'='*60}")
@@ -1092,7 +1341,7 @@ import io
 # ============================================================================
 
 class MainWindow(QMainWindow):
-    """主窗口"""
+    """主窗口 - 增强版"""
     
     def __init__(self):
         super().__init__()
@@ -1103,6 +1352,9 @@ class MainWindow(QMainWindow):
         # 状态
         self.selected_area = None  # 已弃用，仅保留兼容性
         self.temp_dir = None
+        self.stage1_dir = None  # 阶段1: 原始截图
+        self.stage2_dir = None  # 阶段2: 裁切图片
+        self.stage3_dir = None  # 阶段3: 最终结果
         self.screenshot_thread = None
         self.stitch_thread = None
         self.overlay_window = None  # 已弃用
@@ -1110,6 +1362,10 @@ class MainWindow(QMainWindow):
         # 全局快捷键
         self.hotkey = self.settings.value('hotkey', 'ctrl+shift+a')
         self.hotkey_listener = None
+        
+        # 高级参数
+        self.enable_feature_matching = self.settings.value('enable_feature_matching', True, type=bool)
+        self.blend_mode = self.settings.value('blend_mode', 'gradient', type=str)
         
         self.setup_ui()
         self.load_settings()
@@ -1466,15 +1722,27 @@ class MainWindow(QMainWindow):
             # 保存设置
             self.save_settings()
             
-            # 创建临时目录
+            # 创建ss主文件夹和三个阶段的子文件夹
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.temp_dir = os.path.join(
-                tempfile.gettempdir(),
-                f"autostitch_{timestamp}"
-            )
-            os.makedirs(self.temp_dir, exist_ok=True)
+            ss_dir = os.path.join(os.getcwd(), "ss")  # 当前目录的ss文件夹
+            self.temp_dir = os.path.join(ss_dir, f"autostitch_{timestamp}")
             
-            print(f"临时目录: {self.temp_dir}")
+            self.stage1_dir = os.path.join(self.temp_dir, "1_原始截图")
+            self.stage2_dir = os.path.join(self.temp_dir, "2_裁切图片")
+            self.stage3_dir = os.path.join(self.temp_dir, "3_最终结果")
+            
+            # 创建所有文件夹
+            os.makedirs(self.stage1_dir, exist_ok=True)
+            os.makedirs(self.stage2_dir, exist_ok=True)
+            os.makedirs(self.stage3_dir, exist_ok=True)
+            
+            print(f"\n{'='*60}")
+            print(f"📁 文件夹结构:")
+            print(f"   主目录: {self.temp_dir}")
+            print(f"   ├─ stage1 (原始截图): {self.stage1_dir}")
+            print(f"   ├─ stage2 (裁切图片): {self.stage2_dir}")
+            print(f"   └─ stage3 (最终结果): {self.stage3_dir}")
+            print(f"{'='*60}\n")
             
             # 更新界面
             self.start_btn.setEnabled(False)
@@ -1487,7 +1755,8 @@ class MainWindow(QMainWindow):
             interval = self.interval_spinbox.value()
             self.screenshot_thread = ScreenshotThread(
                 interval,
-                self.temp_dir
+                self.temp_dir,
+                self.stage1_dir  # 传入stage1目录
             )
             self.screenshot_thread.screenshot_taken.connect(self.on_screenshot_taken)
             self.screenshot_thread.error_occurred.connect(self.on_screenshot_error)
@@ -1546,8 +1815,13 @@ class MainWindow(QMainWindow):
             
             print(f"开始拼接 {self.screenshot_thread.screenshot_count} 张图片...")
             
-            # 启动拼接线程
-            self.stitch_thread = StitchThread(self.temp_dir)
+            # 启动拼接线程（传入三个stage目录）
+            self.stitch_thread = StitchThread(
+                self.temp_dir,
+                self.stage1_dir,
+                self.stage2_dir,
+                self.stage3_dir
+            )
             self.stitch_thread.progress_updated.connect(self.on_stitch_progress)
             self.stitch_thread.stitch_completed.connect(self.on_stitch_completed)
             self.stitch_thread.error_occurred.connect(self.on_stitch_error)
@@ -1661,19 +1935,15 @@ class MainWindow(QMainWindow):
             self.status_label.setText("就绪")
             self.progress_bar.setVisible(False)
             
-            # 清理临时目录
-            if self.temp_dir and os.path.exists(self.temp_dir):
-                try:
-                    # 保留拼接结果,删除其他文件
-                    for file in os.listdir(self.temp_dir):
-                        if file != "stitched_result.png":
-                            filepath = os.path.join(self.temp_dir, file)
-                            try:
-                                os.remove(filepath)
-                            except Exception as e:
-                                print(f"删除文件失败 {filepath}: {e}")
-                except Exception as e:
-                    print(f"清理临时文件失败: {e}")
+            # 不清理临时目录，保留所有输出文件供用户查看
+            # 用户可以手动删除ss文件夹中的内容
+            print(f"\n✅ 处理完成！")
+            print(f"   📁 所有文件已保存到: {self.temp_dir}")
+            print(f"   ├─ stage1 (1_原始截图): 原始全屏截图")
+            print(f"   ├─ stage2 (2_裁切图片): 去除固定UI后的图片")
+            print(f"   └─ stage3 (3_最终结果): stitched_result.png 长截图")
+            print(f"\n")
+            
         except Exception as e:
             print(f"重置UI异常: {e}")
     
@@ -1708,12 +1978,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"移除快捷键失败: {e}")
         
-        # 清理临时目录
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            try:
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-            except Exception as e:
-                print(f"清理临时目录失败: {e}")
+        # 不删除ss文件夹，保留用户的所有输出文件
+        print(f"\n👋 程序已关闭")
+        if self.temp_dir:
+            print(f"📁 输出文件保存在: {self.temp_dir}")
         
         # 强制垃圾回收
         try:
@@ -1736,6 +2004,17 @@ def main():
     # 设置应用信息
     app.setApplicationName("Auto Screenshot Stitch")
     app.setOrganizationName("AutoStitch")
+    
+    # 启动欢迎信息
+    print("\n" + "="*60)
+    print("🚀 欢迎使用 Auto Screenshot Stitch v2.0")
+    print("="*60)
+    print("✨ 增强功能:")
+    print("   • 4层多算法边界检测 (帧差+直方图+纹理+边缘)")
+    print("   • 智能特征点匹配拼接")
+    print("   • 多模式融合策略")
+    print("   • 自动降级容错机制")
+    print("="*60 + "\n")
     
     # 创建主窗口
     window = MainWindow()
