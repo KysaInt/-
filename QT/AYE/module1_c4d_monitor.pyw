@@ -573,12 +573,9 @@ class C4DMonitorWidget(QWidget):
 
     def update_ui(self, history_text, status_text):
         sb = self.history_view.verticalScrollBar()
-        if not self.auto_scroll_enabled:
-            old_max = sb.maximum()
-            old_value = sb.value()
-            distance_from_bottom = old_max - old_value
-        else:
-            distance_from_bottom = 0
+        # 当用户手动滚动后（auto_scroll_enabled=False），在刷新期间保持原始滚动值，
+        # 避免因内容增加而按照“距底部距离”推进，导致阅读位置被不断向下顶。
+        preserve_value = sb.value() if not self.auto_scroll_enabled else None
 
         self._suppress_scroll_signal = True
         self._set_history_html(history_text)
@@ -586,8 +583,9 @@ class C4DMonitorWidget(QWidget):
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
             new_max = sb.maximum()
-            target = max(0, new_max - distance_from_bottom)
-            sb.setValue(target)
+            # 保持刷新前的位置，若超出新范围则夹紧
+            target = min(preserve_value if preserve_value is not None else 0, new_max)
+            sb.setValue(max(0, target))
         self._suppress_scroll_signal = False
         # 更新固定行文本内容（虽然名为固定行，但可显示动态统计）
         self.fixed_line_label.setText(status_text)
@@ -595,12 +593,8 @@ class C4DMonitorWidget(QWidget):
     def log_message(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
         sb = self.history_view.verticalScrollBar()
-        if not self.auto_scroll_enabled:
-            old_max = sb.maximum()
-            old_value = sb.value()
-            distance_from_bottom = old_max - old_value
-        else:
-            distance_from_bottom = 0
+        # 在手动滚动暂停自动滚动期间，记录原始滚动值，刷新后保持不变。
+        preserve_value = sb.value() if not self.auto_scroll_enabled else None
 
         self._suppress_scroll_signal = True
         self.history_view.append(f"[{timestamp}] {message}")
@@ -608,8 +602,8 @@ class C4DMonitorWidget(QWidget):
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
             new_max = sb.maximum()
-            target = max(0, new_max - distance_from_bottom)
-            sb.setValue(target)
+            target = min(preserve_value if preserve_value is not None else 0, new_max)
+            sb.setValue(max(0, target))
         self._suppress_scroll_signal = False
 
     def open_folder(self):
