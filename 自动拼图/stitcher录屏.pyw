@@ -163,6 +163,60 @@ def remove_install_lock():
     except:
         pass
 
+# ============================================================================
+# 通用: 路径与环境工具
+# ============================================================================
+
+def get_desktop_path() -> str:
+    """在 Windows 下获取当前用户桌面路径, 带 OneDrive 兼容回退。
+
+    返回优先级:
+    1) shell32.SHGetFolderPathW(CSIDL_DESKTOPDIRECTORY)
+    2) %USERPROFILE%/Desktop
+    3) %OneDrive%/Desktop
+    4) Path.home()/Desktop
+    5) 当前工作目录
+    """
+    # 1) 使用 Windows Shell API
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(260)
+        CSIDL_DESKTOPDIRECTORY = 0x0010
+        SHGetFolderPathW = ctypes.windll.shell32.SHGetFolderPathW
+        # HRESULT == 0 表示成功
+        if SHGetFolderPathW(None, CSIDL_DESKTOPDIRECTORY, None, 0, buf) == 0:
+            desktop = buf.value
+            if desktop and os.path.isdir(desktop):
+                return desktop
+    except Exception:
+        pass
+
+    # 2) 环境变量 USERPROFILE
+    userprofile = os.environ.get('USERPROFILE')
+    if userprofile:
+        candidate = os.path.join(userprofile, 'Desktop')
+        if os.path.isdir(candidate):
+            return candidate
+
+    # 3) OneDrive/Desktop
+    onedrive = os.environ.get('OneDrive')
+    if onedrive:
+        candidate = os.path.join(onedrive, 'Desktop')
+        if os.path.isdir(candidate):
+            return candidate
+
+    # 4) Path.home()/Desktop
+    try:
+        candidate = str(Path.home() / 'Desktop')
+        if os.path.isdir(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # 5) 兜底: 当前工作目录
+    return os.getcwd()
+
 if DEBUG:
     print("=" * 60)
     print("依赖检查开始...")
@@ -429,7 +483,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox, QProgressBar,
-    QGroupBox, QFormLayout, QCheckBox
+    QGroupBox, QFormLayout, QCheckBox, QShortcut
 )
 
 import cv2
@@ -438,6 +492,59 @@ from PIL import ImageGrab, Image
 import win32clipboard
 import keyboard
 import threading
+# 将 keyboard 风格的热键字符串转换为 Qt 的 QKeySequence 字符串
+def to_qt_hotkey(hk: str) -> str:
+    try:
+        parts = [p.strip() for p in hk.split('+') if p.strip()]
+        mapping = {
+            'ctrl': 'Ctrl',
+            'shift': 'Shift',
+            'alt': 'Alt',
+            'win': 'Meta',  # Qt 使用 Meta 代表 Windows 键
+        }
+        qt_parts = [mapping.get(p.lower(), p.upper() if len(p) == 1 else p.capitalize()) for p in parts]
+        return '+'.join(qt_parts)
+    except Exception:
+        return hk
+
+
+# ============================================================================
+# 通用: OpenCV 安全写入（兼容中文/Unicode 路径）
+# ============================================================================
+
+def safe_imwrite(filepath: str, image: np.ndarray, params: Optional[list] = None) -> bool:
+    """使用 imencode + Python 文件写入，规避 Windows 下 Unicode 路径导致的 cv2.imwrite 失败。
+    依据扩展名选择编码格式：.png 或 .jpg/.jpeg。
+    返回 True/False 表示写入是否成功。
+    """
+    try:
+        ext = os.path.splitext(filepath)[1].lower()
+        # 默认参数
+        if params is None:
+            if ext in ['.jpg', '.jpeg']:
+                params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+            else:
+                params = [cv2.IMWRITE_PNG_COMPRESSION, 9]
+
+        # 选择编码格式
+        encode_ext = '.png'
+        if ext in ['.jpg', '.jpeg']:
+            encode_ext = '.jpg'
+
+        success, buf = cv2.imencode(encode_ext, image, params)
+        if not success:
+            return False
+        # 确保目录存在
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'wb') as f:
+            f.write(buf.tobytes())
+        return True
+    except Exception as e:
+        try:
+            print(f"safe_imwrite 失败: {e} -> {filepath}")
+        except:
+            pass
+        return False
 
 
 # ============================================================================
@@ -1099,8 +1206,8 @@ class StitchThread(QThread):
                         print(f"  [❌] 第 {idx} 张图片数据无效，跳过")
                         continue
                     
-                    # 保存图片
-                    success = cv2.imwrite(filename, cropped_img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                    # 保存图片（兼容中文路径）
+                    success = safe_imwrite(filename, cropped_img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
                     
                     if success:
                         saved_count += 1
@@ -1113,7 +1220,7 @@ class StitchThread(QThread):
                         else:
                             print(f"  [❌] 第 {idx} 张保存失败：文件未创建")
                     else:
-                        print(f"  [❌] 第 {idx} 张保存失败：cv2.imwrite返回False")
+                        print(f"  [❌] 第 {idx} 张保存失败：写入失败")
                         
                 except Exception as e:
                     print(f"  [❌] 第 {idx} 张保存异常: {e}")
@@ -1251,14 +1358,14 @@ class StitchThread(QThread):
                     # 使用高质量 PNG 压缩（压缩等级 9，无损质量）
                     # PNG 压缩等级: 0-9，值越大压缩率越高，但都是无损压缩
                     # 9 是最大压缩，但保证图像质量不损失
-                    success = cv2.imwrite(
-                        output_path, 
-                        stitched, 
+                    success = safe_imwrite(
+                        output_path,
+                        stitched,
                         [cv2.IMWRITE_PNG_COMPRESSION, 9]
                     )
                     
                     if not success:
-                        self.error_occurred.emit("❌ 无法保存拼接结果（cv2.imwrite 返回 False）")
+                        self.error_occurred.emit("❌ 无法保存拼接结果（写入失败）")
                         return
                     
                     # 验证文件已保存
@@ -1361,7 +1468,8 @@ class MainWindow(QMainWindow):
         
         # 全局快捷键
         self.hotkey = self.settings.value('hotkey', 'ctrl+shift+a')
-        self.hotkey_listener = None
+        self.hotkey_listener = None  # keyboard 库的注册标记
+        self.hotkey_shortcut = None  # Qt 内部快捷键回退
         
         # 高级参数
         self.enable_feature_matching = self.settings.value('enable_feature_matching', True, type=bool)
@@ -1560,12 +1668,26 @@ class MainWindow(QMainWindow):
         """设置全局快捷键 - 使用 keyboard 库（需要管理员权限）"""
         try:
             # 移除旧的热键监听
-            if self.hotkey_listener is not None:
+            if self.hotkey_listener:
                 try:
                     keyboard.remove_hotkey(self.hotkey)
-                    print(f"✓ 已移除旧快捷键: {self.hotkey}")
-                except:
+                    print(f"✓ 已移除旧快捷键(keyboard): {self.hotkey}")
+                except Exception as e:
+                    print(f"移除旧快捷键失败(keyboard): {e}")
+                finally:
+                    self.hotkey_listener = None
+
+            # 移除旧的 QShortcut
+            if getattr(self, 'hotkey_shortcut', None) is not None:
+                try:
+                    self.hotkey_shortcut.activated.disconnect()
+                except Exception:
                     pass
+                try:
+                    self.hotkey_shortcut.setParent(None)
+                except Exception:
+                    pass
+                self.hotkey_shortcut = None
             
             # 验证快捷键格式
             if not self.hotkey or '+' not in self.hotkey:
@@ -1577,8 +1699,12 @@ class MainWindow(QMainWindow):
             try:
                 keyboard.add_hotkey(self.hotkey, self._hotkey_callback, suppress=False)
                 self.hotkey_listener = True  # 标记已设置
-                print(f"✓ 快捷键已激活: {self.hotkey}")
-                QMessageBox.information(self, "成功", f"快捷键已激活: {self.hotkey}\n\n现在可以按此快捷键开始/停止")
+                print(f"✓ 全局快捷键已激活(keyboard): {self.hotkey}")
+                # 同时注册窗口级回退快捷键，防止 keyboard 因权限或焦点问题失效
+                qt_seq = to_qt_hotkey(self.hotkey)
+                self.hotkey_shortcut = QShortcut(QKeySequence(qt_seq), self)
+                self.hotkey_shortcut.activated.connect(self.hotkey_triggered)
+                print(f"✓ 窗口快捷键已激活(QShortcut): {qt_seq}")
             except ValueError as e:
                 print(f"❌ 快捷键格式错误: {e}")
                 QMessageBox.warning(self, "错误", f"快捷键格式错误: {e}\n\n请检查快捷键格式")
@@ -1586,12 +1712,28 @@ class MainWindow(QMainWindow):
             except PermissionError:
                 print(f"❌ 需要管理员权限才能使用快捷键")
                 QMessageBox.critical(self, "权限错误", "需要管理员权限才能使用快捷键\n\n程序已以管理员身份启动，但快捷键仍不可用。\n请尝试重启程序。")
-                print(f"   请以管理员身份运行程序")
+                print(f"   尝试使用窗口快捷键回退方案")
                 self.hotkey_listener = False
+                # 回退：使用窗口级 QShortcut，让窗口内也可触发
+                try:
+                    qt_seq = to_qt_hotkey(self.hotkey)
+                    self.hotkey_shortcut = QShortcut(QKeySequence(qt_seq), self)
+                    self.hotkey_shortcut.activated.connect(self.hotkey_triggered)
+                    print(f"✓ 窗口快捷键已激活(QShortcut): {qt_seq}")
+                except Exception as e2:
+                    print(f"❌ 回退快捷键设置失败(QShortcut): {e2}")
                 return
             except Exception as e:
                 print(f"❌ 快捷键设置失败: {e}")
                 self.hotkey_listener = False
+                # 回退到窗口快捷键
+                try:
+                    qt_seq = to_qt_hotkey(self.hotkey)
+                    self.hotkey_shortcut = QShortcut(QKeySequence(qt_seq), self)
+                    self.hotkey_shortcut.activated.connect(self.hotkey_triggered)
+                    print(f"✓ 窗口快捷键已激活(QShortcut): {qt_seq}")
+                except Exception as e2:
+                    print(f"❌ 回退快捷键设置失败(QShortcut): {e2}")
                 return
             
         except Exception as e:
@@ -1722,10 +1864,11 @@ class MainWindow(QMainWindow):
             # 保存设置
             self.save_settings()
             
-            # 创建ss主文件夹和三个阶段的子文件夹
+            # 在桌面创建输出主文件夹和三个阶段的子文件夹
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            ss_dir = os.path.join(os.getcwd(), "ss")  # 当前目录的ss文件夹
-            self.temp_dir = os.path.join(ss_dir, f"autostitch_{timestamp}")
+            desktop_base = os.path.join(get_desktop_path(), "AutoStitch输出")
+            os.makedirs(desktop_base, exist_ok=True)
+            self.temp_dir = os.path.join(desktop_base, f"autostitch_{timestamp}")
             
             self.stage1_dir = os.path.join(self.temp_dir, "1_原始截图")
             self.stage2_dir = os.path.join(self.temp_dir, "2_裁切图片")
@@ -1737,8 +1880,8 @@ class MainWindow(QMainWindow):
             os.makedirs(self.stage3_dir, exist_ok=True)
             
             print(f"\n{'='*60}")
-            print(f"📁 文件夹结构:")
-            print(f"   主目录: {self.temp_dir}")
+            print(f"📁 输出文件夹结构:")
+            print(f"   主目录(桌面): {self.temp_dir}")
             print(f"   ├─ stage1 (原始截图): {self.stage1_dir}")
             print(f"   ├─ stage2 (裁切图片): {self.stage2_dir}")
             print(f"   └─ stage3 (最终结果): {self.stage3_dir}")
@@ -1936,7 +2079,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setVisible(False)
             
             # 不清理临时目录，保留所有输出文件供用户查看
-            # 用户可以手动删除ss文件夹中的内容
+            # 用户可在桌面“AutoStitch输出”中自行管理输出内容
             print(f"\n✅ 处理完成！")
             print(f"   📁 所有文件已保存到: {self.temp_dir}")
             print(f"   ├─ stage1 (1_原始截图): 原始全屏截图")
@@ -1978,7 +2121,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"移除快捷键失败: {e}")
         
-        # 不删除ss文件夹，保留用户的所有输出文件
+        # 不删除输出文件夹，保留用户的所有输出文件
         print(f"\n👋 程序已关闭")
         if self.temp_dir:
             print(f"📁 输出文件保存在: {self.temp_dir}")
