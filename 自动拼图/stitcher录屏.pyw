@@ -478,12 +478,12 @@ from PySide6.QtCore import (
     Qt, QThread, Signal, QSettings, QSize, QRect, QPoint, QTimer
 )
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QFont, QPixmap, QImage, QKeySequence, QIcon
+    QPainter, QColor, QPen, QFont, QPixmap, QImage, QKeySequence, QIcon, QShortcut
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox, QProgressBar,
-    QGroupBox, QFormLayout, QCheckBox, QShortcut
+    QGroupBox, QFormLayout, QCheckBox
 )
 
 import cv2
@@ -555,6 +555,7 @@ def check_and_request_admin_privileges():
     """检查并请求管理员权限（确保快捷键有效）"""
     import ctypes
     import sys
+    import os
     
     try:
         # 检查是否已有管理员权限
@@ -562,12 +563,31 @@ def check_and_request_admin_privileges():
             print("✓ 已获得管理员权限")
             return True
         else:
-            print("⚠ 未获得管理员权限，尝试重启...")
-            # 重启程序并请求管理员权限
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, " ".join(sys.argv), None, 1
-            )
-            sys.exit(0)
+            # 是否自动尝试提权，默认不自动，以避免在部分环境里造成无法启动
+            auto_elevate = os.environ.get('AUTO_ELEVATE', '0') == '1'
+            if not auto_elevate:
+                print("⚠ 未获得管理员权限，将以普通权限继续运行（部分全局快捷键可能不可用）。\n  如需开启全局热键，请右键以管理员身份运行，或设置环境变量 AUTO_ELEVATE=1 后重启。")
+                return False
+            print("⚠ 未获得管理员权限，尝试以管理员权限重启...")
+            # 重启程序并请求管理员权限；若用户拒绝或失败，则继续以普通权限运行
+            try:
+                # 仅传入脚本路径作为参数，避免空格/特殊字符解析问题
+                script_path = sys.argv[0]
+                # 对路径加引号，保证包含空格/非 ASCII 时能正确解析
+                params = f'"{script_path}"'
+                rc = ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", sys.executable, params, None, 1
+                )
+                # ShellExecuteW 返回值 > 32 表示成功启动了新进程
+                if rc > 32:
+                    # 成功发起提权启动，退出当前普通权限进程
+                    sys.exit(0)
+                else:
+                    print("⚠ 管理员权限请求被拒绝或失败，将继续以普通权限运行（快捷键可能不可用）")
+                    return False
+            except Exception as ee:
+                print(f"⚠ 申请管理员权限时发生异常：{ee}，将继续以普通权限运行（快捷键可能不可用）")
+                return False
     except Exception as e:
         print(f"⚠ 管理员权限检查失败: {e}")
         # 继续执行，但快捷键可能不可用
