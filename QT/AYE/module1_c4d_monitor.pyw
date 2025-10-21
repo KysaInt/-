@@ -497,8 +497,8 @@ class C4DMonitorWidget(QWidget):
 
     def _on_custom_dir_checkbox_changed(self, state):
         """处理指定目录复选框状态变化"""
-        # 更稳妥的枚举比较（避免 .value 差异）
-        is_checked = (state == Qt.CheckState.Checked)
+        # stateChanged 传入的是 int，这里与枚举的 .value 比较更稳妥
+        is_checked = (state == Qt.CheckState.Checked.value)
         self.custom_dir_button.setEnabled(is_checked)
         self.stats['use_custom_dir'] = bool(is_checked)
 
@@ -532,6 +532,7 @@ class C4DMonitorWidget(QWidget):
         """选择自定义目录"""
         # 获取当前目录(如果已设置)或使用默认路径
         current_dir = self.stats.get('custom_dir', str(Path.home()))
+        self.log_message("打开目录选择对话框…")
         
         directory = QFileDialog.getExistingDirectory(
             self,
