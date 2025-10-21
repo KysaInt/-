@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTextEdit,
-    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame, QMenu, QMessageBox, QCheckBox, QFileDialog
+    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame, QMenu, QMessageBox
 )
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette, QAction
@@ -207,23 +207,10 @@ class Worker(QThread):
         self.wait()
 
     def main_logic(self):
-        # 检查是否使用指定目录
-        use_custom_dir = self.stats.get('use_custom_dir', False)
-        custom_dir = self.stats.get('custom_dir', '')
-        
-        if use_custom_dir and custom_dir and os.path.isdir(custom_dir):
-            # 使用指定目录下的0文件夹
-            folder_path = os.path.join(custom_dir, '0')
-        else:
-            # 默认:脚本所在目录的上一级目录中的'0'文件夹
-            # 例如: QT\AYE\module1_c4d_monitor.pyw -> QT\0
-            folder_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
-        
+        # 目标目录现在是脚本所在目录的上两级的'0'目录
+        folder_path = str(Path(os.path.abspath(__file__)).parent.parent / '0')
         # 确保目标目录存在
         os.makedirs(folder_path, exist_ok=True)
-        # 记录当前目标目录，便于“打开”按钮使用
-        self.stats['last_target_folder'] = folder_path
-        
         history = self.stats['history']
         last_move_time = self.stats.get('last_move_time', None)
         moved_count = self.stats.get('moved_count', 0)
@@ -457,24 +444,6 @@ class C4DMonitorWidget(QWidget):
         grid.addWidget(self.font_scale_label, row, 2)
         row += 1
 
-        # 指定目录复选框和选择按钮
-        grid.addWidget(QLabel("指定目录:"), row, 0)
-        self.custom_dir_checkbox = QCheckBox()
-        self.custom_dir_checkbox.setChecked(False)
-        grid.addWidget(self.custom_dir_checkbox, row, 1)
-        self.custom_dir_button = QPushButton("选择...")
-        self.custom_dir_button.setEnabled(False)  # 默认禁用
-        grid.addWidget(self.custom_dir_button, row, 2)
-        row += 1
-        
-        # 显示当前选择的目录路径
-        grid.addWidget(QLabel("目录路径:"), row, 0)
-        self.custom_dir_label = QLabel("未选择")
-        self.custom_dir_label.setWordWrap(True)
-        self.custom_dir_label.setStyleSheet("color: gray;")
-        grid.addWidget(self.custom_dir_label, row, 1, 1, 2)
-        row += 1
-
 
         self.settings_box.setContentLayout(grid)
         parent_layout.addWidget(self.settings_box)
@@ -483,87 +452,13 @@ class C4DMonitorWidget(QWidget):
         self.stats['fill_char'] = (self.fill_char_edit.text() or '█')[0]
         self.stats['bar_width'] = self.bar_width_spin.value()
         self.stats['global_scale'] = self.scale_slider.value() / 100.0
-        self.stats['use_custom_dir'] = False
-        self.stats['custom_dir'] = ''
 
         # 信号连接
         self.fill_char_edit.textChanged.connect(self._settings_changed)
         self.bar_width_spin.valueChanged.connect(self._settings_changed)
         self.scale_slider.valueChanged.connect(self._scale_changed)
         self.font_scale_slider.valueChanged.connect(self._font_scale_changed)
-        self.custom_dir_checkbox.stateChanged.connect(self._on_custom_dir_checkbox_changed)
-        self.custom_dir_button.clicked.connect(self._select_custom_directory)
-    # 已移除最小非零块设置,保留其余信号
-
-    def _on_custom_dir_checkbox_changed(self, state):
-        """处理指定目录复选框状态变化"""
-        # stateChanged 传入的是 int，这里与枚举的 .value 比较更稳妥
-        is_checked = (state == Qt.CheckState.Checked.value)
-        self.custom_dir_button.setEnabled(is_checked)
-        self.stats['use_custom_dir'] = bool(is_checked)
-
-        # 勾选但未选择目录时，立即弹出选择框；取消时恢复显示
-        if is_checked:
-            if not self.stats.get('custom_dir') or not os.path.isdir(self.stats.get('custom_dir')):
-                self._select_custom_directory()
-                # 若用户取消选择，则回退勾选状态
-                if not self.stats.get('custom_dir'):
-                    self.custom_dir_checkbox.blockSignals(True)
-                    self.custom_dir_checkbox.setChecked(False)
-                    self.custom_dir_checkbox.blockSignals(False)
-                    self.custom_dir_button.setEnabled(False)
-                    self.stats['use_custom_dir'] = False
-                    return
-            # 到这里表示有有效目录，创建 0 并提示
-            zero_dir = os.path.join(self.stats['custom_dir'], '0')
-            try:
-                os.makedirs(zero_dir, exist_ok=True)
-                # 让“打开”按钮可立即打开此目录
-                self.stats['last_target_folder'] = zero_dir
-                self.log_message(f"已切换监控目录到: {zero_dir}")
-            except Exception as e:
-                self.log_message(f"创建目录失败: {e}")
-        else:
-            # 如果取消勾选,重置目录显示
-            self.custom_dir_label.setText("未选择")
-            self.custom_dir_label.setStyleSheet("color: gray;")
-    
-    def _select_custom_directory(self):
-        """选择自定义目录"""
-        # 获取当前目录(如果已设置)或使用默认路径
-        current_dir = self.stats.get('custom_dir', str(Path.home()))
-        self.log_message("打开目录选择对话框…")
-        
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "选择目标目录",
-            current_dir,
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-        
-        if directory:
-            self.stats['custom_dir'] = directory
-            # 显示选择的路径(缩短显示)
-            display_path = directory
-            if len(display_path) > 40:
-                display_path = "..." + display_path[-37:]
-            self.custom_dir_label.setText(display_path)
-            self.custom_dir_label.setStyleSheet("color: white;")
-            self.custom_dir_label.setToolTip(directory)  # 完整路径在工具提示中显示
-            # 若复选框未勾选，此处也启用
-            if not self.custom_dir_checkbox.isChecked():
-                self.custom_dir_checkbox.blockSignals(True)
-                self.custom_dir_checkbox.setChecked(True)
-                self.custom_dir_checkbox.blockSignals(False)
-                self.stats['use_custom_dir'] = True
-            # 立即创建 0 并更新“打开”按钮指向
-            zero_dir = os.path.join(directory, '0')
-            try:
-                os.makedirs(zero_dir, exist_ok=True)
-                self.stats['last_target_folder'] = zero_dir
-                self.log_message(f"指定目录已设置: {directory} (监控子目录: {zero_dir})")
-            except Exception as e:
-                self.log_message(f"创建目录失败: {e}")
+    # 已移除最小非零块设置，保留其余信号
 
     def _font_scale_changed(self, val):
         self.font_scale_label.setText(str(val))
