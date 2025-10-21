@@ -221,6 +221,9 @@ class Worker(QThread):
         
         # 确保目标目录存在
         os.makedirs(folder_path, exist_ok=True)
+        # 记录当前目标目录，便于“打开”按钮使用
+        self.stats['last_target_folder'] = folder_path
+        
         history = self.stats['history']
         last_move_time = self.stats.get('last_move_time', None)
         moved_count = self.stats.get('moved_count', 0)
@@ -494,12 +497,34 @@ class C4DMonitorWidget(QWidget):
 
     def _on_custom_dir_checkbox_changed(self, state):
         """处理指定目录复选框状态变化"""
-        is_checked = (state == Qt.CheckState.Checked.value)
+        # 更稳妥的枚举比较（避免 .value 差异）
+        is_checked = (state == Qt.CheckState.Checked)
         self.custom_dir_button.setEnabled(is_checked)
-        self.stats['use_custom_dir'] = is_checked
-        
-        # 如果取消勾选,重置目录显示
-        if not is_checked:
+        self.stats['use_custom_dir'] = bool(is_checked)
+
+        # 勾选但未选择目录时，立即弹出选择框；取消时恢复显示
+        if is_checked:
+            if not self.stats.get('custom_dir') or not os.path.isdir(self.stats.get('custom_dir')):
+                self._select_custom_directory()
+                # 若用户取消选择，则回退勾选状态
+                if not self.stats.get('custom_dir'):
+                    self.custom_dir_checkbox.blockSignals(True)
+                    self.custom_dir_checkbox.setChecked(False)
+                    self.custom_dir_checkbox.blockSignals(False)
+                    self.custom_dir_button.setEnabled(False)
+                    self.stats['use_custom_dir'] = False
+                    return
+            # 到这里表示有有效目录，创建 0 并提示
+            zero_dir = os.path.join(self.stats['custom_dir'], '0')
+            try:
+                os.makedirs(zero_dir, exist_ok=True)
+                # 让“打开”按钮可立即打开此目录
+                self.stats['last_target_folder'] = zero_dir
+                self.log_message(f"已切换监控目录到: {zero_dir}")
+            except Exception as e:
+                self.log_message(f"创建目录失败: {e}")
+        else:
+            # 如果取消勾选,重置目录显示
             self.custom_dir_label.setText("未选择")
             self.custom_dir_label.setStyleSheet("color: gray;")
     
@@ -524,6 +549,20 @@ class C4DMonitorWidget(QWidget):
             self.custom_dir_label.setText(display_path)
             self.custom_dir_label.setStyleSheet("color: white;")
             self.custom_dir_label.setToolTip(directory)  # 完整路径在工具提示中显示
+            # 若复选框未勾选，此处也启用
+            if not self.custom_dir_checkbox.isChecked():
+                self.custom_dir_checkbox.blockSignals(True)
+                self.custom_dir_checkbox.setChecked(True)
+                self.custom_dir_checkbox.blockSignals(False)
+                self.stats['use_custom_dir'] = True
+            # 立即创建 0 并更新“打开”按钮指向
+            zero_dir = os.path.join(directory, '0')
+            try:
+                os.makedirs(zero_dir, exist_ok=True)
+                self.stats['last_target_folder'] = zero_dir
+                self.log_message(f"指定目录已设置: {directory} (监控子目录: {zero_dir})")
+            except Exception as e:
+                self.log_message(f"创建目录失败: {e}")
 
     def _font_scale_changed(self, val):
         self.font_scale_label.setText(str(val))
