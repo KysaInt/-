@@ -1,14 +1,15 @@
 {
   "default_output": true,
-  "srt_enabled": false,
+  "srt_enabled": true,
   "extra_line_output": true,
   "line_length": 28,
-  "subtitle_rule": "rule_3",
+  "subtitle_rule": "rule_2",
   "selected_voices": [
-    "zh-CN-XiaoxiaoNeural",
+    "zh-CN-XiaoxiaoMultilingualNeural",
+    "zh-CN-YunyangNeural",
     "zh-CN-YunyiMultilingualNeural"
   ],
-  "voice_rate": "+0%",
+  "voice_rate": "+25%",
   "voice_pitch": "+0Hz",
   "voice_volume": "+0%",
   "enable_emotion": true,
@@ -21,9 +22,9 @@
     "log": true
   },
   "window_geometry": [
-    964,
-    244,
+    415,
+    22,
     642,
-    861
+    1450
   ]
 }
