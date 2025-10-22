@@ -10,10 +10,10 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTextEdit,
-    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame, QMenu, QMessageBox
+    QLabel, QPushButton, QHBoxLayout, QSizePolicy, QLineEdit, QSpinBox, QSlider, QGridLayout, QFrame, QMenu, QMessageBox, QSplitter
 )
-from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette, QAction
+from PySide6.QtCore import QThread, Signal, Qt, QTimer, QPropertyAnimation, QEasingCurve, QEvent, QSettings
+from PySide6.QtGui import QTextCursor, QFontDatabase, QPalette, QAction, QPixmap
 
 
 def format_seconds(seconds):
@@ -271,6 +271,8 @@ class Worker(QThread):
                     
                     # 只对主RGB文件进行统计和记录
                     if not channel_suffix:
+                        # 记录最新移动的主图像文件路径，用于预览
+                        self.stats['last_moved_image'] = dst
                         now = time.time()
                         timestamp_str = datetime.fromtimestamp(now).strftime('%H:%M:%S')
                         
@@ -345,6 +347,9 @@ class C4DMonitorWidget(QWidget):
         self.log_file_path = Path(os.path.abspath(__file__)).with_name('render_history.log')
         self._loaded_history_count = 0  # 已载入的历史行数量
 
+        # 设置持久化存储
+        self.settings = QSettings('AYE', 'C4DMonitor')
+
         # 周期性保存日志（防止异常退出丢失）
         self._periodic_save_timer = QTimer(self)
         self._periodic_save_timer.timeout.connect(self.save_history)
@@ -389,6 +394,39 @@ class C4DMonitorWidget(QWidget):
 
         self._init_settings_panel(layout)
 
+        # ---- 预览折叠框（位于设置栏下方）使用可调整大小的容器 ----
+        self.preview_box = ResizableCollapsibleBox("预览", self.settings)
+        preview_layout = QVBoxLayout()
+        preview_layout.setContentsMargins(6, 6, 6, 6)
+        preview_layout.setAlignment(Qt.AlignTop)
+        self.preview_label = QLabel("无预览")
+        self.preview_label.setAlignment(Qt.AlignCenter | Qt.AlignTop)
+        self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.preview_label.setMinimumHeight(100)
+        self.preview_label.setObjectName("previewLabel")
+        # 设置样式使其支持透明背景显示（棋盘格背景）
+        self.preview_label.setStyleSheet("""
+            QLabel#previewLabel {
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #808080, stop:1 #606060
+                );
+                background-image: 
+                    repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,.05) 10px, rgba(255,255,255,.05) 20px),
+                    repeating-linear-gradient(-45deg, transparent, transparent 10px, rgba(0,0,0,.05) 10px, rgba(0,0,0,.05) 20px);
+            }
+        """)
+        preview_layout.addWidget(self.preview_label)
+        self.preview_box.setContentLayout(preview_layout)
+        self.preview_box.expanded.connect(self._force_update_preview)
+        layout.addWidget(self.preview_box)
+
+        # 预览内部状态
+        self._last_preview_path = None
+        self._original_preview_pixmap = None
+        # 监听 label 尺寸变化以保持等比缩放
+        self.preview_label.installEventFilter(self)
+
         # ---- 主文本窗口置于最底部并可伸展 ----
         self.history_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.history_view, 1)
@@ -400,6 +438,11 @@ class C4DMonitorWidget(QWidget):
         self._auto_scroll_reenable_timer.setSingleShot(True)
         self._auto_scroll_reenable_timer.timeout.connect(self._reenable_auto_scroll)
         self.history_view.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
+
+    def eventFilter(self, obj, event):
+        if obj is self.preview_label and event.type() == QEvent.Resize:
+            self._apply_scaled_preview()
+        return super().eventFilter(obj, event)
 
     # ---------------- 设置面板实现 ----------------
     def _init_settings_panel(self, parent_layout: QVBoxLayout):
@@ -589,6 +632,62 @@ class C4DMonitorWidget(QWidget):
         self._suppress_scroll_signal = False
         # 更新固定行文本内容（虽然名为固定行，但可显示动态统计）
         self.fixed_line_label.setText(status_text)
+        # 如有新文件则更新预览
+        self.update_preview_if_needed()
+
+    # ---------------- 预览逻辑 ----------------
+    def update_preview_if_needed(self):
+        """常规更新：只在路径变化时才更新"""
+        path = self.stats.get('last_moved_image')
+        if path and path != self._last_preview_path and os.path.exists(path):
+            self._set_preview_image(path)
+            self._last_preview_path = path
+    
+    def _force_update_preview(self):
+        """强制更新：展开预览框时调用，重新加载最新图片"""
+        path = self.stats.get('last_moved_image')
+        if path and os.path.exists(path):
+            # 强制重新加载，即使路径相同
+            self._last_preview_path = None
+            self._set_preview_image(path)
+            self._last_preview_path = path
+        elif not path:
+            self.preview_label.setText("暂无图片")
+            self.preview_label.setPixmap(QPixmap())
+        else:
+            self.preview_label.setText("图片文件不存在")
+            self.preview_label.setPixmap(QPixmap())
+
+    def _set_preview_image(self, path: str):
+        try:
+            # 使用 QPixmap 加载图片，它会自动保留 PNG 的 alpha 通道
+            pix = QPixmap(path)
+            if pix.isNull():
+                self._original_preview_pixmap = None
+                self.preview_label.setText("预览加载失败")
+                self.preview_label.setPixmap(QPixmap())
+                return
+            self._original_preview_pixmap = pix
+            self.preview_label.setText("")
+            self._apply_scaled_preview()
+        except Exception as e:
+            self.preview_label.setText(f"预览加载失败: {e}")
+            self.preview_label.setPixmap(QPixmap())
+
+    def _apply_scaled_preview(self):
+        """应用缩放后的预览图，保持透明通道"""
+        if not self._original_preview_pixmap:
+            return
+        label_size = self.preview_label.size()
+        if label_size.width() <= 0 or label_size.height() <= 0:
+            return
+        # 使用 SmoothTransformation 并保持宽高比缩放
+        scaled = self._original_preview_pixmap.scaled(
+            label_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
 
     def log_message(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -730,9 +829,150 @@ class C4DMonitorWidget(QWidget):
                 QMessageBox.warning(self, '错误', f'清空日志失败: {e}')
                 print(f"清空日志失败: {e}")
 
-class CollapsibleBox(QWidget):
-    def __init__(self, title="", parent=None):
+class ResizableHandle(QWidget):
+    """可拖动的调整大小手柄"""
+    def __init__(self, parent=None):
         super().__init__(parent)
+        self.setFixedHeight(8)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: transparent;
+            }
+            QWidget:hover {
+                background-color: rgba(100, 100, 100, 100);
+            }
+        """)
+        self._dragging = False
+        self._start_pos = None
+        self._start_height = 0
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._start_pos = event.globalPosition().toPoint()
+            if self.parent():
+                self._start_height = self.parent().content_area.height()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self.parent():
+            delta = event.globalPosition().toPoint().y() - self._start_pos.y()
+            new_height = max(100, self._start_height + delta)
+            self.parent().setContentHeight(new_height)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            if self.parent():
+                self.parent().saveHeight()
+            event.accept()
+
+class ResizableCollapsibleBox(QWidget):
+    """支持调整大小的可折叠框"""
+    expanded = Signal()
+    
+    def __init__(self, title="", settings=None, parent=None):
+        super().__init__(parent)
+        self._base_title = title
+        self._settings = settings
+        self._settings_key = f"CollapsibleBox_{title}_height"
+        
+        self.toggle_button = QPushButton(title)
+        font = self.toggle_button.font()
+        font.setBold(True)
+        self.toggle_button.setFont(font)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+
+        self.content_area = QFrame()
+        self.content_area.setFrameShape(QFrame.StyledPanel)
+        self.content_area.setMaximumHeight(0)
+        self.content_area.setMinimumHeight(0)
+        
+        # 可拖动的调整大小手柄
+        self.resize_handle = ResizableHandle(self)
+
+        self.toggle_animation = QPropertyAnimation(self.content_area, b"maximumHeight")
+        self.toggle_animation.setDuration(250)
+        self.toggle_animation.setEasingCurve(QEasingCurve.InOutCubic)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.toggle_button)
+        lay.addWidget(self.resize_handle)
+        lay.addWidget(self.content_area)
+
+        self.toggle_button.clicked.connect(self._on_toggled)
+        self._update_arrow(False)
+        
+        # 加载保存的高度
+        self._saved_height = self._load_height()
+
+    def setContentLayout(self, layout):
+        old = self.content_area.layout()
+        if old is not None:
+            while old.count():
+                it = old.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.setParent(None)
+        self.content_area.setLayout(layout)
+        self.content_area.setMaximumHeight(0)
+
+    def _on_toggled(self, checked: bool):
+        self._update_arrow(checked)
+        # 使用保存的高度或默认高度
+        content_height = self._saved_height if checked else 0
+        self.toggle_animation.stop()
+        self.toggle_animation.setStartValue(self.content_area.maximumHeight())
+        self.toggle_animation.setEndValue(content_height)
+        
+        # 关闭时需要同时设置 minimumHeight 为 0
+        if not checked:
+            self.content_area.setMinimumHeight(0)
+        else:
+            self.content_area.setMinimumHeight(content_height)
+        
+        self.toggle_animation.start()
+        
+        # 显示/隐藏调整手柄
+        self.resize_handle.setVisible(checked)
+        
+        if checked:
+            self.expanded.emit()
+
+    def _update_arrow(self, expanded: bool):
+        arrow = '▼' if expanded else '►'
+        base = self._base_title if getattr(self, '_base_title', None) else ""
+        self.toggle_button.setText(f"{arrow} {base}")
+
+    def setContentHeight(self, height: int):
+        """设置内容区域高度"""
+        height = max(100, min(height, 1000))  # 限制在 100-1000 之间
+        self.content_area.setMaximumHeight(height)
+        self.content_area.setMinimumHeight(height)
+        self._saved_height = height
+
+    def saveHeight(self):
+        """保存当前高度到设置"""
+        if self._settings:
+            self._settings.setValue(self._settings_key, self._saved_height)
+
+    def _load_height(self):
+        """从设置加载高度"""
+        if self._settings:
+            return self._settings.value(self._settings_key, 300, type=int)
+        return 300
+
+class CollapsibleBox(QWidget):
+    expanded = Signal()
+    def __init__(self, title="", fixed_content_height=None, parent=None):
+        super().__init__(parent)
+        self._base_title = title
+        self._fixed_content_height = fixed_content_height
         self.toggle_button = QPushButton(title)
         font = self.toggle_button.font()
         font.setBold(True)
@@ -771,15 +1011,22 @@ class CollapsibleBox(QWidget):
 
     def _on_toggled(self, checked: bool):
         self._update_arrow(checked)
-        content_height = self.content_area.layout().sizeHint().height() if self.content_area.layout() else 0
+        # 如果指定了固定高度，使用固定高度；否则使用 layout 的 sizeHint
+        if self._fixed_content_height:
+            content_height = self._fixed_content_height
+        else:
+            content_height = self.content_area.layout().sizeHint().height() if self.content_area.layout() else 0
         self.toggle_animation.stop()
         self.toggle_animation.setStartValue(self.content_area.maximumHeight())
         self.toggle_animation.setEndValue(content_height if checked else 0)
         self.toggle_animation.start()
+        if checked:
+            self.expanded.emit()
 
     def _update_arrow(self, expanded: bool):
         arrow = '▼' if expanded else '►'
-        self.toggle_button.setText(f"{arrow} 设置")
+        base = self._base_title if getattr(self, '_base_title', None) else ""
+        self.toggle_button.setText(f"{arrow} {base}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
