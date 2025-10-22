@@ -1,0 +1,152 @@
+AYE PySide6 UI 风格规范（精简版）
+
+目标：统一 QT 目录下 .pyw 的 UI 风格，后续直接复用本规范的布局约定、组件骨架与少量样式片段，即可快速搭建同风格界面。
+
+一、总体基调与主题
+- 框架：PySide6（Qt Widgets）。
+- 主题：遵循系统/Qt 主题，不硬编码主色。主色统一取 QPalette.Highlight，背景取 QPalette.Base，文本取 QPalette.Text，灰度取 QPalette.Mid。
+- 对比度：按需对高亮色做轻微调整，保证在深/浅主题下都有可读性（常用空条颜色 #555555 作为对比基线）。
+
+二、页面骨架（通用布局）
+- 根布局：QVBoxLayout(self)
+	- contentsMargins(0,0,0,0) 或小边距；整体 spacing 2~6。
+- 顶部“信息行”：QHBoxLayout
+	- 左侧 QLabel（Expanding, Fixed 高度）用于状态/统计，objectName 可用 fixedLineLabel。
+	- 右侧小按钮（如“打开/刷新”），Fixed 尺寸。
+- 设置面板：使用可折叠 CollapsibleBox（标题“设置”或具体业务名），内容多用 QGridLayout；常见控件：QLineEdit/QSpinBox/QSlider/QCheckBox/QComboBox。
+- 主内容区：放在最底部并设置 Expanding，常见为 QTextEdit（日志/富文本）或 QScrollArea + 卡片列表；主区负责“占满剩余空间”。
+
+三、可折叠面板（CollapsibleBox）
+- 标题按钮左侧使用箭头图标文本指示展开状态：收起► / 展开▼。
+- 展开/收起动画：QPropertyAnimation 作用于 content_area.maximumHeight，时长 250~300ms，缓动 InOutCubic/Quart。
+- 常用实现要点：
+	1) toggle_button.setCheckable(True)，checked 决定展开。
+	2) content_area 初始 maximumHeight=0（收起）；展开时设为 sizeHint 高度或“可扩展上限”。
+	3) setContentLayout(newLayout) 前先清空旧 layout 的子控件，避免泄漏与叠加。
+
+（精简参考实现）
+class CollapsibleBox(QWidget):
+		def __init__(self, title="", parent=None, duration=250):
+				super().__init__(parent)
+				self._title = title
+				self.toggle_button = QPushButton()
+				f = self.toggle_button.font(); f.setBold(True); self.toggle_button.setFont(f)
+				self.toggle_button.setCheckable(True); self.toggle_button.setChecked(False)
+				self.content_area = QFrame(); self.content_area.setFrameShape(QFrame.StyledPanel)
+				self.content_area.setMaximumHeight(0); self.content_area.setMinimumHeight(0)
+				self.anim = QPropertyAnimation(self.content_area, b"maximumHeight")
+				self.anim.setDuration(duration); self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+				lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
+				lay.addWidget(self.toggle_button); lay.addWidget(self.content_area)
+				self.toggle_button.clicked.connect(self._on_toggled)
+				self._update_arrow(False)
+
+		def setContentLayout(self, layout):
+				old = self.content_area.layout()
+				if old:
+						while old.count():
+								it = old.takeAt(0); w = it.widget();
+								if w: w.setParent(None)
+				self.content_area.setLayout(layout); self.content_area.setMaximumHeight(0)
+
+		def _on_toggled(self, checked):
+				self._update_arrow(checked)
+				h = self.content_area.layout().sizeHint().height() if self.content_area.layout() else 0
+				self.anim.stop(); self.anim.setStartValue(self.content_area.maximumHeight())
+				self.anim.setEndValue(h if checked else 0); self.anim.start()
+
+		def _update_arrow(self, expanded):
+				self.toggle_button.setText(("▼ " if expanded else "► ") + self._title)
+
+四、颜色与字体（统一取色与对比）
+- 字体：日志/等宽显示用 QFontDatabase.SystemFont.FixedFont。
+- 高亮色：palette().color(QPalette.Highlight)。如需增强对比，可做轻度校正：
+	ensure_contrast_color(highlight, base_bg, '#555555') → 返回改良后的高亮色。
+- 背景与文本：分别取 QPalette.Base 与 QPalette.Text；避免硬编码背景色。
+
+（对比度辅助：精简版思想）
+def ensure_contrast_color(fg_hex, *bg_hex_list, min_ratio=2.2):
+		# 若前景与任意背景对比度 < min_ratio，则微调亮度/色相到更易读的区间；
+		# 具体实现可参考现有代码中的 ensure_contrast_color 逻辑。
+		return fg_hex  # 在多数主题下可直接返回；必要时再细调。
+
+五、文本/日志显示（QTextEdit 约定）
+- 统一使用 setReadOnly(True)；支持 Ctrl+滚轮 改变字号（拦截 wheelEvent）。
+- 使用 HTML 渲染并保留空白：将每行包裹在 <div style="white-space: pre;">...</div>；
+	外层 <body> 颜色由 palette 的 Text/Base 注入，保证主题一致。
+- 自动滚动：默认“跟随到底部”；用户手动滚动后，临时禁用自动滚动，10s 无操作再恢复。
+- 可选右键菜单：如“清空日志文件”等操作。
+
+六、卡片/列表（SequenceCard 风格）
+- 容器：QScrollArea(widgetResizable=True, HorizontalScrollBarAlwaysOff) + 竖直 VBox 容器（顶部对齐）。
+- 卡片：QFrame.StyledPanel，圆角 4px；未选中边框 1px rgba(255,255,255,40)。
+- 选中态：以 Highlight 为基色，背景加透明度（~40%~90%），边框 2px 更高透明度；
+	叠加大号序号字母（A/B/C…），绘制时取 Highlight 并降 alpha 以不喧宾夺主。
+
+（QSS 片段参考）
+SequenceCard { background-color: none; border:1px solid rgba(255,255,255,40); border-radius:4px; }
+// 选中态用代码动态注入 rgba(Highlight, alpha)
+
+七、预览面板（可选）
+- 使用可折叠的“预览”区，内容背景透明：QFrame/QLabel 设置为 transparent；
+- 预览图片：QPixmap + KeepAspectRatio + SmoothTransformation 等比缩放；
+- 允许拖动手柄调整预览区高度（可选）：单独的 ResizableHandle（高度 ~8px，hover 半透明底色）。
+
+（Handle 视觉参考）
+QWidget { background-color: transparent; }
+QWidget:hover { background-color: rgba(100,100,100,100); }
+
+八、线程与刷新（如有后台工作）
+- 背景任务使用 QThread + Signal；UI 线程槽中刷新 QTextEdit/卡片区域；
+- 刷新 QTextEdit 时保持用户滚动位置；若启用自动滚动则滚至底部。
+- 可按 30s 定时写入日志文件，启动时回放旧日志到视图中。
+
+九、尺寸与间距约定
+- 顶部信息行按钮：Fixed 尺寸；重要按钮可设置 setMinimumHeight(35)。
+- 预览 QLabel：setMinimumHeight(100) 保证可视；
+- 设置面板网格：grid.setContentsMargins(6,6,6,6)，行间距 4~8。
+- 主区 SizePolicy.Expanding，确保“内容优先填充”。
+
+十、页面模板（直接复用的最小骨架）
+class BasePage(QWidget):
+		def __init__(self, parent=None, title="设置"):
+				super().__init__(parent)
+				root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(2)
+				# 顶部信息行
+				hl = QHBoxLayout(); self.fixedLineLabel = QLabel("正在初始化...")
+				self.fixedLineLabel.setObjectName("fixedLineLabel")
+				self.fixedLineLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+				self.actionBtn = QPushButton("打开"); self.actionBtn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+				hl.addWidget(self.fixedLineLabel, 1); hl.addWidget(self.actionBtn); root.addLayout(hl)
+				# 设置面板
+				self.settingsBox = CollapsibleBox(title)
+				grid = QGridLayout(); grid.setContentsMargins(6,6,6,6)
+				# TODO: 在此 addWidget 各种设置控件
+				self.settingsBox.setContentLayout(grid); root.addWidget(self.settingsBox)
+				# 主内容（占满）
+				self.mainView = QTextEdit(); self.mainView.setReadOnly(True)
+				self.mainView.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+				self.mainView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+				root.addWidget(self.mainView, 1)
+
+十一、与现有代码一致的细节习惯
+- 箭头文案：“► 设置 / ▼ 设置”，或“► 预览 / ▼ 预览”。
+- 动画时长统一 250ms（设置类面板）/ 300ms（较大内容面板），缓动 InOutCubic/Quart。
+- 颜色获取优先 palette；仅在条形图“空条”使用 #555555。
+- HTML 输出中对每行进行转义（& < >），并用 <div style=white-space:pre> 包装；
+- Ctrl+滚轮 调整 QTextEdit 字号；用户滚动时临时关闭自动滚动，定时器再恢复。
+
+十二、可选项（按需）
+- Windows 任务栏图标：在创建 QApplication 前调用 SetCurrentProcessExplicitAppUserModelID；
+- 应用图标：若脚本目录下存在 icon.ico，则 app.setWindowIcon(QIcon(path))，并对主窗口也 setWindowIcon。
+- Qt Designer 生成 UI：在入口检查 .ui 与 ui_*.py 时间戳，必要时用 pyside6-uic 重新生成。
+
+使用方式（建议）：
+1) 新页面按“页面模板”起步，保证顶部信息行 + 折叠设置 + 主内容三段式结构；
+2) 颜色/字体均走 palette + FixedFont；
+3) 复杂设置/预览使用 CollapsibleBox（必要时 Resizable 版本），统一箭头/动画；
+4) 列表使用 QScrollArea 容器 + 卡片（QFrame.StyledPanel）风格，选中高亮采用 Highlight 的半透明叠加；
+5) 日志/富文本统一通过 HTML 渲染（white-space: pre），并实现 Ctrl+滚轮缩放与自动滚动。
+
+以上规范覆盖当前 QT/AYE 下 main、mf_pyside6、module1~4 的共同 UI 特征；按此约定组织新模块，可与现有界面保持同风格与交互手感。
+
