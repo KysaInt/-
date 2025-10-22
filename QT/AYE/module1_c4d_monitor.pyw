@@ -397,6 +397,8 @@ class C4DMonitorWidget(QWidget):
 
         # ---- 预览折叠框（位于设置栏下方）使用可调整大小的容器 ----
         self.preview_box = ResizableCollapsibleBox("预览", self.settings)
+        # 设置预览框的 content_area 为透明背景
+        self.preview_box.content_area.setStyleSheet("QFrame { background-color: transparent; border: none; }")
         preview_layout = QVBoxLayout()
         preview_layout.setContentsMargins(6, 6, 6, 6)
         preview_layout.setAlignment(Qt.AlignTop)
@@ -405,18 +407,8 @@ class C4DMonitorWidget(QWidget):
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.preview_label.setMinimumHeight(100)
         self.preview_label.setObjectName("previewLabel")
-        # 设置样式使其支持透明背景显示（棋盘格背景）
-        self.preview_label.setStyleSheet("""
-            QLabel#previewLabel {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #808080, stop:1 #606060
-                );
-                background-image: 
-                    repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,.05) 10px, rgba(255,255,255,.05) 20px),
-                    repeating-linear-gradient(-45deg, transparent, transparent 10px, rgba(0,0,0,.05) 10px, rgba(0,0,0,.05) 20px);
-            }
-        """)
+        # 设置透明背景
+        self.preview_label.setStyleSheet("QLabel#previewLabel { background-color: transparent; }")
         preview_layout.addWidget(self.preview_label)
         self.preview_box.setContentLayout(preview_layout)
         self.preview_box.expanded.connect(self._force_update_preview)
