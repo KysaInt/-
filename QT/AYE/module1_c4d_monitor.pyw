@@ -362,6 +362,7 @@ class C4DMonitorWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(2)  # 设置较小的间距，让折叠框更紧凑
         # ---- 固定文本行 + 右侧按钮（同一行） ----
         header_layout = QHBoxLayout()
         self.fixed_line_label = QLabel("正在初始化...")
@@ -902,8 +903,8 @@ class ResizableCollapsibleBox(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.toggle_button)
-        lay.addWidget(self.resize_handle)
         lay.addWidget(self.content_area)
+        lay.addWidget(self.resize_handle)
 
         self.toggle_button.clicked.connect(self._on_toggled)
         self._update_arrow(False)
