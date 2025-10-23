@@ -64,7 +64,7 @@ class SRTSubtitle:
 
     def to_srt_line(self) -> str:
         """生成 SRT 格式的一行"""
-        return f"{self.index}\n{self.to_srt_time(self.start)} --> {self.to_srt_time(self.end)}\n{self.text}\n"
+        return f"{self.index}\n{self.to_srt_time(self.start)} --> {self.to_srt_time(self.end)}\n{self.text}\n\n"
 
 
 # ============================================================================
@@ -215,10 +215,15 @@ class SRTParser:
     @staticmethod
     def save(filepath: str, subtitles: List[SRTSubtitle]):
         """保存 SRT 文件"""
+        lines = []
+        for i, sub in enumerate(subtitles, 1):
+            sub.index = i
+            lines.append(sub.to_srt_line())
+        
         with open(filepath, 'w', encoding='utf-8') as f:
-            for i, sub in enumerate(subtitles, 1):
-                sub.index = i
-                f.write(sub.to_srt_line())
+            # 将所有行连接，然后移除最后一个多余的空行
+            content = ''.join(lines).rstrip() + '\n'
+            f.write(content)
 
 
 # ============================================================================
