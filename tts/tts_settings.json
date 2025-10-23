@@ -3,11 +3,10 @@
   "srt_enabled": true,
   "extra_line_output": true,
   "line_length": 28,
+  "subtitle_lines": 1,
   "subtitle_rule": "rule_2",
   "selected_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural",
-    "zh-CN-YunyangNeural",
-    "zh-CN-YunyiMultilingualNeural"
+    "zh-CN-XiaoxiaoMultilingualNeural"
   ],
   "voice_rate": "+25%",
   "voice_pitch": "+0Hz",
@@ -22,9 +21,9 @@
     "log": true
   },
   "window_geometry": [
-    415,
-    22,
-    642,
+    1681,
+    116,
+    815,
     1450
   ]
 }

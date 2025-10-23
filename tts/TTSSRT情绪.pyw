@@ -320,6 +320,51 @@ class SubtitleGenerator:
         
         return result
 
+    @classmethod
+    def remove_punctuation(cls, text: str) -> str:
+        """删除标点符号的预处理方法
+        
+        规则：
+        - 删除所有标点符号
+        - 行中间的标点替换为空格
+        - 行末尾的标点直接删除
+        - 保持换行符号，维持多行结构
+        """
+        lines = text.split('\n')
+        result_lines = []
+        
+        # 定义所有需要处理的标点符号
+        all_punctuation = set(cls.SPLIT_SYMBOLS) | set(cls._punctuation_map.keys()) | set(cls._punctuation_map.values())
+        # 添加其他常见标点
+        all_punctuation |= set('，、；：？！。""''（）【】《》～…—')
+        all_punctuation |= set(',.;:?!"\'()[]<>~—…-')
+        
+        for line in lines:
+            if not line.strip():
+                result_lines.append(line)
+                continue
+            
+            # 处理每一行
+            processed_line = []
+            for i, char in enumerate(line):
+                if char in all_punctuation:
+                    # 检查是否是行末标点（去除末尾空格后）
+                    remaining_text = line[i+1:].strip()
+                    if not remaining_text:
+                        # 行末标点，直接删除
+                        continue
+                    else:
+                        # 行中间标点，替换为空格
+                        # 避免连续的空格
+                        if processed_line and processed_line[-1] != ' ':
+                            processed_line.append(' ')
+                else:
+                    processed_line.append(char)
+            
+            result_lines.append(''.join(processed_line).rstrip())
+        
+        return '\n'.join(result_lines)
+
     @staticmethod
     def _needs_space(prev_char: str, next_char: str) -> bool:
         if not prev_char or not next_char:
@@ -459,6 +504,7 @@ class SubtitleGenerator:
         line_length: int,
         convert_punctuation: bool,
         rule: str = RULE_SMART,
+        subtitle_lines: int = 1,
     ) -> str:
         lines = cls._prepare_lines(text, rule, line_length)
         if not lines:
@@ -467,7 +513,8 @@ class SubtitleGenerator:
         if convert_punctuation:
             lines = [cls.to_halfwidth_punctuation(line) for line in lines]
 
-        cues = [lines[i:i + 2] for i in range(0, len(lines), 2)]
+        # 按指定的行数分组成字幕块
+        cues = [lines[i:i + subtitle_lines] for i in range(0, len(lines), subtitle_lines)]
         total_chars = sum(max(1, cls._count_characters(cue)) for cue in cues)
 
         if total_chars <= 0 or duration <= 0:
@@ -521,6 +568,7 @@ class TTSWorker(QThread):
         style: str = "general",
         styledegree: str = "1.0",
         role: str = "",
+        subtitle_lines: int = 1,
     ):
         super().__init__(parent)
         self.voice = voice
@@ -532,6 +580,7 @@ class TTSWorker(QThread):
         self.extra_line_output = extra_line_output
         self.default_output = default_output
         self.output_root = output_root or os.path.dirname(os.path.abspath(__file__))
+        self.subtitle_lines = max(1, int(subtitle_lines or 1))
         os.makedirs(self.output_root, exist_ok=True)
         # 情绪控制参数
         self.rate = rate
@@ -649,6 +698,7 @@ class TTSWorker(QThread):
             self.line_length,
             self.convert_punctuation,
             self.subtitle_rule,
+            self.subtitle_lines,
         )
 
         if not srt_content.strip():
@@ -765,6 +815,7 @@ class TTSApp(QWidget):
         self.punctuation_combo.addItem("不转换", "none")
         self.punctuation_combo.addItem("中文标点 → 英文标点", "to_halfwidth")
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
+        self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
         self.punctuation_combo.setToolTip("选择后立即对同目录下所有 txt 文件执行转换")
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
@@ -786,9 +837,17 @@ class TTSApp(QWidget):
         self.line_length_input = QLineEdit("28")
         self.line_length_input.setValidator(QIntValidator(5, 120, self))
         self.line_length_input.setFixedWidth(40)
+        # 新增：字幕块行数设置
+        self.subtitle_lines_label = QLabel("块行数:")
+        self.subtitle_lines_input = QLineEdit("1")
+        self.subtitle_lines_input.setValidator(QIntValidator(1, 10, self))
+        self.subtitle_lines_input.setFixedWidth(40)
+        self.subtitle_lines_input.setToolTip("每个字幕块包含的行数 (1-10)")
         self.options_layout.addWidget(self.default_output_checkbox)
         self.options_layout.addWidget(self.extra_line_checkbox)
         self.options_layout.addWidget(self.srt_checkbox)
+        self.options_layout.addWidget(self.subtitle_lines_label)
+        self.options_layout.addWidget(self.subtitle_lines_input)
         self.options_layout.addWidget(self.rule_label)
         self.options_layout.addWidget(self.subtitle_rule_combo)
         self.options_layout.addWidget(self.line_length_label)
@@ -1186,6 +1245,10 @@ class TTSApp(QWidget):
         self.srt_checkbox.setEnabled(default_output_enabled)
         srt_active = self.srt_checkbox.isChecked() and default_output_enabled
 
+        # 字幕块行数输入框仅在生成字幕时启用
+        self.subtitle_lines_label.setEnabled(srt_active)
+        self.subtitle_lines_input.setEnabled(srt_active)
+
         allow_rule_selection = default_output_enabled or extra_output_enabled
         self.subtitle_rule_combo.setEnabled(allow_rule_selection)
 
@@ -1386,6 +1449,10 @@ class TTSApp(QWidget):
             line_length = int(data.get("line_length", 28))
             self.line_length_input.setText(str(max(5, min(120, line_length))))
 
+            # 恢复字幕块行数
+            subtitle_lines = int(data.get("subtitle_lines", 1))
+            self.subtitle_lines_input.setText(str(max(1, min(10, subtitle_lines))))
+
             rule_value = data.get("subtitle_rule", SubtitleGenerator.RULE_NEWLINE)
             index = self.subtitle_rule_combo.findData(rule_value)
             if index != -1:
@@ -1450,11 +1517,17 @@ class TTSApp(QWidget):
         except (TypeError, ValueError):
             line_length = 28
 
+        try:
+            subtitle_lines = int(self.subtitle_lines_input.text())
+        except (TypeError, ValueError):
+            subtitle_lines = 1
+
         settings = {
             "default_output": self.default_output_checkbox.isChecked(),
             "srt_enabled": self.srt_checkbox.isChecked(),
             "extra_line_output": self.extra_line_checkbox.isChecked(),
             "line_length": max(5, min(120, line_length)),
+            "subtitle_lines": max(1, min(10, subtitle_lines)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
             "voice_rate": self.rate_combo.currentText(),
@@ -1524,6 +1597,17 @@ class TTSApp(QWidget):
         if str(line_length_value) != line_length_text:
             self.line_length_input.setText(str(line_length_value))
 
+        # 获取字幕块行数
+        subtitle_lines_text = self.subtitle_lines_input.text().strip()
+        try:
+            subtitle_lines_value = int(subtitle_lines_text)
+        except ValueError:
+            subtitle_lines_value = 1
+        
+        subtitle_lines_value = max(1, min(10, subtitle_lines_value))
+        if str(subtitle_lines_value) != subtitle_lines_text:
+            self.subtitle_lines_input.setText(str(subtitle_lines_value))
+
         convert_punctuation = False  # 标点转换现在通过独立的标点转换功能处理
         subtitle_rule = self.subtitle_rule_combo.currentData() or SubtitleGenerator.RULE_SMART
 
@@ -1535,7 +1619,7 @@ class TTSApp(QWidget):
             if srt_enabled:
                 self.log_view.append(f"字幕分段规则：{self.subtitle_rule_combo.currentText()}")
                 self.log_view.append(
-                    f"字幕选项：开启，单行约 {line_length_value} 字"
+                    f"字幕选项：开启，单行约 {line_length_value} 字，每块 {subtitle_lines_value} 行"
                 )
             else:
                 self.log_view.append("字幕选项：关闭")
@@ -1568,6 +1652,7 @@ class TTSApp(QWidget):
                 style=self.style_combo.currentData() or "general",
                 styledegree=str(self.styledegree_slider.value() / 100.0),
                 role=self.role_combo.currentData() or "",
+                subtitle_lines=subtitle_lines_value,
             )
             worker.progress.connect(self.log_view.append)
             worker.finished.connect(self.on_worker_finished)
@@ -1613,6 +1698,11 @@ class TTSApp(QWidget):
                 elif conversion_type == "to_fullwidth":
                     converted_content = SubtitleGenerator.to_fullwidth_punctuation(content)
                     self.log_view.append(f"✓ 英文标点 → 中文标点: {txt_file}")
+                elif conversion_type == "remove_punctuation":
+                    converted_content = SubtitleGenerator.remove_punctuation(content)
+                    self.log_view.append(f"✓ 删除标点符号: {txt_file}")
+                else:
+                    continue
                 
                 # 写回文件
                 with open(file_path, 'w', encoding='utf-8') as f:
