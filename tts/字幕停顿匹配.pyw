@@ -74,7 +74,7 @@ class SRTSubtitle:
 class AudioAnalyzer:
     """音频分析引擎"""
 
-    def __init__(self, audio_path: str, threshold_db: float = -40, min_silence_duration: float = 0.3):
+    def __init__(self, audio_path: str, threshold_db: float = -40, min_silence_duration: float = 0.01):
         """
         Args:
             audio_path: 音频文件路径
@@ -234,50 +234,301 @@ class SubtitleMatcher:
     """字幕与停顿匹配引擎"""
 
     @staticmethod
-    def match_subtitles(subtitles: List[SRTSubtitle], silences: List[Silence]) -> List[SRTSubtitle]:
+    def match_subtitles(subtitles: List[SRTSubtitle], silences: List[Silence]) -> Tuple[List[SRTSubtitle], str]:
         """
-        根据静音段调整字幕时间
+        根据停顿间隙的出入点调整字幕时间
+        
+        规则:
+        字幕数: n, 间隙数: m
+        
+        标准情况 (m = n+1): 首尾都有间隙
+        - 间隙[i]的出点(end) = 字幕[i]的入点(start)
+        - 间隙[i+1]的入点(start) = 字幕[i]的出点(end)
+        
+        单端情况 (m = n): 首或尾只有一端有间隙
+        - 需要根据语音时长和间隙时长判断
+        - 然后做出相应的匹配
+        
+        无端情况 (m = n-1): 首尾都没有间隙
+        - 第一段字幕的入点和最后一段字幕的出点不需要修改
 
-        算法思路:
-        1. 计算原字幕总时长
-        2. 计算语音文件中的总停顿时间
-        3. 按比例重新分配字幕位置到间隙点
+        Args:
+            subtitles: 原始字幕列表
+            silences: 检测到的停顿列表
+
+        Returns:
+            (调整后的字幕列表, 详细日志字符串)
         """
+        log_lines = []
+        
         if not subtitles or not silences:
-            return subtitles
+            log_lines.append("⚠ 字幕或停顿列表为空，无法匹配")
+            return subtitles, "\n".join(log_lines)
 
-        # 计算原始字幕总时间跨度
-        original_start = subtitles[0].start
-        original_end = subtitles[-1].end
+        n = len(subtitles)
+        m = len(silences)
+        
+        log_lines.append(f"{'=' * 70}")
+        log_lines.append(f"字幕匹配分析")
+        log_lines.append(f"{'=' * 70}")
+        log_lines.append(f"字幕数量 (n): {n}")
+        log_lines.append(f"间隙数量 (m): {m}")
+        log_lines.append(f"关系: m - n = {m - n}")
+        log_lines.append("")
+        
+        # 确定情况类型并匹配
+        if m == n + 1:
+            case_type = "标准情况: m = n + 1 (首尾都有间隙)"
+            log_lines.append(f"✓ {case_type}")
+            log_lines.append("  规则: 间隙出点→字幕入点, 间隙入点→字幕出点")
+            adjusted = SubtitleMatcher._match_standard(subtitles, silences, log_lines)
+        
+        elif m == n:
+            case_type = "单端情况: m = n (首或尾只有一端有间隙)"
+            log_lines.append(f"✓ {case_type}")
+            log_lines.append("  判断逻辑: 根据语音和间隙时长判断首部或尾部")
+            adjusted = SubtitleMatcher._match_single_end(subtitles, silences, log_lines)
+        
+        elif m == n - 1:
+            case_type = "无端情况: m = n - 1 (首尾都没有间隙)"
+            log_lines.append(f"✓ {case_type}")
+            log_lines.append("  规则: 首尾字幕入出点不修改，中间字幕映射到间隙")
+            adjusted = SubtitleMatcher._match_no_ends(subtitles, silences, log_lines)
+        
+        else:
+            log_lines.append(f"⚠ 特殊情况: m={m}, n={n}, 关系不符合预期")
+            log_lines.append("  使用通用比例分配方法")
+            adjusted = SubtitleMatcher._match_fallback(subtitles, silences, log_lines)
+        
+        log_lines.append("")
+        log_lines.append(f"{'=' * 70}")
+        log_lines.append("调整后的字幕详情:")
+        log_lines.append(f"{'=' * 70}")
+        for i, sub in enumerate(adjusted, 1):
+            log_lines.append(f"{i}. [{sub.index}] {sub.to_srt_time(sub.start)} --> {sub.to_srt_time(sub.end)}")
+            log_lines.append(f"   时长: {sub.end - sub.start:.3f}s | 文本: {sub.text[:60]}")
+        
+        return adjusted, "\n".join(log_lines)
 
-        # 构建间隙关键点列表（间隙中心）
-        gap_centers = [s.center for s in silences]
-        gap_centers.insert(0, 0.0)  # 开始点
-        gap_centers.append(silences[-1].end if silences else original_end)
-
-        # 按字幕中点将字幕分配到各个间隙
-        adjusted_subs = []
-        for sub in subtitles:
-            # 字幕的相对位置（0-1）
-            sub_middle = sub.start + (sub.end - sub.start) / 2
-            relative_pos = (sub_middle - original_start) / (original_end - original_start + 0.001)
-
-            # 找到对应的目标间隙
-            target_idx = min(int(relative_pos * (len(gap_centers) - 1)), len(gap_centers) - 2)
-            gap_start = gap_centers[target_idx]
-            gap_end = gap_centers[target_idx + 1]
-
-            # 在间隙内重新定位
-            gap_width = gap_end - gap_start
-            sub_duration = sub.end - sub.start
-
-            new_start = gap_start + gap_width * 0.1  # 间隙前 10% 开始
-            new_end = new_start + sub_duration
-
+    @staticmethod
+    def _match_standard(subtitles: List[SRTSubtitle], silences: List[Silence], log_lines: list) -> List[SRTSubtitle]:
+        """
+        标准情况: m = n + 1 (首尾都有间隙)
+        
+        规则:
+        - 间隙[i]的出点(end) = 字幕[i]的入点(start)
+        - 间隙[i+1]的入点(start) = 字幕[i]的出点(end)
+        """
+        log_lines.append("")
+        log_lines.append(f"{'─' * 70}")
+        log_lines.append("标准情况处理:")
+        log_lines.append(f"{'─' * 70}")
+        
+        adjusted = []
+        
+        for i, sub in enumerate(subtitles):
+            # 字幕[i]应该在间隙[i]和间隙[i+1]之间
+            gap_out = silences[i]      # 这个间隙的出点 = 字幕入点
+            gap_in = silences[i + 1]   # 下一个间隙的入点 = 字幕出点
+            
+            new_start = gap_out.end
+            new_end = gap_in.start
+            
+            log_lines.append(f"字幕 {i+1}:")
+            log_lines.append(f"  原始: {sub.to_srt_time(sub.start)} --> {sub.to_srt_time(sub.end)}")
+            log_lines.append(f"  映射: 间隙[{i}].end={SubtitleMatcher._format_time(gap_out.end)}")
+            log_lines.append(f"        间隙[{i+1}].start={SubtitleMatcher._format_time(gap_in.start)}")
+            log_lines.append(f"  调整: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)}")
+            log_lines.append(f"  时长: {new_end - new_start:.3f}s")
+            
             new_sub = SRTSubtitle(sub.index, new_start, new_end, sub.text)
-            adjusted_subs.append(new_sub)
+            adjusted.append(new_sub)
+        
+        return adjusted
 
-        return adjusted_subs
+    @staticmethod
+    def _match_single_end(subtitles: List[SRTSubtitle], silences: List[Silence], log_lines: list) -> List[SRTSubtitle]:
+        """
+        单端情况: m = n (首或尾只有一端有间隙)
+        
+        判断逻辑:
+        - 计算总间隙时长 vs 语音中间隙以外的部分
+        - 如果第一个间隙很靠后，说明头部无间隙
+        - 如果最后一个间隙很靠前，说明尾部无间隙
+        """
+        log_lines.append("")
+        log_lines.append(f"{'─' * 70}")
+        log_lines.append("单端情况处理:")
+        log_lines.append(f"{'─' * 70}")
+        
+        # 分析间隙分布
+        if len(silences) > 0:
+            first_silence_start = silences[0].start
+            last_silence_end = silences[-1].end
+            
+            # 启发式判断: 如果第一个间隙距离开头较远，说明前面有内容（头部无间隙）
+            # 如果最后一个间隙不是很靠后，说明后面有内容（尾部无间隙）
+            has_head_gap = first_silence_start < 2.0  # 假设2秒内有第一个间隙
+            has_tail_gap = last_silence_end > 5.0  # 假设靠后有最后一个间隙（简化）
+        else:
+            has_head_gap = False
+            has_tail_gap = False
+        
+        log_lines.append(f"第一个间隙开始时间: {silences[0].start:.3f}s")
+        log_lines.append(f"最后一个间隙结束时间: {silences[-1].end:.3f}s")
+        log_lines.append(f"判定: 头部{'有' if has_head_gap else '无'}间隙, 尾部{'有' if has_tail_gap else '无'}间隙")
+        log_lines.append("")
+        
+        adjusted = []
+        
+        if has_head_gap and not has_tail_gap:
+            # 头部有间隙，尾部无间隙
+            log_lines.append("策略: 头部有间隙，尾部无间隙")
+            for i in range(len(subtitles) - 1):
+                # 前n-1个字幕
+                new_start = silences[i].end
+                new_end = silences[i + 1].start
+                new_sub = SRTSubtitle(subtitles[i].index, new_start, new_end, subtitles[i].text)
+                adjusted.append(new_sub)
+                log_lines.append(f"字幕 {i+1}: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)}")
+            
+            # 最后一个字幕保持原始长度，从最后间隙末尾开始
+            last_sub = subtitles[-1]
+            last_start = silences[-1].end
+            last_end = last_start + (last_sub.end - last_sub.start)
+            new_sub = SRTSubtitle(last_sub.index, last_start, last_end, last_sub.text)
+            adjusted.append(new_sub)
+            log_lines.append(f"字幕 {len(subtitles)}: {SubtitleMatcher._format_time(last_start)} --> {SubtitleMatcher._format_time(last_end)} (尾部无间隙)")
+        
+        else:  # 默认: 尾部有间隙，头部无间隙
+            # 头部无间隙，尾部有间隙
+            log_lines.append("策略: 头部无间隙，尾部有间隙")
+            
+            # 第一个字幕保持原始长度，到第一个间隙开始
+            first_sub = subtitles[0]
+            first_end = silences[0].start
+            first_start = first_end - (first_sub.end - first_sub.start)
+            new_sub = SRTSubtitle(first_sub.index, first_start, first_end, first_sub.text)
+            adjusted.append(new_sub)
+            log_lines.append(f"字幕 1: {SubtitleMatcher._format_time(first_start)} --> {SubtitleMatcher._format_time(first_end)} (头部无间隙)")
+            
+            # 后续字幕
+            for i in range(1, len(subtitles)):
+                new_start = silences[i - 1].end
+                new_end = silences[i].start
+                new_sub = SRTSubtitle(subtitles[i].index, new_start, new_end, subtitles[i].text)
+                adjusted.append(new_sub)
+                log_lines.append(f"字幕 {i+1}: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)}")
+        
+        return adjusted
+
+    @staticmethod
+    def _match_no_ends(subtitles: List[SRTSubtitle], silences: List[Silence], log_lines: list) -> List[SRTSubtitle]:
+        """
+        无端情况: m = n - 1 (首尾都没有间隙)
+        
+        规则:
+        - 第一段字幕的入点(start)不修改
+        - 最后一段字幕的出点(end)不修改
+        - 中间n-1段字幕映射到m个间隙
+        """
+        log_lines.append("")
+        log_lines.append(f"{'─' * 70}")
+        log_lines.append("无端情况处理:")
+        log_lines.append(f"{'─' * 70}")
+        
+        adjusted = []
+        
+        # 第一个字幕保持原始入点
+        first_sub = subtitles[0]
+        if len(silences) > 0:
+            first_end = silences[0].start
+        else:
+            first_end = first_sub.end
+        
+        new_sub = SRTSubtitle(first_sub.index, first_sub.start, first_end, first_sub.text)
+        adjusted.append(new_sub)
+        log_lines.append(f"字幕 1: {SubtitleMatcher._format_time(first_sub.start)} --> {SubtitleMatcher._format_time(first_end)} (首部无间隙，入点不修改)")
+        
+        # 中间字幕
+        for i in range(1, len(subtitles) - 1):
+            gap_idx = i - 1
+            new_start = silences[gap_idx].end
+            new_end = silences[gap_idx + 1].start if gap_idx + 1 < len(silences) else subtitles[-1].start
+            
+            new_sub = SRTSubtitle(subtitles[i].index, new_start, new_end, subtitles[i].text)
+            adjusted.append(new_sub)
+            log_lines.append(f"字幕 {i+1}: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)}")
+        
+        # 最后一个字幕保持原始出点
+        last_sub = subtitles[-1]
+        if len(silences) > 0:
+            last_start = silences[-1].end
+        else:
+            last_start = last_sub.start
+        
+        new_sub = SRTSubtitle(last_sub.index, last_start, last_sub.end, last_sub.text)
+        adjusted.append(new_sub)
+        log_lines.append(f"字幕 {len(subtitles)}: {SubtitleMatcher._format_time(last_start)} --> {SubtitleMatcher._format_time(last_sub.end)} (尾部无间隙，出点不修改)")
+        
+        return adjusted
+
+    @staticmethod
+    def _match_fallback(subtitles: List[SRTSubtitle], silences: List[Silence], log_lines: list) -> List[SRTSubtitle]:
+        """
+        Fallback: 其他特殊情况，按比例分配
+        """
+        log_lines.append("")
+        log_lines.append(f"{'─' * 70}")
+        log_lines.append("Fallback 处理 (比例分配):")
+        log_lines.append(f"{'─' * 70}")
+        
+        n = len(subtitles)
+        m = len(silences)
+        
+        if m > n:
+            # 间隙多于字幕: 选择均匀分布的间隙子集
+            log_lines.append(f"间隙过多({m} > {n})，选择均匀分布的 {n} 个间隙")
+            step = m / n
+            adjusted = []
+            for i, sub in enumerate(subtitles):
+                idx = int(i * step)
+                idx = min(idx, len(silences) - 1)
+                gap = silences[idx]
+                new_start = gap.start
+                new_end = gap.end
+                new_sub = SRTSubtitle(sub.index, new_start, new_end, sub.text)
+                adjusted.append(new_sub)
+                log_lines.append(f"字幕 {i+1}: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)} (使用间隙 {idx})")
+        else:
+            # 字幕多于间隙: 尽量分配
+            log_lines.append(f"字幕过多({n} > {m})，按分布分配")
+            step = n / m
+            adjusted = []
+            for i, sub in enumerate(subtitles):
+                gap_idx = int(i / step)
+                gap_idx = min(gap_idx, len(silences) - 1)
+                gap = silences[gap_idx]
+                
+                # 在这个间隙内的位置
+                new_start = gap.start + (i % step) / step * (gap.end - gap.start)
+                new_end = new_start + (sub.end - sub.start)
+                
+                new_sub = SRTSubtitle(sub.index, new_start, new_end, sub.text)
+                adjusted.append(new_sub)
+                log_lines.append(f"字幕 {i+1}: {SubtitleMatcher._format_time(new_start)} --> {SubtitleMatcher._format_time(new_end)}")
+        
+        return adjusted
+
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """格式化时间为字符串"""
+        total_ms = int(seconds * 1000)
+        h = total_ms // 3600000
+        m = (total_ms % 3600000) // 60000
+        s = (total_ms % 60000) // 1000
+        ms = total_ms % 1000
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 # ============================================================================
@@ -381,7 +632,7 @@ class AnalysisWorker(QThread):
 class MatchingWorker(QThread):
     """后台匹配线程"""
     progress = Signal(str)
-    finished = Signal(list)  # 返回调整后的字幕列表
+    finished = Signal(list, str)  # 返回(调整后的字幕列表, 详细日志)
     error = Signal(str)
 
     def __init__(self, srt_path: str, silences: List[Silence]):
@@ -394,9 +645,9 @@ class MatchingWorker(QThread):
             self.progress.emit("正在加载字幕...")
             subtitles = SRTParser.load(self.srt_path)
             self.progress.emit(f"正在匹配 {len(subtitles)} 条字幕与 {len(self.silences)} 个停顿...")
-            adjusted = SubtitleMatcher.match_subtitles(subtitles, self.silences)
+            adjusted, log = SubtitleMatcher.match_subtitles(subtitles, self.silences)
             self.progress.emit("匹配完成！")
-            self.finished.emit(adjusted)
+            self.finished.emit(adjusted, log)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -484,9 +735,9 @@ class SubtitlePauseMatcherUI(QWidget):
 
         settings_layout.addWidget(QLabel("最小停顿时长 (秒):"), 1, 0)
         self.min_silence_spin = QDoubleSpinBox()
-        self.min_silence_spin.setRange(0.1, 10.0)
-        self.min_silence_spin.setSingleStep(0.1)
-        self.min_silence_spin.setValue(0.3)
+        self.min_silence_spin.setRange(0.01, 10.0)
+        self.min_silence_spin.setSingleStep(0.01)
+        self.min_silence_spin.setValue(0.01)
         settings_layout.addWidget(self.min_silence_spin, 1, 1)
 
         settings_box.setContentLayout(settings_layout)
@@ -665,7 +916,7 @@ class SubtitlePauseMatcherUI(QWidget):
         """处理匹配进度"""
         self._log(msg)
 
-    def _on_matching_finished(self, subtitles: List[SRTSubtitle]):
+    def _on_matching_finished(self, subtitles: List[SRTSubtitle], logs: str):
         """匹配完成"""
         self.current_subtitles = subtitles
         self.progress_bar.setVisible(False)
@@ -678,12 +929,8 @@ class SubtitlePauseMatcherUI(QWidget):
             self.original_duration_label.setText(f"{duration:.2f}s")
         self.subtitle_count_label.setText(str(len(subtitles)))
 
-        self._log(f"\n✓ 字幕已匹配！")
-        self._log("调整后的前5条字幕:")
-        for sub in subtitles[:5]:
-            self._log(f"  [{sub.index}] {sub.to_srt_time(sub.start)} --> {sub.to_srt_time(sub.end)}")
-        if len(subtitles) > 5:
-            self._log(f"  ...")
+        # 显示详细日志
+        self._log(logs)
 
     def _on_matching_error(self, error: str):
         """匹配出错"""
