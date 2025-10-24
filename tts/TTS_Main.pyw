@@ -39,8 +39,8 @@ def check_and_regenerate_ui():
 check_and_regenerate_ui()
 
 from PySide6.QtWidgets import QApplication, QWidget
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import QSize
+from PySide6.QtGui import QIcon, QGuiApplication
+from PySide6.QtCore import QSize, Qt
 try:
     from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QAction
 except Exception:
@@ -53,14 +53,22 @@ def _load_app_icon_with_fallbacks() -> Optional[QIcon]:
     """尝试按优先级加载多分辨率 ICO，返回 QIcon 或 None。
     优先使用 tts/duck.ico；若无效，降级使用 QT/AYE/icon.ico。
     """
-    # 1) tts 目录下 duck.ico
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # 确保在 Windows 的 .pyw 环境下也能正确获取脚本目录
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe
+        script_dir = os.path.dirname(sys.executable)
+    else:
+        # 正常的 Python 脚本
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     icon_candidates = [
         os.path.join(script_dir, "duck.ico"),
         os.path.join(os.path.dirname(script_dir), "QT", "AYE", "icon.ico"),
     ]
 
     for p in icon_candidates:
+        # 规范化路径，确保在 Windows 下正确处理
+        p = os.path.normpath(os.path.abspath(p))
         if os.path.exists(p):
             ic = QIcon(p)
             # availableSizes 在 ICO 上有时为空，不作为唯一判断标准，仍打印日志辅助排查
@@ -197,15 +205,21 @@ class MainWidget(QWidget):
 
 
 if __name__ == "__main__":
-    # 设置 AUMID 确保任务栏独立显示（不与其他程序合并）
+    # Windows: 在创建任何窗口之前设置 AUMID，有助于任务栏分组和图标关联
     if sys.platform.startswith("win"):
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AYE.TTS.App.1.0")
         except Exception:
             pass
 
-    app = QApplication(sys.argv)
+    # 高分屏下使用高分辨率位图，改善图标清晰度
+    try:
+        QGuiApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
 
+    app = QApplication(sys.argv)
+    
     # 设置应用信息
     app.setOrganizationName("AYE")
     app.setOrganizationDomain("local.aye")
@@ -227,5 +241,64 @@ if __name__ == "__main__":
 
     # 显示窗口
     w.show()
+    
+    # Windows 特定：在窗口显示后，使用 Windows API 同时设置窗口图标与窗口类图标
+    # 这样可覆盖任务栏可能读取的不同来源（窗口/类/进程）
+    if sys.platform.startswith("win") and app_icon is not None:
+        try:
+            # 确保原生窗口已创建
+            if w.windowHandle() is not None:
+                _ = w.windowHandle().winId()
+            hwnd = int(w.winId())
+
+            # 解析图标路径
+            if getattr(sys, 'frozen', False):
+                script_dir = os.path.dirname(sys.executable)
+            else:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.normpath(os.path.join(script_dir, "duck.ico"))
+
+            if os.path.exists(icon_path):
+                user32 = ctypes.windll.user32
+                IMAGE_ICON = 1
+                LR_LOADFROMFILE = 0x00000010
+                # 加载大图标 (32x32) 与小图标 (16x16)
+                hicon_large = user32.LoadImageW(0, icon_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+                hicon_small = user32.LoadImageW(0, icon_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+
+                WM_SETICON = 0x0080
+                ICON_SMALL = 0
+                ICON_BIG = 1
+
+                # 设置窗口实例图标
+                if hicon_large:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_large)
+                if hicon_small:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+
+                # 同时设置窗口类图标，提升任务栏采用率
+                GCLP_HICON = -14
+                GCLP_HICONSM = -34
+                try:
+                    SetClassIcon = getattr(user32, 'SetClassLongPtrW', None)
+                    if SetClassIcon is None:
+                        SetClassIcon = user32.SetClassLongW
+                    SetClassIcon(hwnd, GCLP_HICON, hicon_large)
+                    SetClassIcon(hwnd, GCLP_HICONSM, hicon_small)
+                except Exception:
+                    pass
+
+                # 缓存句柄，避免被提前释放
+                _ICON_CACHE['hicon_large'] = hicon_large
+                _ICON_CACHE['hicon_small'] = hicon_small
+
+                if hicon_large or hicon_small:
+                    print(f"[ICON] Windows API icon set successfully (window + class): {icon_path}")
+                else:
+                    print(f"[ICON] Failed to load icon from: {icon_path}")
+        except Exception as e:
+            print(f"[ICON] Failed to set Windows icon via API: {e}")
+            import traceback
+            traceback.print_exc()
 
     sys.exit(app.exec())
