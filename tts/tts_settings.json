@@ -14,14 +14,14 @@
   "voice_styledegree": "1.0",
   "voice_role": "",
   "panel_states": {
-    "settings": false,
+    "settings": true,
     "voice": false,
-    "log": true
+    "log": false
   },
   "window_geometry": [
-    786,
-    555,
+    1096,
+    379,
     713,
-    800
+    1206
   ]
 }

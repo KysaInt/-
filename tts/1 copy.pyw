@@ -1,5 +1,4 @@
 import asyncio
-import time
 import json
 import os
 import sys
@@ -15,7 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox, QSplitter, QSizePolicy, QSlider
 )
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QIntValidator, QIcon
+from PySide6.QtGui import QIntValidator
 
 
 # ==================== edge-tts SSML情绪标签补丁 ====================
@@ -143,32 +142,6 @@ edge_tts = ensure_edge_tts()
 apply_edge_tts_patch()
 
 _mutagen_mp3_module = None
-
-# --- Edge TTS 鉴权刷新（防 401） ---
-# 在长时间运行或批量处理时，偶发 401/Invalid response status（WebSocket 连接被拒）。
-# 通过调用 VoicesManager.create() 触发 edge-tts 内部重新拉取参数，可缓解该问题。
-_EDGE_REFRESH_LAST_TS: float = 0.0
-_EDGE_REFRESH_INTERVAL: float = 30.0  # 秒，避免过于频繁的刷新
-
-async def refresh_edge_tts_key_async(force: bool = True) -> bool:
-    """刷新 edge-tts 内部鉴权/配置。
-
-    返回 True/False 表示是否成功。为了简单起见，这里只做一次尝试，
-    并做时间间隔节流，防止在高频错误时导致请求风暴。
-    """
-    global _EDGE_REFRESH_LAST_TS
-    now = time.time()
-    if not force and (now - _EDGE_REFRESH_LAST_TS) < _EDGE_REFRESH_INTERVAL:
-        return True
-    try:
-        # 创建一次 VoicesManager 即可触发内部参数/密钥的重新协商
-        await edge_tts.VoicesManager.create()
-        _EDGE_REFRESH_LAST_TS = now
-        print("Edge TTS 鉴权参数刷新成功")
-        return True
-    except Exception as e:
-        print(f"刷新 Edge TTS 鉴权参数失败: {e}")
-        return False
 
 
 def ensure_mutagen_mp3():
@@ -647,59 +620,27 @@ class TTSWorker(QThread):
     async def tts_async(self, text, voice, output):
         # 构建包含情绪的SSML文本
         ssml_text = self.build_ssml_text(text)
-
-        # 针对偶发 401/Unauthorized/Invalid response status，做一次刷新后重试
-        last_error: Exception | None = None
-        for attempt in range(2):  # 最多重试 1 次
-            try:
-                try:
-                    from edge_tts import async_api
-                    communicate = async_api.Communicate(
-                        ssml_text, voice,
-                        rate=self.rate,
-                        pitch=self.pitch,
-                        volume=self.volume
-                    )
-                    self.progress.emit(f"    → [{self.voice}] 正在调用微软语音服务...")
-                    await communicate.save(output)
-                except Exception as inner_e:
-                    # 首先尝试使用旧版 API 兼容路径
-                    communicate = edge_tts.Communicate(
-                        ssml_text, voice,
-                        rate=self.rate,
-                        pitch=self.pitch,
-                        volume=self.volume
-                    )
-                    self.progress.emit(f"    → [{self.voice}] 检测到旧版 API，已切换兼容模式。")
-                    await communicate.save(output)
-                # 成功
-                self.progress.emit(f"    ✓ [{self.voice}] 语音已保存到 {os.path.basename(output)}")
-                return
-            except Exception as e:
-                last_error = e
-                err = str(e)
-                auth_error = (
-                    ('401' in err) or 
-                    ('Unauthorized' in err) or 
-                    ('Invalid response status' in err)
-                )
-                if auth_error and attempt == 0:
-                    # 刷新鉴权参数后重试一次
-                    self.progress.emit(f"    ↻ [{self.voice}] 鉴权异常，正在刷新后重试…")
-                    try:
-                        await refresh_edge_tts_key_async(force=True)
-                    except Exception as rf_e:
-                        self.progress.emit(f"    ⚠ 刷新鉴权失败: {rf_e}")
-                    await asyncio.sleep(0.5)
-                    continue
-                # 非鉴权问题或已重试过
-                break
-
-        # 若到此仍失败，抛出最后错误
-        if last_error:
-            raise last_error
-        else:
-            raise RuntimeError("未知错误：TTS 合成失败且未捕获异常。")
+        
+        try:
+            from edge_tts import async_api
+            communicate = async_api.Communicate(
+                ssml_text, voice,
+                rate=self.rate,
+                pitch=self.pitch,
+                volume=self.volume
+            )
+            self.progress.emit(f"    → [{self.voice}] 正在调用微软语音服务...")
+            await communicate.save(output)
+        except Exception:
+            communicate = edge_tts.Communicate(
+                ssml_text, voice,
+                rate=self.rate,
+                pitch=self.pitch,
+                volume=self.volume
+            )
+            self.progress.emit(f"    → [{self.voice}] 检测到旧版 API，已切换兼容模式。")
+            await communicate.save(output)
+        self.progress.emit(f"    ✓ [{self.voice}] 语音已保存到 {os.path.basename(output)}")
 
     def get_audio_duration(self, audio_path: str) -> float:
         try:
@@ -869,10 +810,6 @@ class TTSApp(QWidget):
 
         # 标点转换控件
         self.punctuation_layout = QHBoxLayout()
-        # 手动刷新鉴权按钮（放在标点转换行的最左侧）
-        self.refresh_auth_button = QPushButton("刷新鉴权")
-        self.refresh_auth_button.setToolTip("手动刷新 Edge TTS 的鉴权参数，解决 401/连接异常后立即恢复。")
-        self.refresh_auth_button.clicked.connect(self._on_manual_refresh_auth)
         self.punctuation_label = QLabel("标点转换:")
         self.punctuation_combo = QComboBox()
         self.punctuation_combo.addItem("不转换", "none")
@@ -880,7 +817,6 @@ class TTSApp(QWidget):
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
         self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
         self.punctuation_combo.setToolTip("选择后立即对同目录下所有 txt 文件执行转换")
-        self.punctuation_layout.addWidget(self.refresh_auth_button)
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
 
@@ -1156,22 +1092,6 @@ class TTSApp(QWidget):
         self.log_view.append("3. 点击“开始转换”按钮启动")
         self.log_view.append("4. 可选：勾选“同步生成 SRT 字幕文件”并调整参数")
         self.log_view.append("")
-
-    def _on_manual_refresh_auth(self):
-        """手动刷新 Edge TTS 鉴权参数。"""
-        try:
-            self.log_view.append("↻ 正在刷新 Edge TTS 鉴权…")
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            success = asyncio.run(refresh_edge_tts_key_async(force=True))
-        except Exception as e:
-            success = False
-            self.log_view.append(f"⚠ 刷新异常: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-        if success:
-            self.log_view.append("✓ 鉴权刷新成功。")
-        else:
-            self.log_view.append("⚠ 鉴权刷新失败，请稍后重试或检查网络。")
 
     # ---------- Splitter 尺寸控制 ----------
     def _store_expanded_sizes(self):
@@ -1862,18 +1782,6 @@ class TTSApp(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    
-    # 设置为 Python 可执行文件的图标（pythonw.exe）
-    try:
-        import sys
-        python_exe = sys.executable  # pythonw.exe 路径
-        if os.path.exists(python_exe):
-            icon = QIcon(python_exe)
-            if not icon.isNull():
-                app.setWindowIcon(icon)
-    except Exception:
-        pass
-    
     window = TTSApp()
     window.show()
     sys.exit(app.exec())

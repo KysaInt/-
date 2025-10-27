@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QScrollArea, QProgressBar, QMessageBox, QGridLayout
 )
 from PySide6.QtCore import QThread, Signal, Qt, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QPalette, QFontDatabase
+from PySide6.QtGui import QFont, QPalette, QFontDatabase, QIcon
 
 
 # ============================================================================
@@ -1008,6 +1008,17 @@ class SubtitlePauseMatcherUI(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # 设置为 Python 可执行文件的图标（pythonw.exe）
+    try:
+        python_exe = sys.executable  # pythonw.exe 路径
+        if os.path.exists(python_exe):
+            icon = QIcon(python_exe)
+            if not icon.isNull():
+                app.setWindowIcon(icon)
+    except Exception:
+        pass
+    
     window = SubtitlePauseMatcherUI()
     window.show()
     sys.exit(app.exec())

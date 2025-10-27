@@ -220,6 +220,15 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     
+    # Windows 特定：在应用启动最早期设置 AppUserModelID，确保任务栏图标正确显示
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            myappid = 'aye.tts.main.v1'  # 唯一标识此应用
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+    
     # 设置应用信息
     app.setOrganizationName("AYE")
     app.setOrganizationDomain("local.aye")
