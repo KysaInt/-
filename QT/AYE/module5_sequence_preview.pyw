@@ -100,10 +100,22 @@ class ScanWorker(QThread):
                     return
                 for file in files:
                     if file.lower().endswith('.png'):
-                        # Simplified regex to capture base name and frame number
+                        # Try to extract base name and frame number
+                        # Supports formats like: name_0001.png, name.0001.png, name0001.png, 0001.png
                         match = re.match(r'(.+?)[._]?(\d+)\.png$', file, re.IGNORECASE)
                         if match:
                             base_name, frame_str = match.groups()
+                            
+                            # If base_name is empty or only contains digits (pure numeric filename),
+                            # use the folder name as the sequence name
+                            if not base_name or base_name.isdigit():
+                                # Get the folder name (handle case where root == self.path)
+                                folder_name = os.path.basename(root)
+                                # If folder is also numeric or we're in root, use "sequence"
+                                if not folder_name or folder_name.isdigit():
+                                    base_name = "sequence"
+                                else:
+                                    base_name = folder_name
                             
                             # Ignore channel images
                             is_channel = False
@@ -261,6 +273,7 @@ class SequencePreviewWidget(QWidget):
         self.card_container = QWidget()
         self.card_layout = QVBoxLayout(self.card_container)
         self.card_layout.setAlignment(Qt.AlignTop)
+        self.card_layout.addStretch()  # Add stretch at the bottom to keep cards compact
         
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
@@ -339,7 +352,8 @@ class SequencePreviewWidget(QWidget):
             card.viz_widget.set_pixel_height(value)
 
     def clear_cards(self):
-        while self.card_layout.count():
+        # Remove all items except the last one (stretch)
+        while self.card_layout.count() > 1:
             item = self.card_layout.takeAt(0)
             widget = item.widget()
             if widget:
@@ -408,21 +422,36 @@ class SequenceCard(QFrame):
             for file in os.listdir(path):
                 if file.lower().endswith('.png'):
                     # Try to extract frame number from filename
-                    # Supports formats like: name_0001.png, name.0001.png, name0001.png
+                    # Supports formats like: name_0001.png, name.0001.png, name0001.png, 0001.png
                     match = re.match(r'(.+?)[._-]?(\d+)\.png$', file, re.IGNORECASE)
                     if match:
                         base_name = match.group(1)
                         frame_num_str = match.group(2)
                         
-                        # Check if base name matches (case-insensitive)
-                        if base_name.lower() == self.name.lower():
+                        # Determine the sequence name to match against
+                        # For numeric base names or sequence names, use folder-based matching
+                        sequence_name = self.name
+                        
+                        # If self.name is "sequence" (default for pure numeric), 
+                        # match any file with valid frame number
+                        if sequence_name.lower() == "sequence":
+                            # For generic "sequence" name, accept any file in this folder
                             try:
                                 frame_num = int(frame_num_str)
-                                # Check if this frame number is in our expected set
                                 if frame_num in frame_set:
                                     frame_files[frame_num] = os.path.join(path, file)
                             except ValueError:
                                 pass
+                        else:
+                            # Check if base name matches (case-insensitive)
+                            if base_name.lower() == sequence_name.lower():
+                                try:
+                                    frame_num = int(frame_num_str)
+                                    # Check if this frame number is in our expected set
+                                    if frame_num in frame_set:
+                                        frame_files[frame_num] = os.path.join(path, file)
+                                except ValueError:
+                                    pass
         except Exception as e:
             print(f"Error collecting frame files: {e}")
         
