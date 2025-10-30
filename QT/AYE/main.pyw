@@ -43,6 +43,7 @@ from module1_c4d_monitor import C4DMonitorWidget  # 渲染监控（原 mf_pyside
 from module2_sequence_viewer import SequenceViewerWidget  # 序列查看器
 from module3_rename_tool import ReplaceWidget  # 批量替换工具
 from module4_sequence_splitter import SequenceSplitWidget  # 序列切分
+from module5_sequence_preview import SequencePreviewWidget  # 序列预览播放器
 
 class Widget(QWidget):
     def __init__(self, parent=None):
@@ -95,6 +96,17 @@ class Widget(QWidget):
         self.ui.stackedWidget.addWidget(page_4)
         QListWidgetItem(self.ui.navigationList)  # 新增列表项
         self.ui.navigationList.item(3).setText("切分")
+        
+        # --- Module 5: Sequence Preview Player ---
+        self.sequence_preview = SequencePreviewWidget(self)
+        page_5 = _QW()
+        page_5.setObjectName("page_5")
+        page_5_layout = _QVL(page_5)
+        page_5_layout.setContentsMargins(0,0,0,0)
+        page_5_layout.addWidget(self.sequence_preview)
+        self.ui.stackedWidget.addWidget(page_5)
+        QListWidgetItem(self.ui.navigationList)  # 新增列表项
+        self.ui.navigationList.item(4).setText("预览")
 
 
 if __name__ == "__main__":
