@@ -40,10 +40,9 @@ from ui_form import Ui_Widget
 2. 如需再次使用未加序号旧文件名, 只需把下方 import 改回去即可。
 """
 from module1_c4d_monitor import C4DMonitorWidget  # 渲染监控（原 mf_pyside6 / c4d monitor）
-from module2_sequence_viewer import SequenceViewerWidget  # 序列查看器
+from module5_sequence_preview import SequencePreviewWidget  # 序列预览播放器（替换原模块2）
 from module3_rename_tool import ReplaceWidget  # 批量替换工具
 from module4_sequence_splitter import SequenceSplitWidget  # 序列切分
-from module5_sequence_preview import SequencePreviewWidget  # 序列预览播放器
 
 class Widget(QWidget):
     def __init__(self, parent=None):
@@ -63,16 +62,16 @@ class Widget(QWidget):
         page_layout.addWidget(self.c4d_monitor)
         self.ui.navigationList.item(0).setText("渲染")
 
-        # --- Module 2: Sequence Viewer ---
-        self.sequence_viewer = SequenceViewerWidget(self)
+        # --- Module 2: Sequence Preview Player (replaced from Module 5) ---
+        self.sequence_preview = SequencePreviewWidget(self)
         page_2_layout = self.ui.page_2.layout()
         while page_2_layout.count():
             item = page_2_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        page_2_layout.addWidget(self.sequence_viewer)
-        self.ui.navigationList.item(1).setText("序列")
+        page_2_layout.addWidget(self.sequence_preview)
+        self.ui.navigationList.item(1).setText("预览")
 
         # --- Module 3: Replace Tool ---
         self.rename_tool = ReplaceWidget(self)
@@ -96,17 +95,6 @@ class Widget(QWidget):
         self.ui.stackedWidget.addWidget(page_4)
         QListWidgetItem(self.ui.navigationList)  # 新增列表项
         self.ui.navigationList.item(3).setText("切分")
-        
-        # --- Module 5: Sequence Preview Player ---
-        self.sequence_preview = SequencePreviewWidget(self)
-        page_5 = _QW()
-        page_5.setObjectName("page_5")
-        page_5_layout = _QVL(page_5)
-        page_5_layout.setContentsMargins(0,0,0,0)
-        page_5_layout.addWidget(self.sequence_preview)
-        self.ui.stackedWidget.addWidget(page_5)
-        QListWidgetItem(self.ui.navigationList)  # 新增列表项
-        self.ui.navigationList.item(4).setText("预览")
 
 
 if __name__ == "__main__":

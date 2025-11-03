@@ -16,9 +16,41 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
     QLineEdit, QSpinBox, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize
-from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QPixmap
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize, QRect
+from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QPixmap, QCursor
 from pathlib import Path
+
+class ResizeHandle(QFrame):
+    """可拖拽的高度调整分隔符"""
+    def __init__(self, target_widget, sequence_card, parent=None):
+        super().__init__(parent)
+        self.target_widget = target_widget
+        self.sequence_card = sequence_card
+        self.setFixedHeight(5)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setStyleSheet("ResizeHandle { background-color: #cccccc; border: 1px solid #999; }")
+        self.is_dragging = False
+        self.drag_start_y = 0
+        self.original_height = 0
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.drag_start_y = event.globalPosition().y()
+            self.original_height = self.target_widget.maximumHeight()
+
+    def mouseMoveEvent(self, event):
+        if self.is_dragging:
+            delta = event.globalPosition().y() - self.drag_start_y
+            new_height = max(100, self.original_height + delta)  # 最小高度 100px
+            self.target_widget.setMaximumHeight(new_height)
+
+    def mouseReleaseEvent(self, event):
+        if self.is_dragging:
+            self.is_dragging = False
+            # 释放时刷新预览
+            if self.sequence_card.all_frame_files:
+                self.sequence_card.display_frame(self.sequence_card.current_frame_index)
 
 class CollapsibleBox(QWidget):
     """A collapsible box widget."""
@@ -272,8 +304,10 @@ class SequencePreviewWidget(QWidget):
         
         self.card_container = QWidget()
         self.card_layout = QVBoxLayout(self.card_container)
-        self.card_layout.setAlignment(Qt.AlignTop)
-        self.card_layout.addStretch()  # Add stretch at the bottom to keep cards compact
+        self.card_layout.setSpacing(0)  # Remove spacing between cards
+        self.card_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        # 不要在上方添加 stretch，卡片从顶部紧贴开始排列
+        # 只在最后添加 stretch 用来填充剩余空间
         
         self.scroll_area.setWidget(self.card_container)
         main_layout.addWidget(self.scroll_area)
@@ -333,6 +367,9 @@ class SequencePreviewWidget(QWidget):
                 self.card_layout.addWidget(card)
                 self.cards.append(card)
         
+        # 在所有卡片添加完后，在最下方添加拉伸来填充剩余空间
+        self.card_layout.addStretch()
+        
         self.scan_worker = None
 
     def update_min_threshold(self, value):
@@ -352,8 +389,8 @@ class SequencePreviewWidget(QWidget):
             card.viz_widget.set_pixel_height(value)
 
     def clear_cards(self):
-        # Remove all items except the last one (stretch)
-        while self.card_layout.count() > 1:
+        # Remove all items from layout
+        while self.card_layout.count() > 0:
             item = self.card_layout.takeAt(0)
             widget = item.widget()
             if widget:
@@ -384,6 +421,8 @@ class SequenceCard(QFrame):
     def __init__(self, name, data, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
+        # 设置尺寸策略: 水平拉伸, 垂直 Fixed (高度不变，始终紧凑)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         self.name = name
         self.data = data
@@ -400,6 +439,9 @@ class SequenceCard(QFrame):
         self.current_frame_index = 0
         self.playback_enabled = False
         self.playback_speed = 30  # ms per frame
+        self.last_preview_label_size = None  # 跟踪上次预览标签的大小
+        self._cached_pixmap = None  # 缓存当前显示的原始像素图
+        self._last_loaded_frame_path = None  # 跟踪上次加载的文件路径
         
         self.setup_ui()
         self.setup_animation()
@@ -407,6 +449,13 @@ class SequenceCard(QFrame):
         # Playback timer
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self.advance_frame)
+        
+        # 大小改变监听定时器 - 用于即时更新预览
+        self.size_monitor_timer = QTimer(self)
+        self.size_monitor_timer.setSingleShot(False)
+        self.size_monitor_timer.setInterval(30)  # 每30ms检查一次大小，提高响应速度
+        self.size_monitor_timer.timeout.connect(self.check_preview_label_size)
+        self.pending_refresh = False  # 防抖标志
 
     def _collect_frame_files(self, frame_numbers):
         """Collect actual file paths for each frame number"""
@@ -475,6 +524,8 @@ class SequenceCard(QFrame):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        # 关键：不要在主布局中添加任何拉伸，让所有子元素保持其自然大小
+        main_layout.setSizeConstraint(QVBoxLayout.SetMinimumSize)
         
         # Header (clickable)
         self.header_widget = QFrame()
@@ -482,14 +533,9 @@ class SequenceCard(QFrame):
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setContentsMargins(4, 4, 4, 4)
         
-        self.toggle_arrow = QLabel("►")
-        self.toggle_arrow.setFont(QFont("Arial", 10, QFont.Bold))
-        self.toggle_arrow.setMinimumWidth(20)
-        
         name_label = QLabel(f"<b>{self.name}</b>")
         name_label.setWordWrap(True)
         completeness_label = QLabel(f"{self.completeness:.1%}")
-        header_layout.addWidget(self.toggle_arrow)
         header_layout.addWidget(name_label)
         header_layout.addStretch()
         header_layout.addWidget(completeness_label)
@@ -502,12 +548,12 @@ class SequenceCard(QFrame):
         info_label.setStyleSheet("QLabel { font-size: 9pt; color: #888; }")
         main_layout.addWidget(info_label)
         
-        # Visualization
+        # Visualization (这部分不会被压缩)
         self.viz_widget = FrameVizWidget(self.min_frame, self.max_frame, self.data['frames'])
         self.viz_widget.setMinimumHeight(20)
         main_layout.addWidget(self.viz_widget)
         
-        # Content widget (expandable)
+        # Content widget (expandable - 可伸缩)
         self.content_widget = QWidget()
         self.content_widget.setObjectName("contentWidget")
         self.content_widget.setMaximumHeight(0)
@@ -519,19 +565,20 @@ class SequenceCard(QFrame):
         
         # Preview label
         self.preview_label = QLabel("无预览")
-        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setAlignment(Qt.AlignCenter | Qt.AlignTop)  # 改为从上对齐
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.preview_label.setMinimumHeight(150)
-        self.preview_label.setMinimumWidth(250)
-        self.preview_label.setMaximumHeight(400)
+        self.preview_label.setMinimumHeight(200)
+        self.preview_label.setMinimumWidth(300)
+        # 移除最大高度限制，让它可以无限制增长
         self.preview_label.setStyleSheet("QLabel { background-color: #2a2a2a; border: 1px solid #555; padding: 5px; }")
+        self.preview_label.setScaledContents(False)
         content_layout.addWidget(self.preview_label)
         
         # Playback controls layout
         controls_layout = QHBoxLayout()
         
-        # Play button
-        self.play_button = QPushButton("▶ 播放")
+        # Play button - 去掉三角标志，使用更简洁的文字
+        self.play_button = QPushButton("播放")
         self.play_button.setCheckable(True)
         self.play_button.setMaximumWidth(100)
         self.play_button.clicked.connect(self.toggle_playback)
@@ -556,7 +603,16 @@ class SequenceCard(QFrame):
         
         content_layout.addLayout(controls_layout)
         
+        # 将 Content widget 添加到主布局，但不会压缩上面的区域
         main_layout.addWidget(self.content_widget)
+        
+        # 添加可调整高度的句柄
+        self.resize_handle = ResizeHandle(self.content_widget, self)
+        main_layout.addWidget(self.resize_handle)
+        
+        # 初始设置 content_widget 的最大高度为 0（默认关闭）
+        # 展开时会自动计算所需高度
+        self.content_widget.setMaximumHeight(0)
         
         # Connect header click
         self.header_widget.mousePressEvent = self.toggle_expanded
@@ -567,26 +623,76 @@ class SequenceCard(QFrame):
         if self.is_expanded and len(self.all_frame_files) > 0 and not self.preview_label.pixmap():
             # Initialize preview on first expand
             self.display_frame(0)
+            # 展开时启动大小监听
+            self.size_monitor_timer.start()
+            # 计算所需的高度以完整显示图片
+            QTimer.singleShot(10, self.auto_adjust_content_height)
+        else:
+            # 收缩时停止大小监听
+            self.size_monitor_timer.stop()
         self.update_animation()
+
+    def auto_adjust_content_height(self):
+        """自动调整 Content 高度以完整显示图片"""
+        if not self.preview_label.pixmap():
+            return
+        
+        # 获取图片的显示高度
+        pixmap = self.preview_label.pixmap()
+        if pixmap and not pixmap.isNull():
+            # 计算图片实际显示的高度
+            img_height = pixmap.height()
+            
+            # 计算需要的总高度：图片高度 + 控制条高度 + padding
+            # 控制条高度约 40px（播放按钮+滑块）
+            # padding 约 20px
+            control_height = 40
+            padding = 20
+            total_required_height = img_height + control_height + padding
+            
+            # 设置 content_widget 的最大高度为计算出的高度
+            self.content_widget.setMaximumHeight(total_required_height)
+            
+            # 重新启动动画以应用新的高度
+            self.toggle_animation.setStartValue(0)
+            self.toggle_animation.setEndValue(total_required_height)
+            self.toggle_animation.start()
+
+    def check_preview_label_size(self):
+        """检查预览标签大小是否改变，如果改变则刷新预览"""
+        if not self.is_expanded or not self.preview_label.pixmap():
+            return
+        
+        current_size = (self.preview_label.width(), self.preview_label.height())
+        
+        # 只有当大小真正改变了，且不在处理中时，才刷新
+        if self.last_preview_label_size != current_size and not self.pending_refresh:
+            self.last_preview_label_size = current_size
+            self.pending_refresh = True
+            # 使用 QTimer 延迟刷新，避免频繁重新计算
+            QTimer.singleShot(0, lambda: self._do_refresh_preview())
+
+    def _do_refresh_preview(self):
+        """执行预览刷新"""
+        try:
+            self.display_frame(self.current_frame_index)
+        finally:
+            self.pending_refresh = False
 
     def update_animation(self):
         """Update expand/collapse animation"""
         self.toggle_animation.setStartValue(self.content_widget.height())
         if self.is_expanded:
-            # Temporarily set to maximum to get correct height
-            self.content_widget.setMaximumHeight(16777215)  # Max value for QWidget
-            # Force layout calculation
-            self.content_widget.adjustSize()
-            content_height = self.content_widget.heightForWidth(self.width())
-            if content_height <= 0:
-                content_height = self.content_widget.sizeHint().height()
-            if content_height <= 0:
-                content_height = 300  # Fallback height
-            self.toggle_animation.setEndValue(content_height)
-            self.toggle_arrow.setText("▼")
+            # 如果是手动切换展开（不是自动调整），使用默认高度
+            # 自动调整会在 auto_adjust_content_height 中直接修改动画
+            if self.content_widget.maximumHeight() == 16777215:  # 未设置最大高度时
+                target_height = 350
+                self.content_widget.setMaximumHeight(target_height)
+            else:
+                target_height = self.content_widget.maximumHeight()
+            self.toggle_animation.setEndValue(target_height)
         else:
             self.toggle_animation.setEndValue(0)
-            self.toggle_arrow.setText("►")
             self.stop_playback()
         self.toggle_animation.start()
 
@@ -603,27 +709,42 @@ class SequenceCard(QFrame):
             file_path = self.all_frame_files[frame_num]
             
             try:
-                pixmap = QPixmap(file_path)
-                if not pixmap.isNull():
-                    # Scale to fit preview_label while maintaining aspect ratio
-                    label_width = self.preview_label.width()
-                    label_height = self.preview_label.height()
-                    if label_width > 0 and label_height > 0:
-                        scaled_pixmap = pixmap.scaledToWidth(label_width - 10, Qt.SmoothTransformation)
-                        if scaled_pixmap.height() > label_height - 10:
-                            scaled_pixmap = pixmap.scaledToHeight(label_height - 10, Qt.SmoothTransformation)
+                # 第一次显示该帧时加载图片，之后使用缓存
+                if not hasattr(self, '_last_loaded_frame_path') or self._last_loaded_frame_path != file_path:
+                    pixmap = QPixmap(file_path)
+                    if not pixmap.isNull():
+                        self._cached_pixmap = pixmap
+                        self._last_loaded_frame_path = file_path
                     else:
-                        scaled_pixmap = pixmap.scaledToWidth(200, Qt.SmoothTransformation)
-                    
-                    self.preview_label.setPixmap(scaled_pixmap)
-                    self.current_frame_index = index
-                    self.frame_slider.blockSignals(True)
-                    self.frame_slider.setValue(index)
-                    self.frame_slider.blockSignals(False)
-                    total = len(sorted_frames)
-                    self.frame_number_label.setText(f"{frame_num} ({index+1}/{total})")
+                        self.preview_label.setText(f"无法加载:\n{os.path.basename(file_path)}")
+                        return
                 else:
-                    self.preview_label.setText(f"无法加载:\n{os.path.basename(file_path)}")
+                    pixmap = self._cached_pixmap
+                
+                # 获取预览标签的实际可用宽度
+                label_width = self.preview_label.width()
+                
+                # 如果标签宽度尚未确定，使用默认值
+                if label_width <= 0:
+                    label_width = 300
+                
+                # 计算缩放后的宽度 - 总是使用满宽度
+                pixmap_width = pixmap.width()
+                pixmap_height = pixmap.height()
+                
+                # 按宽度缩放，让图片填满标签宽度
+                final_width = label_width - 10  # 保留padding空间
+                
+                # 快速缩放：使用 FastTransformation 替代 SmoothTransformation
+                scaled_pixmap = pixmap.scaledToWidth(final_width, Qt.FastTransformation)
+                
+                self.preview_label.setPixmap(scaled_pixmap)
+                self.current_frame_index = index
+                self.frame_slider.blockSignals(True)
+                self.frame_slider.setValue(index)
+                self.frame_slider.blockSignals(False)
+                total = len(sorted_frames)
+                self.frame_number_label.setText(f"{frame_num} ({index+1}/{total})")
             except Exception as e:
                 self.preview_label.setText(f"错误:\n{str(e)}")
         else:
@@ -634,10 +755,10 @@ class SequenceCard(QFrame):
         self.display_frame(value)
 
     def toggle_playback(self, checked):
-        """Toggle playback"""
+        """Toggle playback - 首尾循环播放"""
         self.playback_enabled = checked
         if checked:
-            self.play_button.setText("⏸ 暂停")
+            self.play_button.setText("暂停")
             if len(self.all_frame_files) > 0 and not self.playback_timer.isActive():
                 self.playback_timer.start(self.playback_speed)
         else:
@@ -647,7 +768,7 @@ class SequenceCard(QFrame):
         """Stop playback"""
         self.playback_enabled = False
         self.play_button.setChecked(False)
-        self.play_button.setText("▶ 播放")
+        self.play_button.setText("播放")
         if self.playback_timer.isActive():
             self.playback_timer.stop()
 
@@ -659,6 +780,12 @@ class SequenceCard(QFrame):
         sorted_frames = sorted(self.all_frame_files.keys())
         next_index = (self.current_frame_index + 1) % len(sorted_frames)
         self.display_frame(next_index)
+
+    def closeEvent(self, event):
+        """关闭时清理定时器"""
+        self.size_monitor_timer.stop()
+        self.playback_timer.stop()
+        super().closeEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """Opens the sequence folder on double-click."""
