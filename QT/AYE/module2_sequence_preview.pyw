@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Module 5: 序列预览播放器 (Sequence Preview Player)
+Module 2: 序列预览播放器 (Sequence Preview Player)
 功能: PNG 序列查看器 - 支持展开/收缩、图像预览、滑块控制、自动播放
 
 创建日期: 2025-10-30
-版本: 1.1
+版本: 1.2
+修复: 折叠后无法重新打开的问题
 """
 import sys
 import os
@@ -80,6 +81,9 @@ class CollapsibleBox(QWidget):
 
         self.toggle_button.clicked.connect(self.toggle)
         self.update_arrow(False)
+        
+        # 添加标志防止在动画进行中再次触发
+        self._animation_in_progress = False
 
     def setContentLayout(self, layout):
         # Clear the old layout and its widgets
@@ -97,6 +101,15 @@ class CollapsibleBox(QWidget):
         self.content_area.setLayout(layout)
 
     def toggle(self, checked):
+        # 如果动画正在进行中，忽略此次点击
+        if self._animation_in_progress:
+            # 恢复按钮状态到之前的状态
+            self.toggle_button.blockSignals(True)
+            self.toggle_button.setChecked(not checked)
+            self.toggle_button.blockSignals(False)
+            return
+        
+        self._animation_in_progress = True
         self.update_arrow(checked)
         
         # Calculate the content height at the moment of toggling
@@ -104,13 +117,31 @@ class CollapsibleBox(QWidget):
         self.content_area.setMaximumHeight(16777215)  # 16777215 是 Qt 默认的最大高度
         content_height = self.content_area.sizeHint().height()
         
+        # 确保计算出有效的高度
+        if content_height <= 0:
+            content_height = 200  # 默认最小高度
+        
         self.toggle_animation.setStartValue(self.content_area.height())
         if checked:
             self.toggle_animation.setEndValue(content_height)
         else:
             self.toggle_animation.setEndValue(0)
         
+        # 连接动画完成信号以解除动画进行中的标志
+        self.toggle_animation.finished.connect(self._on_animation_finished)
         self.toggle_animation.start()
+
+    def _on_animation_finished(self):
+        """动画完成时的回调"""
+        self._animation_in_progress = False
+        # 如果是收缩状态，确保最大高度被重置为 0
+        if not self.toggle_button.isChecked():
+            self.content_area.setMaximumHeight(0)
+        # 断开连接以避免重复调用
+        try:
+            self.toggle_animation.finished.disconnect(self._on_animation_finished)
+        except:
+            pass
 
     def update_arrow(self, checked):
         arrow = "▼" if checked else "►"
@@ -458,6 +489,9 @@ class SequenceCard(QFrame):
         self.size_monitor_timer.setInterval(30)  # 每30ms检查一次大小，提高响应速度
         self.size_monitor_timer.timeout.connect(self.check_preview_label_size)
         self.pending_refresh = False  # 防抖标志
+        
+        # 防止重复切换的标志
+        self._toggle_in_progress = False
 
     def _collect_frame_files(self, frame_numbers):
         """Collect actual file paths for each frame number"""
@@ -518,6 +552,7 @@ class SequenceCard(QFrame):
 
     def on_animation_finished(self):
         """Called when animation finishes"""
+        self._toggle_in_progress = False
         if not self.is_expanded:
             # Ensure content is completely hidden
             self.content_widget.setMaximumHeight(0)
@@ -621,6 +656,11 @@ class SequenceCard(QFrame):
 
     def toggle_expanded(self, event):
         """Toggle expanded state"""
+        # 如果正在进行切换动画，忽略本次点击
+        if self._toggle_in_progress:
+            return
+        
+        self._toggle_in_progress = True
         self.is_expanded = not self.is_expanded
         if self.is_expanded and len(self.all_frame_files) > 0 and not self.preview_label.pixmap():
             # Initialize preview on first expand

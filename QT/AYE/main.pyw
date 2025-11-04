@@ -40,7 +40,7 @@ from ui_form import Ui_Widget
 2. 如需再次使用未加序号旧文件名, 只需把下方 import 改回去即可。
 """
 from module1_c4d_monitor import C4DMonitorWidget  # 渲染监控（原 mf_pyside6 / c4d monitor）
-from module5_sequence_preview import SequencePreviewWidget  # 序列预览播放器（替换原模块2）
+from module2_sequence_preview import SequencePreviewWidget  # 序列预览播放器
 from module3_rename_tool import ReplaceWidget  # 批量替换工具
 from module4_sequence_splitter import SequenceSplitWidget  # 序列切分
 
