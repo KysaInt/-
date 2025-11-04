@@ -1071,41 +1071,21 @@ class SequenceCard(QFrame):
         
         main_layout.addWidget(self.header_widget)
         
-        # Info line
-        info_layout = QGridLayout()
-        info_layout.setSpacing(4)
+        # Info line - single line with all info
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(12)
         info_layout.setContentsMargins(8, 2, 8, 2)
         main_layout.addLayout(info_layout)
         
-        # Original single line:
-        # info_text = f"范围: {self.min_frame}-{self.max_frame}  |  总计: {self.total_frames} 帧  |  找到: {self.found_frames} 帧"
-        # info_label = QLabel(info_text)
-        # info_label.setStyleSheet("QLabel { font-size: 9pt; color: #888; }")
-        # main_layout.addWidget(info_label)
-        
-        # New multi-line info with fixed-width labels
-        info_layout.addWidget(QLabel("范围:"), 0, 0)
-        info_layout.addWidget(QLabel(f"{self.min_frame}-{self.max_frame}"), 0, 1)
-        info_layout.addWidget(QLabel("总帧数:"), 0, 2)
-        info_layout.addWidget(QLabel(f"{self.total_frames}"), 0, 3)
-        info_layout.addWidget(QLabel("缺失:"), 1, 0)
-        info_layout.addWidget(QLabel(f"{self.total_frames - self.found_frames}"), 1, 1)
-        info_layout.addWidget(QLabel("完整度:"), 1, 2)
-        info_layout.addWidget(QLabel(f"{self.completeness:.1%}"), 1, 3)
-
-        # 新增时间信息行
-        info_layout.addWidget(QLabel("ST:"), 2, 0)
-        info_layout.addWidget(QLabel(f"{self.start_time_str}"), 2, 1)
-        info_layout.addWidget(QLabel("ET:"), 2, 2)
-        info_layout.addWidget(QLabel(f"{self.end_time_str}"), 2, 3)
-        info_layout.addWidget(QLabel("DUR:"), 3, 0)
-        info_layout.addWidget(QLabel(f"{self.duration_str}"), 3, 1)
-        info_layout.addWidget(QLabel("AVG:"), 3, 2)
-        info_layout.addWidget(QLabel(f"{self.avg_time_str}"), 3, 3)
-
-        # 调整列宽，让它们更均匀
-        for i in range(4):
-            info_layout.setColumnStretch(i, 1)
+        # Add all info in one line
+        info_layout.addWidget(QLabel(f"范围: {self.min_frame}-{self.max_frame}"))
+        info_layout.addWidget(QLabel(f"总帧: {self.total_frames}"))
+        info_layout.addWidget(QLabel(f"缺失: {self.total_frames - self.found_frames}"))
+        info_layout.addWidget(QLabel(f"ST: {self.start_time_str}"))
+        info_layout.addWidget(QLabel(f"ET: {self.end_time_str}"))
+        info_layout.addWidget(QLabel(f"DUR: {self.duration_str}"))
+        info_layout.addWidget(QLabel(f"AVG: {self.avg_time_str}"))
+        info_layout.addStretch()
 
         # Visualization (这部分不会被压缩)
         self.viz_widget = FrameVizWidget(self.min_frame, self.max_frame, self.data['frames'])
@@ -1546,3 +1526,16 @@ class FrameVizWidget(QWidget):
             color = self.exist_color if frame_num in self.found_frames else self.missing_color
             
             painter.fillRect(x, y, self.pixel_width, self.pixel_height, color)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = QMainWindow()
+    window.setWindowTitle("序列预览播放器")
+    window.resize(1200, 800)
+    
+    widget = SequencePreviewWidget()
+    window.setCentralWidget(widget)
+    window.show()
+    
+    sys.exit(app.exec())
