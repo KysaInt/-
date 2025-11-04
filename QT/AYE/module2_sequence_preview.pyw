@@ -15,7 +15,7 @@ from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
-    QLineEdit, QSpinBox, QSizePolicy
+    QLineEdit, QSpinBox, QSizePolicy, QCheckBox, QDoubleSpinBox, QDialog
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize, QRect
 from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QPixmap, QCursor
@@ -247,6 +247,10 @@ class SequencePreviewWidget(QWidget):
         self.min_frame_threshold = 5
         self.max_frame_threshold = 10000
         
+        # 实时播放相关设置
+        self.realtime_playback_enabled = False
+        self.realtime_target_fps = 24.0  # 目标帧率（实际播放时的FPS）
+        
         # 状态保存用于模块切换时的恢复
         self._saved_state = {
             'card_states': {},  # 保存每张卡片的展开状态和高度
@@ -356,6 +360,34 @@ class SequencePreviewWidget(QWidget):
         self.max_frames_spinbox.setValue(self.max_frame_threshold)
         self.max_frames_spinbox.valueChanged.connect(self.update_max_threshold)
         settings_layout.addWidget(self.max_frames_spinbox, 4, 1, 1, 3)  # 跨3列
+
+        # Realtime Playback Settings
+        # 复选框、帧率在同一行
+        playback_container = QWidget()
+        playback_layout = QHBoxLayout(playback_container)
+        playback_layout.setContentsMargins(0, 0, 0, 0)
+        playback_layout.setSpacing(10)
+        
+        self.realtime_playback_checkbox = QCheckBox("启用实时播放")
+        self.realtime_playback_checkbox.setChecked(self.realtime_playback_enabled)
+        self.realtime_playback_checkbox.stateChanged.connect(self.update_realtime_playback_enabled)
+        playback_layout.addWidget(self.realtime_playback_checkbox)
+        
+        # 目标帧率输入
+        fps_label = QLabel("目标帧率:")
+        playback_layout.addWidget(fps_label)
+        self.realtime_fps_spinbox = QDoubleSpinBox()
+        self.realtime_fps_spinbox.setRange(0.1, 300.0)
+        self.realtime_fps_spinbox.setValue(self.realtime_target_fps)
+        self.realtime_fps_spinbox.setSingleStep(1.0)
+        self.realtime_fps_spinbox.setDecimals(1)
+        self.realtime_fps_spinbox.setSuffix(" fps")
+        self.realtime_fps_spinbox.valueChanged.connect(self.update_realtime_fps)
+        playback_layout.addWidget(self.realtime_fps_spinbox)
+        playback_layout.addStretch()
+        
+        settings_layout.addWidget(QLabel("播放设置:"), 5, 0)
+        settings_layout.addWidget(playback_container, 5, 1, 1, 3)  # 跨3列
 
         self.collapsible_box.setContentLayout(settings_layout)
         main_layout.addWidget(self.collapsible_box)
@@ -476,6 +508,11 @@ class SequencePreviewWidget(QWidget):
                 # Apply current slider values to new cards
                 card.viz_widget.set_pixel_width(self.width_slider.value())
                 card.viz_widget.set_pixel_height(self.height_slider.value())
+                # 传递实时播放设置并更新控制条显示
+                card.realtime_playback_enabled = self.realtime_playback_enabled
+                card.realtime_target_fps = self.realtime_target_fps
+                card.playback_control_bar.set_realtime_enabled(self.realtime_playback_enabled)
+                card.playback_control_bar.set_fps(self.realtime_target_fps)
                 self.card_layout.addWidget(card)
                 self.cards.append(card)
         
@@ -491,6 +528,29 @@ class SequencePreviewWidget(QWidget):
     def update_max_threshold(self, value):
         self.max_frame_threshold = value
         self.scan_directory()
+
+    def update_realtime_playback_enabled(self, state):
+        """更新实时播放启用状态 - 覆盖所有卡片设置"""
+        self.realtime_playback_enabled = self.realtime_playback_checkbox.isChecked()
+        # 将设置传递给所有卡片
+        for card in getattr(self, 'cards', []):
+            card.realtime_playback_enabled = self.realtime_playback_enabled
+            # 更新卡片控制条的显示
+            card.playback_control_bar.set_realtime_enabled(self.realtime_playback_enabled)
+
+    def update_realtime_fps(self, value):
+        """更新目标帧率 - 覆盖所有卡片设置"""
+        self.realtime_target_fps = value
+        # 将设置传递给所有卡片
+        for card in getattr(self, 'cards', []):
+            card.realtime_target_fps = self.realtime_target_fps
+            # 更新卡片控制条的显示
+            card.playback_control_bar.set_fps(self.realtime_target_fps)
+            # 如果正在播放，重新启动定时器以应用新的帧率
+            if card.playback_enabled and card.playback_timer.isActive():
+                card.playback_timer.stop()
+                card.update_playback_timer_interval()
+                card.playback_timer.start()
 
     def update_pixel_width(self, value):
         for card in getattr(self, 'cards', []):
@@ -570,11 +630,15 @@ class SequencePreviewWidget(QWidget):
 
     def _save_state(self):
         """保存当前模块的状态（展开卡片、滚动位置等）"""
+        # 保存实时播放设置
+        self._saved_state['realtime_playback_enabled'] = self.realtime_playback_enabled
+        self._saved_state['realtime_target_fps'] = self.realtime_target_fps
+        
         # 保存滚动条位置
         if hasattr(self, 'scroll_area') and self.scroll_area.verticalScrollBar():
             self._saved_state['scroll_position'] = self.scroll_area.verticalScrollBar().value()
         
-        # 保存每张卡片的展开状态和高度
+        # 保存每张卡片的展开状态、配置和播放状态
         if hasattr(self, 'cards'):
             for card in self.cards:
                 card_name = card.name
@@ -583,6 +647,9 @@ class SequencePreviewWidget(QWidget):
                     'max_height': card.content_widget.maximumHeight(),
                     'current_frame': card.current_frame_index if hasattr(card, 'current_frame_index') else 0,
                     'is_playing': card.playback_enabled if hasattr(card, 'playback_enabled') else False,
+                    # 保存每张卡片的独立实时播放配置
+                    'realtime_enabled': card.realtime_playback_enabled if hasattr(card, 'realtime_playback_enabled') else False,
+                    'realtime_fps': card.realtime_target_fps if hasattr(card, 'realtime_target_fps') else 24.0,
                 }
                 # 停止播放
                 if hasattr(card, 'playback_enabled') and card.playback_enabled:
@@ -595,6 +662,18 @@ class SequencePreviewWidget(QWidget):
         """恢复之前保存的状态"""
         if not hasattr(self, 'cards'):
             return
+        
+        # 恢复实时播放设置
+        saved_realtime_enabled = self._saved_state.get('realtime_playback_enabled', False)
+        saved_realtime_fps = self._saved_state.get('realtime_target_fps', 24.0)
+        
+        if hasattr(self, 'realtime_playback_checkbox'):
+            self.realtime_playback_checkbox.setChecked(saved_realtime_enabled)
+        if hasattr(self, 'realtime_fps_spinbox'):
+            self.realtime_fps_spinbox.setValue(saved_realtime_fps)
+        
+        self.realtime_playback_enabled = saved_realtime_enabled
+        self.realtime_target_fps = saved_realtime_fps
         
         # 恢复滚动条位置
         if hasattr(self, 'scroll_area') and self.scroll_area.verticalScrollBar():
@@ -612,6 +691,17 @@ class SequencePreviewWidget(QWidget):
                 saved_height = state.get('max_height', 0)
                 saved_frame = state.get('current_frame', 0)
                 was_playing = state.get('is_playing', False)
+                # 恢复卡片的独立配置
+                saved_realtime_enabled = state.get('realtime_enabled', False)
+                saved_realtime_fps = state.get('realtime_fps', 24.0)
+                
+                # 恢复卡片的独立实时播放配置
+                card.realtime_playback_enabled = saved_realtime_enabled
+                card.realtime_target_fps = saved_realtime_fps
+                
+                # 更新控制条的显示
+                card.playback_control_bar.set_realtime_enabled(saved_realtime_enabled)
+                card.playback_control_bar.set_fps(saved_realtime_fps)
                 
                 # 直接恢复卡片的内部状态，不触发动画
                 card.is_expanded = was_expanded
@@ -627,10 +717,12 @@ class SequencePreviewWidget(QWidget):
                     
                     # 恢复播放状态
                     if was_playing and len(card.all_frame_files) > 0:
-                        card.play_button.setChecked(True)
+                        card.playback_control_bar.set_playing(True)
                         card.playback_enabled = True
+                        card.last_frame_time = 0.0  # 重置计时
                         if not card.playback_timer.isActive():
-                            card.playback_timer.start(card.playback_speed)
+                            card.update_playback_timer_interval()
+                            card.playback_timer.start()
                 else:
                     # 保持收缩状态
                     card.content_widget.setMaximumHeight(0)
@@ -653,6 +745,148 @@ class SequencePreviewWidget(QWidget):
             self.scan_worker.stop()
             self.scan_worker.wait() # Wait for thread to finish
         super().closeEvent(event)
+
+
+class FpsInputDialog(QDialog):
+    """FPS 输入对话框"""
+    def __init__(self, current_fps=24.0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置目标帧率")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(self)
+        
+        # 标签
+        label = QLabel("输入目标帧率 (0.1 - 300.0):")
+        layout.addWidget(label)
+        
+        # FPS输入框
+        self.fps_input = QDoubleSpinBox()
+        self.fps_input.setRange(0.1, 300.0)
+        self.fps_input.setValue(current_fps)
+        self.fps_input.setSingleStep(1.0)
+        self.fps_input.setDecimals(1)
+        self.fps_input.setSuffix(" fps")
+        layout.addWidget(self.fps_input)
+        
+        # 按钮
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("确定")
+        cancel_button = QPushButton("取消")
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+    
+    def get_fps(self):
+        return self.fps_input.value()
+
+
+class PlaybackControlBar(QWidget):
+    """自定义播放控制条：包括播放按钮、实时播放按钮、FPS输入框"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 播放控制相关属性
+        self.is_playing = False
+        self.realtime_enabled = False
+        self.target_fps = 24.0
+        
+        # 创建主布局
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # 左部分：播放/暂停按钮（只显示符号，更窄）
+        self.play_button = QPushButton("▶")
+        self.play_button.setCheckable(True)
+        self.play_button.setMaximumWidth(32)
+        self.play_button.setMinimumHeight(24)
+        self.play_button.setFlat(False)  # 确保有正常的按钮外观
+        self.play_button.toggled.connect(self._on_play_toggled)  # 使用 toggled 信号
+        self.play_button.clicked.connect(self._on_play_clicked)
+        self.play_button.setToolTip("播放/暂停")
+        main_layout.addWidget(self.play_button)
+        
+        # 中间部分：实时播放按钮（R）
+        self.realtime_button = QPushButton("R")
+        self.realtime_button.setCheckable(True)
+        self.realtime_button.setMaximumWidth(32)
+        self.realtime_button.setMinimumHeight(24)
+        self.realtime_button.clicked.connect(self._on_realtime_clicked)
+        self.realtime_button.setToolTip("启用实时播放模式")
+        main_layout.addWidget(self.realtime_button)
+        
+        # 右侧部分：FPS输入框（直接编辑，无弹窗）
+        self.fps_edit = QLineEdit(f"{self.target_fps:.1f}")
+        self.fps_edit.setMaximumWidth(50)
+        self.fps_edit.setMinimumHeight(24)
+        self.fps_edit.setAlignment(Qt.AlignCenter)
+        self.fps_edit.setEnabled(False)  # 默认禁用
+        self.fps_edit.returnPressed.connect(self._on_fps_edited)
+        self.fps_edit.setToolTip("输入目标帧率（仅在启用实时播放时可用）")
+        main_layout.addWidget(self.fps_edit)
+    
+    def _on_play_clicked(self):
+        """播放按钮点击事件"""
+        self.is_playing = self.play_button.isChecked()
+    
+    def _on_play_toggled(self, checked):
+        """播放按钮状态切换事件 - 负责更新显示文本"""
+        self.is_playing = checked
+        if checked:
+            self.play_button.setText("‖")  # 暂停符号 - 单竖线
+        else:
+            self.play_button.setText("▶")  # 播放符号
+    
+    def _on_realtime_clicked(self):
+        """实时播放按钮点击事件"""
+        self.realtime_enabled = self.realtime_button.isChecked()
+        self.fps_edit.setEnabled(self.realtime_enabled)
+    
+    def _on_fps_edited(self):
+        """FPS输入框回车事件 - 直接在框内编辑"""
+        try:
+            fps = float(self.fps_edit.text())
+            self.target_fps = max(0.1, min(300.0, fps))
+            self.fps_edit.setText(f"{self.target_fps:.1f}")
+        except ValueError:
+            # 如果输入无效，恢复之前的值
+            self.fps_edit.setText(f"{self.target_fps:.1f}")
+    
+    def set_fps(self, fps):
+        """设置FPS值"""
+        self.target_fps = max(0.1, min(300.0, fps))
+        self.fps_edit.setText(f"{self.target_fps:.1f}")
+    
+    def set_realtime_enabled(self, enabled):
+        """设置实时播放启用状态"""
+        self.realtime_enabled = enabled
+        self.realtime_button.setChecked(enabled)
+        self.fps_edit.setEnabled(enabled)
+    
+    def get_realtime_enabled(self):
+        """获取实时播放启用状态"""
+        return self.realtime_enabled
+    
+    def get_fps(self):
+        """获取FPS值"""
+        return self.target_fps
+    
+    def set_playing(self, playing):
+        """设置播放状态"""
+        self.is_playing = playing
+        self.play_button.setChecked(playing)
+        if playing:
+            self.play_button.setText("‖")  # 暂停符号
+        else:
+            self.play_button.setText("▶")  # 播放符号
+    
+    def is_playing_state(self):
+        """获取播放状态"""
+        return self.is_playing
 
 
 class SequenceCard(QFrame):
@@ -680,6 +914,11 @@ class SequenceCard(QFrame):
         self.last_preview_label_size = None  # 跟踪上次预览标签的大小
         self._cached_pixmap = None  # 缓存当前显示的原始像素图
         self._last_loaded_frame_path = None  # 跟踪上次加载的文件路径
+        
+        # 实时播放相关设置
+        self.realtime_playback_enabled = False
+        self.realtime_target_fps = 24.0
+        self.last_frame_time = 0.0  # 用于计算跳帧
         
         self.setup_ui()
         self.setup_animation()
@@ -824,30 +1063,34 @@ class SequenceCard(QFrame):
         
         # Playback controls layout
         controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(4)
         
-        # Play button - 去掉三角标志，使用更简洁的文字
-        self.play_button = QPushButton("播放")
-        self.play_button.setCheckable(True)
-        self.play_button.setMaximumWidth(100)
-        self.play_button.clicked.connect(self.toggle_playback)
-        self.play_button.setEnabled(len(self.all_frame_files) > 0)
-        controls_layout.addWidget(self.play_button)
+        # 使用新的自定义播放控制条
+        self.playback_control_bar = PlaybackControlBar()
+        self.playback_control_bar.play_button.clicked.connect(self.toggle_playback)
+        self.playback_control_bar.realtime_button.clicked.connect(self.on_realtime_button_clicked)
+        self.playback_control_bar.fps_edit.returnPressed.connect(self.on_fps_edited)
+        self.playback_control_bar.play_button.setEnabled(len(self.all_frame_files) > 0)
         
-        # Frame slider
+        # 播放控制条不拉伸，始终靠左
+        controls_layout.addWidget(self.playback_control_bar, 0)
+        
+        # Frame slider - 占用所有剩余空间
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setMinimum(0)
         max_slider = max(0, len(self.all_frame_files) - 1)
         self.frame_slider.setMaximum(max_slider)
         self.frame_slider.sliderMoved.connect(self.on_slider_moved)
         self.frame_slider.setEnabled(len(self.all_frame_files) > 0)
-        controls_layout.addWidget(self.frame_slider)
+        controls_layout.addWidget(self.frame_slider, 1)
         
-        # Frame number label
+        # Frame number label - 固定宽度，靠右
         self.frame_number_label = QLabel("0/0")
         self.frame_number_label.setMinimumWidth(60)
         self.frame_number_label.setAlignment(Qt.AlignCenter)
         self.frame_number_label.setStyleSheet("QLabel { font-size: 9pt; }")
-        controls_layout.addWidget(self.frame_number_label)
+        controls_layout.addWidget(self.frame_number_label, 0)
         
         content_layout.addLayout(controls_layout)
         
@@ -1020,19 +1263,52 @@ class SequenceCard(QFrame):
 
     def toggle_playback(self, checked):
         """Toggle playback - 首尾循环播放"""
-        self.playback_enabled = checked
-        if checked:
-            self.play_button.setText("暂停")
+        # 从控制条中获取状态
+        self.playback_enabled = self.playback_control_bar.is_playing
+        
+        if self.playback_enabled:
             if len(self.all_frame_files) > 0 and not self.playback_timer.isActive():
-                self.playback_timer.start(self.playback_speed)
+                self.last_frame_time = 0.0  # 重置计时
+                self.update_playback_timer_interval()
+                self.playback_timer.start()
         else:
             self.stop_playback()
+
+    def on_realtime_button_clicked(self):
+        """实时播放按钮点击事件"""
+        self.realtime_playback_enabled = self.playback_control_bar.get_realtime_enabled()
+        # 如果正在播放，更新定时器间隔
+        if self.playback_enabled and self.playback_timer.isActive():
+            self.playback_timer.stop()
+            self.last_frame_time = 0.0
+            self.update_playback_timer_interval()
+            self.playback_timer.start()
+
+    def on_fps_edited(self):
+        """FPS输入框编辑事件"""
+        # 更新本卡片的FPS设置
+        self.realtime_target_fps = self.playback_control_bar.get_fps()
+        # 如果正在播放，更新定时器间隔
+        if self.playback_enabled and self.playback_timer.isActive():
+            self.playback_timer.stop()
+            self.last_frame_time = 0.0
+            self.update_playback_timer_interval()
+            self.playback_timer.start()
+
+    def update_playback_timer_interval(self):
+        """根据实时播放设置更新定时器间隔"""
+        if self.realtime_playback_enabled and self.realtime_target_fps > 0:
+            # 实时播放模式：每帧的时间间隔（毫秒）
+            interval = int(1000.0 / self.realtime_target_fps)
+        else:
+            # 普通播放模式
+            interval = self.playback_speed
+        self.playback_timer.setInterval(interval)
 
     def stop_playback(self):
         """Stop playback"""
         self.playback_enabled = False
-        self.play_button.setChecked(False)
-        self.play_button.setText("播放")
+        self.playback_control_bar.set_playing(False)
         if self.playback_timer.isActive():
             self.playback_timer.stop()
 
@@ -1042,8 +1318,31 @@ class SequenceCard(QFrame):
             return
         
         sorted_frames = sorted(self.all_frame_files.keys())
-        next_index = (self.current_frame_index + 1) % len(sorted_frames)
-        self.display_frame(next_index)
+        
+        if self.realtime_playback_enabled and self.realtime_target_fps > 0:
+            # 实时播放模式：根据目标FPS计算跳帧
+            import time
+            current_time = time.time()
+            
+            if self.last_frame_time == 0.0:
+                # 首次调用
+                self.last_frame_time = current_time
+                elapsed = 0.0
+            else:
+                elapsed = current_time - self.last_frame_time
+                self.last_frame_time = current_time
+            
+            # 根据实际间隔计算应该跳过多少帧
+            # 例如：目标24fps，实际过了50ms，那应该前进2帧
+            frame_duration = 1.0 / self.realtime_target_fps
+            frames_to_advance = max(1, int(round(elapsed / frame_duration)))
+            
+            next_index = (self.current_frame_index + frames_to_advance) % len(sorted_frames)
+            self.display_frame(next_index)
+        else:
+            # 普通播放模式：每次前进一帧
+            next_index = (self.current_frame_index + 1) % len(sorted_frames)
+            self.display_frame(next_index)
 
     def cleanup(self):
         """清理所有资源和定时器"""
