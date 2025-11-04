@@ -100,6 +100,8 @@ class CollapsibleBox(QWidget):
         self.update_arrow(checked)
         
         # Calculate the content height at the moment of toggling
+        # 临时移除高度限制以获取实际内容高度
+        self.content_area.setMaximumHeight(16777215)  # 16777215 是 Qt 默认的最大高度
         content_height = self.content_area.sizeHint().height()
         
         self.toggle_animation.setStartValue(self.content_area.height())
