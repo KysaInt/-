@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 from collections import defaultdict
+from datetime import datetime, timedelta
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QFrame, QGridLayout, QFileDialog, QSlider,
@@ -907,6 +908,47 @@ class SequenceCard(QFrame):
         self.completeness = self.found_frames / self.total_frames if self.total_frames > 0 else 0
         
         self.all_frame_files = self._collect_frame_files(frames)
+
+        # --- 新增时间信息计算 ---
+        self.start_time_str = "N/A"
+        self.end_time_str = "N/A"
+        self.duration_str = "N/A"
+        self.avg_time_str = "N/A"
+
+        first_file = self.all_frame_files.get(self.min_frame)
+        last_file = self.all_frame_files.get(self.max_frame)
+
+        if first_file and last_file and os.path.exists(first_file) and os.path.exists(last_file):
+            try:
+                start_ctime = os.path.getctime(first_file)
+                end_ctime = os.path.getctime(last_file)
+                
+                start_dt = datetime.fromtimestamp(start_ctime)
+                end_dt = datetime.fromtimestamp(end_ctime)
+                
+                self.start_time_str = start_dt.strftime('%y-%m-%d %H:%M')
+                self.end_time_str = end_dt.strftime('%y-%m-%d %H:%M')
+                
+                delta = end_dt - start_dt
+                
+                # 格式化时间间隔: Xd Xh Xm
+                days = delta.days
+                hours, remainder = divmod(delta.seconds, 3600)
+                minutes, _ = divmod(remainder, 60)
+                self.duration_str = f"{days}d {hours}h {minutes}m"
+                
+                # 计算平均时间
+                if self.found_frames > 1:
+                    avg_seconds = delta.total_seconds() / (self.found_frames - 1)
+                    avg_td = timedelta(seconds=avg_seconds)
+                    avg_hours, avg_rem = divmod(avg_td.seconds, 3600)
+                    avg_minutes, avg_seconds = divmod(avg_rem, 60)
+                    self.avg_time_str = f"{avg_hours:02d}:{avg_minutes:02d}:{avg_seconds:02d}"
+
+            except Exception as e:
+                print(f"Error calculating time info for {self.name}: {e}")
+        # --- 结束 ---
+
         self.is_expanded = False
         self.current_frame_index = 0
         self.playback_enabled = False
@@ -1030,11 +1072,41 @@ class SequenceCard(QFrame):
         main_layout.addWidget(self.header_widget)
         
         # Info line
-        info_text = f"范围: {self.min_frame}-{self.max_frame}  |  总计: {self.total_frames} 帧  |  找到: {self.found_frames} 帧"
-        info_label = QLabel(info_text)
-        info_label.setStyleSheet("QLabel { font-size: 9pt; color: #888; }")
-        main_layout.addWidget(info_label)
+        info_layout = QGridLayout()
+        info_layout.setSpacing(4)
+        info_layout.setContentsMargins(8, 2, 8, 2)
+        main_layout.addLayout(info_layout)
         
+        # Original single line:
+        # info_text = f"范围: {self.min_frame}-{self.max_frame}  |  总计: {self.total_frames} 帧  |  找到: {self.found_frames} 帧"
+        # info_label = QLabel(info_text)
+        # info_label.setStyleSheet("QLabel { font-size: 9pt; color: #888; }")
+        # main_layout.addWidget(info_label)
+        
+        # New multi-line info with fixed-width labels
+        info_layout.addWidget(QLabel("范围:"), 0, 0)
+        info_layout.addWidget(QLabel(f"{self.min_frame}-{self.max_frame}"), 0, 1)
+        info_layout.addWidget(QLabel("总帧数:"), 0, 2)
+        info_layout.addWidget(QLabel(f"{self.total_frames}"), 0, 3)
+        info_layout.addWidget(QLabel("缺失:"), 1, 0)
+        info_layout.addWidget(QLabel(f"{self.total_frames - self.found_frames}"), 1, 1)
+        info_layout.addWidget(QLabel("完整度:"), 1, 2)
+        info_layout.addWidget(QLabel(f"{self.completeness:.1%}"), 1, 3)
+
+        # 新增时间信息行
+        info_layout.addWidget(QLabel("ST:"), 2, 0)
+        info_layout.addWidget(QLabel(f"{self.start_time_str}"), 2, 1)
+        info_layout.addWidget(QLabel("ET:"), 2, 2)
+        info_layout.addWidget(QLabel(f"{self.end_time_str}"), 2, 3)
+        info_layout.addWidget(QLabel("DUR:"), 3, 0)
+        info_layout.addWidget(QLabel(f"{self.duration_str}"), 3, 1)
+        info_layout.addWidget(QLabel("AVG:"), 3, 2)
+        info_layout.addWidget(QLabel(f"{self.avg_time_str}"), 3, 3)
+
+        # 调整列宽，让它们更均匀
+        for i in range(4):
+            info_layout.setColumnStretch(i, 1)
+
         # Visualization (这部分不会被压缩)
         self.viz_widget = FrameVizWidget(self.min_frame, self.max_frame, self.data['frames'])
         self.viz_widget.setMinimumHeight(20)
@@ -1474,13 +1546,3 @@ class FrameVizWidget(QWidget):
             color = self.exist_color if frame_num in self.found_frames else self.missing_color
             
             painter.fillRect(x, y, self.pixel_width, self.pixel_height, color)
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    main_win = QMainWindow()
-    viewer_widget = SequencePreviewWidget()
-    main_win.setCentralWidget(viewer_widget)
-    main_win.setWindowTitle("PNG 序列预览播放器")
-    main_win.setGeometry(200, 200, 900, 700)
-    main_win.show()
-    sys.exit(app.exec())
