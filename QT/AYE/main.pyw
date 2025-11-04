@@ -3,6 +3,9 @@ import sys
 import os
 import subprocess
 import ctypes  # For setting Windows AppUserModelID so taskbar/icon works properly
+import re
+import importlib
+from pathlib import Path
 
 def check_and_regenerate_ui():
     """
@@ -34,15 +37,47 @@ from PySide6.QtGui import QIcon
 #     pyside6-uic form.ui -o ui_form.py, or
 #     pyside2-uic form.ui -o ui_form.py
 from ui_form import Ui_Widget
-"""
-更新说明:
-1. 现在主程序改为导入已加序号的模块文件 (module1_*, module2_* 等)。
-2. 如需再次使用未加序号旧文件名, 只需把下方 import 改回去即可。
-"""
-from module1_c4d_monitor import C4DMonitorWidget  # 渲染监控（原 mf_pyside6 / c4d monitor）
-from module2_sequence_preview import SequencePreviewWidget  # 序列预览播放器
-from module3_rename_tool import ReplaceWidget  # 批量替换工具
-from module4_sequence_splitter import SequenceSplitWidget  # 序列切分
+
+def discover_modules():
+    """
+    自动发现同目录下的 moduleX_*.pyw 文件，并返回按序号排序的模块信息列表。
+    返回格式: [(module_num, module_name, display_name, module_file), ...]
+    其中 display_name 是文件名中 '_' 后面的部分（不含扩展名）
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    modules = []
+    
+    # 查找所有 moduleX_*.pyw 文件
+    pattern = re.compile(r'module(\d+)_(.+)\.(pyw|py)$')
+    
+    for file in Path(script_dir).glob('module*_*.py*'):
+        match = pattern.match(file.name)
+        if match:
+            module_num = int(match.group(1))
+            display_name = match.group(2)
+            module_name = file.stem  # 不含扩展名的文件名
+            modules.append((module_num, module_name, display_name, str(file)))
+    
+    # 按序号排序
+    modules.sort(key=lambda x: x[0])
+    return modules
+
+def load_module_widget(module_name):
+    """
+    动态导入模块并获取主窗口类（假设主类名为 ModuleNameWidget 格式）
+    """
+    try:
+        module = importlib.import_module(module_name)
+        # 寻找第一个继承自 QWidget 的类作为主窗口类
+        for attr_name in dir(module):
+            attr = getattr(module, attr_name)
+            if isinstance(attr, type) and issubclass(attr, QWidget) and attr != QWidget:
+                return attr
+        # 如果没有找到，返回 None
+        return None
+    except Exception as e:
+        print(f"Failed to load module {module_name}: {e}")
+        return None
 
 class Widget(QWidget):
     def __init__(self, parent=None):
@@ -50,51 +85,70 @@ class Widget(QWidget):
         self.ui = Ui_Widget()
         self.ui.setupUi(self)
         self.setWindowTitle(" ")
-
-        # --- Module 1: C4D Monitor ---
-        self.c4d_monitor = C4DMonitorWidget(self)
-        page_layout = self.ui.page_1.layout()
-        while page_layout.count():
-            item = page_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        page_layout.addWidget(self.c4d_monitor)
-        self.ui.navigationList.item(0).setText("渲染")
-
-        # --- Module 2: Sequence Preview Player (replaced from Module 5) ---
-        self.sequence_preview = SequencePreviewWidget(self)
-        page_2_layout = self.ui.page_2.layout()
-        while page_2_layout.count():
-            item = page_2_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        page_2_layout.addWidget(self.sequence_preview)
-        self.ui.navigationList.item(1).setText("预览")
-
-        # --- Module 3: Replace Tool ---
-        self.rename_tool = ReplaceWidget(self)
-        page_3_layout = self.ui.page_3.layout()
-        while page_3_layout.count():
-            item = page_3_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        page_3_layout.addWidget(self.rename_tool)
-        self.ui.navigationList.item(2).setText("替换")
-        # --- Module 4: Sequence Splitter ---
-        # 动态添加一个新的页面与导航项，避免修改 .ui 源文件
+        
+        # 导入动态依赖
         from PySide6.QtWidgets import QListWidgetItem, QWidget as _QW, QVBoxLayout as _QVL
-        self.sequence_splitter = SequenceSplitWidget(self)
-        page_4 = _QW()
-        page_4.setObjectName("page_4")
-        page_4_layout = _QVL(page_4)
-        page_4_layout.setContentsMargins(0,0,0,0)
-        page_4_layout.addWidget(self.sequence_splitter)
-        self.ui.stackedWidget.addWidget(page_4)
-        QListWidgetItem(self.ui.navigationList)  # 新增列表项
-        self.ui.navigationList.item(3).setText("切分")
+        
+        # 自动发现并加载所有 moduleX_*.pyw 模块
+        modules = discover_modules()
+        self.module_widgets = {}  # 存储已加载的模块 widget
+        
+        print(f"Discovered {len(modules)} modules: {modules}")
+        
+        for module_num, module_name, display_name, module_file in modules:
+            print(f"Loading module {module_num}: {module_name} (display as '{display_name}')")
+            
+            try:
+                # 动态导入模块
+                widget_class = load_module_widget(module_name)
+                
+                if widget_class is None:
+                    print(f"  ⚠️  Warning: Could not find widget class in module {module_name}")
+                    continue
+                
+                # 创建 widget 实例
+                widget_instance = widget_class(self)
+                self.module_widgets[module_num] = widget_instance
+                
+                # 根据是否是第一个模块来决定是否需要替换或新建页面
+                if module_num <= 3:
+                    # 前三个模块使用 UI 中预定义的页面 (page_1, page_2, page_3)
+                    page_attr = f"page_{module_num}"
+                    if hasattr(self.ui, page_attr):
+                        page = getattr(self.ui, page_attr)
+                        page_layout = page.layout()
+                        while page_layout.count():
+                            item = page_layout.takeAt(0)
+                            w = item.widget()
+                            if w is not None:
+                                w.deleteLater()
+                        page_layout.addWidget(widget_instance)
+                        
+                        # 更新导航列表项
+                        nav_item = self.ui.navigationList.item(module_num - 1)
+                        if nav_item:
+                            nav_item.setText(display_name)
+                else:
+                    # 第四个及以后的模块动态创建页面
+                    page = _QW()
+                    page.setObjectName(f"page_{module_num}")
+                    page_layout = _QVL(page)
+                    page_layout.setContentsMargins(0, 0, 0, 0)
+                    page_layout.addWidget(widget_instance)
+                    self.ui.stackedWidget.addWidget(page)
+                    
+                    # 添加导航列表项
+                    QListWidgetItem(self.ui.navigationList)
+                    nav_item = self.ui.navigationList.item(module_num - 1)
+                    if nav_item:
+                        nav_item.setText(display_name)
+                
+                print(f"  ✓ Module {module_num} loaded successfully")
+            
+            except Exception as e:
+                print(f"  ✗ Failed to load module {module_num}: {e}")
+                import traceback
+                traceback.print_exc()
 
 
 if __name__ == "__main__":
