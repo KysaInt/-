@@ -4,8 +4,8 @@ Module 2: 序列预览播放器 (Sequence Preview Player)
 功能: PNG 序列查看器 - 支持展开/收缩、图像预览、滑块控制、自动播放
 
 创建日期: 2025-10-30
-版本: 1.2
-修复: 折叠后无法重新打开的问题
+版本: 1.3
+修复: 移除拖动功能，保留展开/收缩状态管理
 """
 import sys
 import os
@@ -21,37 +21,41 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEas
 from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QPixmap, QCursor
 from pathlib import Path
 
-class ResizeHandle(QFrame):
-    """可拖拽的高度调整分隔符"""
-    def __init__(self, target_widget, sequence_card, parent=None):
-        super().__init__(parent)
-        self.target_widget = target_widget
-        self.sequence_card = sequence_card
-        self.setFixedHeight(5)
-        self.setCursor(Qt.SizeVerCursor)
-        self.setStyleSheet("ResizeHandle { background-color: #cccccc; border: 1px solid #999; }")
-        self.is_dragging = False
-        self.drag_start_y = 0
-        self.original_height = 0
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = True
-            self.drag_start_y = event.globalPosition().y()
-            self.original_height = self.target_widget.maximumHeight()
 
-    def mouseMoveEvent(self, event):
-        if self.is_dragging:
-            delta = event.globalPosition().y() - self.drag_start_y
-            new_height = max(100, self.original_height + delta)  # 最小高度 100px
-            self.target_widget.setMaximumHeight(new_height)
+class ElidedLabel(QLabel):
+    """单行省略号标签，避免自动换行为两行。"""
+    def __init__(self, text="", parent=None, mode=Qt.ElideRight):
+        super().__init__(text, parent)
+        self._full_text = text
+        self._elide_mode = mode
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if text:
+            self.setToolTip(text)
 
-    def mouseReleaseEvent(self, event):
-        if self.is_dragging:
-            self.is_dragging = False
-            # 释放时刷新预览
-            if self.sequence_card.all_frame_files:
-                self.sequence_card.display_frame(self.sequence_card.current_frame_index)
+    def setText(self, text):
+        # 存储完整文本并更新提示
+        self._full_text = text
+        if text:
+            self.setToolTip(text)
+        self._update_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elide()
+
+    def setElideMode(self, mode):
+        self._elide_mode = mode
+        self._update_elide()
+
+    def _update_elide(self):
+        # 使用当前字体度量，按控件宽度生成省略文本
+        fm = self.fontMetrics()
+        available = max(0, self.width())
+        elided = fm.elidedText(self._full_text or "", self._elide_mode, available)
+        # 调用父类 setText，避免递归
+        super().setText(elided)
 
 class CollapsibleBox(QWidget):
     """A collapsible box widget."""
@@ -147,6 +151,24 @@ class CollapsibleBox(QWidget):
         arrow = "▼" if checked else "►"
         self.toggle_button.setText(f"{arrow} 设置")
 
+    def cleanup(self):
+        """清理动画和信号连接"""
+        # 停止动画
+        if hasattr(self, 'toggle_animation') and self.toggle_animation.state() == self.toggle_animation.Running:
+            self.toggle_animation.stop()
+        
+        # 断开动画完成信号
+        try:
+            self.toggle_animation.finished.disconnect(self._on_animation_finished)
+        except:
+            pass
+        
+        # 断开按钮点击信号
+        try:
+            self.toggle_button.clicked.disconnect(self.toggle)
+        except:
+            pass
+
 class ScanWorker(QThread):
     """Worker thread for scanning files to prevent UI freezing."""
     scan_complete = Signal(object)
@@ -224,6 +246,14 @@ class SequencePreviewWidget(QWidget):
         self.scan_worker = None
         self.min_frame_threshold = 5
         self.max_frame_threshold = 10000
+        
+        # 状态保存用于模块切换时的恢复
+        self._saved_state = {
+            'card_states': {},  # 保存每张卡片的展开状态和高度
+            'scroll_position': 0,  # 保存滚动条位置
+        }
+        # 首次显示标志
+        self._first_show = True
 
         # Common channel suffixes
         self.channel_suffixes = [
@@ -334,6 +364,48 @@ class SequencePreviewWidget(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 低存在感滚动条样式：透明背景、细窄、仅悬停时略微可见
+        self.scroll_area.setStyleSheet(
+            """
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255,255,255,40); /* 微弱可见 */
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255,255,255,70);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+                border: none;
+            }
+
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: rgba(255,255,255,40);
+                border-radius: 4px;
+                min-width: 20px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: rgba(255,255,255,70);
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
         
         self.card_container = QWidget()
         self.card_layout = QVBoxLayout(self.card_container)
@@ -368,6 +440,13 @@ class SequencePreviewWidget(QWidget):
         self.path_edit.setText(self.current_path)
         self.select_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
+
+        # 先断开旧的工作线程的连接
+        if self.scan_worker is not None:
+            try:
+                self.scan_worker.scan_complete.disconnect(self.on_scan_complete)
+            except:
+                pass
 
         # Don't clear cards here to avoid flickering.
         # self.clear_cards()
@@ -416,18 +495,50 @@ class SequencePreviewWidget(QWidget):
     def update_pixel_width(self, value):
         for card in getattr(self, 'cards', []):
             card.viz_widget.set_pixel_width(value)
+        # 当宽度改变时，调整展开的卡片高度一次
+        self._adjust_all_card_heights_once()
 
     def update_pixel_height(self, value):
         for card in getattr(self, 'cards', []):
             card.viz_widget.set_pixel_height(value)
+        # 当高度改变时，调整展开的卡片高度一次
+        self._adjust_all_card_heights_once()
+
+    def _adjust_all_card_heights_once(self):
+        """用户改变宽度/高度时，对所有展开的卡片进行一次性高度调整"""
+        if not hasattr(self, 'cards'):
+            return
+        
+        for card in self.cards:
+            if card.is_expanded and not card.toggle_animation.isRunning():
+                # 计算新的高度
+                new_height = card._calculate_expand_height()
+                current_h = card.content_widget.height()
+                
+                # 如果变化超过 10px，平滑过渡
+                if abs(new_height - current_h) > 10:
+                    card.toggle_animation.setStartValue(current_h)
+                    card.toggle_animation.setEndValue(new_height)
+                    card.toggle_animation.start()
 
     def clear_cards(self):
-        # Remove all items from layout
+        # Remove all items from layout, including stretch
         while self.card_layout.count() > 0:
             item = self.card_layout.takeAt(0)
             widget = item.widget()
+            spacer = item.spacerItem()
+            
             if widget:
+                # 如果是 SequenceCard，先清理资源
+                if isinstance(widget, SequenceCard):
+                    try:
+                        widget.cleanup()
+                    except Exception as e:
+                        print(f"Error cleaning up card: {e}")
                 widget.deleteLater()
+            elif spacer:
+                # 删除拉伸项，不需要特殊处理
+                pass
 
     def toggle_auto_refresh(self, enabled):
         self.auto_refresh_enabled = enabled
@@ -439,11 +550,105 @@ class SequencePreviewWidget(QWidget):
     def showEvent(self, event):
         """Override showEvent to refresh when the widget is shown."""
         super().showEvent(event)
-        # We use a QTimer to delay the scan slightly, ensuring the UI is fully visible
-        # and responsive before the scan starts.
-        QTimer.singleShot(100, self.scan_directory)
+        
+        if self._first_show:
+            # 首次显示时执行扫描
+            self._first_show = False
+            QTimer.singleShot(100, self.scan_directory)
+        else:
+            # 非首次显示，只恢复之前保存的状态，不重新扫描
+            self._restore_state()
+
+    def hideEvent(self, event):
+        """Override hideEvent to save state and stop resources when hidden."""
+        # 保存当前状态
+        self._save_state()
+        # 停止刷新定时器
+        if hasattr(self, 'refresh_timer') and self.refresh_timer.isActive():
+            self.refresh_timer.stop()
+        super().hideEvent(event)
+
+    def _save_state(self):
+        """保存当前模块的状态（展开卡片、滚动位置等）"""
+        # 保存滚动条位置
+        if hasattr(self, 'scroll_area') and self.scroll_area.verticalScrollBar():
+            self._saved_state['scroll_position'] = self.scroll_area.verticalScrollBar().value()
+        
+        # 保存每张卡片的展开状态和高度
+        if hasattr(self, 'cards'):
+            for card in self.cards:
+                card_name = card.name
+                self._saved_state['card_states'][card_name] = {
+                    'is_expanded': card.is_expanded,
+                    'max_height': card.content_widget.maximumHeight(),
+                    'current_frame': card.current_frame_index if hasattr(card, 'current_frame_index') else 0,
+                    'is_playing': card.playback_enabled if hasattr(card, 'playback_enabled') else False,
+                }
+                # 停止播放
+                if hasattr(card, 'playback_enabled') and card.playback_enabled:
+                    card.stop_playback()
+                # 停止定时器
+                if hasattr(card, 'size_monitor_timer') and card.size_monitor_timer.isActive():
+                    card.size_monitor_timer.stop()
+
+    def _restore_state(self):
+        """恢复之前保存的状态"""
+        if not hasattr(self, 'cards'):
+            return
+        
+        # 恢复滚动条位置
+        if hasattr(self, 'scroll_area') and self.scroll_area.verticalScrollBar():
+            saved_pos = self._saved_state.get('scroll_position', 0)
+            # 延迟一点时间以确保 UI 完全刷新
+            QTimer.singleShot(50, lambda: self.scroll_area.verticalScrollBar().setValue(saved_pos))
+        
+        # 恢复卡片状态（不触发动画，仅恢复数据）
+        card_states = self._saved_state.get('card_states', {})
+        for card in self.cards:
+            card_name = card.name
+            if card_name in card_states:
+                state = card_states[card_name]
+                was_expanded = state.get('is_expanded', False)
+                saved_height = state.get('max_height', 0)
+                saved_frame = state.get('current_frame', 0)
+                was_playing = state.get('is_playing', False)
+                
+                # 直接恢复卡片的内部状态，不触发动画
+                card.is_expanded = was_expanded
+                
+                if was_expanded:
+                    # 恢复为展开状态
+                    card.content_widget.setMaximumHeight(saved_height if saved_height > 0 else 16777215)
+                    card.size_monitor_timer.start()
+                    
+                    # 恢复预览帧显示
+                    if len(card.all_frame_files) > 0 and not card.preview_label.pixmap():
+                        card.display_frame(saved_frame)
+                    
+                    # 恢复播放状态
+                    if was_playing and len(card.all_frame_files) > 0:
+                        card.play_button.setChecked(True)
+                        card.playback_enabled = True
+                        if not card.playback_timer.isActive():
+                            card.playback_timer.start(card.playback_speed)
+                else:
+                    # 保持收缩状态
+                    card.content_widget.setMaximumHeight(0)
+                    card.size_monitor_timer.stop()
 
     def closeEvent(self, event):
+        # 清理折叠框
+        if hasattr(self, 'collapsible_box'):
+            self.collapsible_box.cleanup()
+        
+        # 清理所有卡片
+        self.clear_cards()
+        
+        # 停止刷新定时器
+        if hasattr(self, 'refresh_timer'):
+            self.refresh_timer.stop()
+        
+        # 停止扫描线程
         if self.scan_worker and self.scan_worker.isRunning():
             self.scan_worker.stop()
             self.scan_worker.wait() # Wait for thread to finish
@@ -486,7 +691,7 @@ class SequenceCard(QFrame):
         # 大小改变监听定时器 - 用于即时更新预览
         self.size_monitor_timer = QTimer(self)
         self.size_monitor_timer.setSingleShot(False)
-        self.size_monitor_timer.setInterval(30)  # 每30ms检查一次大小，提高响应速度
+        self.size_monitor_timer.setInterval(200)  # 改为 200ms（原为 30ms），减少频率防止抖动
         self.size_monitor_timer.timeout.connect(self.check_preview_label_size)
         self.pending_refresh = False  # 防抖标志
         
@@ -554,24 +759,30 @@ class SequenceCard(QFrame):
         """Called when animation finishes"""
         self._toggle_in_progress = False
         if not self.is_expanded:
-            # Ensure content is completely hidden
+            # 收缩时重置最大高度为 0
             self.content_widget.setMaximumHeight(0)
+        else:
+            # 展开完成后，移除最大高度限制以允许拖拽
+            self.content_widget.setMaximumHeight(16777215)
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        # 关键：不要在主布局中添加任何拉伸，让所有子元素保持其自然大小
-        main_layout.setSizeConstraint(QVBoxLayout.SetMinimumSize)
+        # 关键：不要设置 SetMinimumSize，让卡片正常伸展
+        # main_layout.setSizeConstraint(QVBoxLayout.SetMinimumSize)  # 注释掉
         
         # Header (clickable)
         self.header_widget = QFrame()
         self.header_widget.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setContentsMargins(4, 4, 4, 4)
-        
-        name_label = QLabel(f"<b>{self.name}</b>")
-        name_label.setWordWrap(True)
+
+        name_label = ElidedLabel(self.name)
+        # 使用粗体以替代富文本 <b>，避免影响省略计算
+        f = name_label.font()
+        f.setBold(True)
+        name_label.setFont(f)
         completeness_label = QLabel(f"{self.completeness:.1%}")
         header_layout.addWidget(name_label)
         header_layout.addStretch()
@@ -643,10 +854,6 @@ class SequenceCard(QFrame):
         # 将 Content widget 添加到主布局，但不会压缩上面的区域
         main_layout.addWidget(self.content_widget)
         
-        # 添加可调整高度的句柄
-        self.resize_handle = ResizeHandle(self.content_widget, self)
-        main_layout.addWidget(self.resize_handle)
-        
         # 初始设置 content_widget 的最大高度为 0（默认关闭）
         # 展开时会自动计算所需高度
         self.content_widget.setMaximumHeight(0)
@@ -662,60 +869,72 @@ class SequenceCard(QFrame):
         
         self._toggle_in_progress = True
         self.is_expanded = not self.is_expanded
-        if self.is_expanded and len(self.all_frame_files) > 0 and not self.preview_label.pixmap():
-            # Initialize preview on first expand
-            self.display_frame(0)
+        if self.is_expanded:
+            # 首次展开需要初始化预览；再次展开保持当前帧
+            if len(self.all_frame_files) > 0 and not self.preview_label.pixmap():
+                self.display_frame(0)
             # 展开时启动大小监听
             self.size_monitor_timer.start()
-            # 计算所需的高度以完整显示图片
-            QTimer.singleShot(10, self.auto_adjust_content_height)
         else:
-            # 收缩时停止大小监听
+            # 收缩时停止大小监听和自动调整
             self.size_monitor_timer.stop()
+            self.stop_playback()
         self.update_animation()
 
-    def auto_adjust_content_height(self):
-        """自动调整 Content 高度以完整显示图片"""
-        if not self.preview_label.pixmap():
-            return
+    def _calculate_expand_height(self):
+        """计算合理的展开高度"""
+        # 获取预览标签的当前宽度，用于计算缩放高度
+        label_width = self.preview_label.width()
+        if label_width <= 0:
+            label_width = 300  # 默认宽度
         
-        # 获取图片的显示高度
-        pixmap = self.preview_label.pixmap()
-        if pixmap and not pixmap.isNull():
-            # 计算图片实际显示的高度
-            img_height = pixmap.height()
+        # 如果有缓存的图片，根据其显示高度计算
+        if hasattr(self, '_cached_pixmap') and self._cached_pixmap and not self._cached_pixmap.isNull():
+            pixmap = self._cached_pixmap
+            pixmap_width = pixmap.width()
+            pixmap_height = pixmap.height()
             
-            # 计算需要的总高度：图片高度 + 控制条高度 + padding
-            # 控制条高度约 40px（播放按钮+滑块）
-            # padding 约 20px
-            control_height = 40
-            padding = 20
-            total_required_height = img_height + control_height + padding
-            
-            # 设置 content_widget 的最大高度为计算出的高度
-            self.content_widget.setMaximumHeight(total_required_height)
-            
-            # 重新启动动画以应用新的高度
-            self.toggle_animation.setStartValue(0)
-            self.toggle_animation.setEndValue(total_required_height)
-            self.toggle_animation.start()
+            if pixmap_width > 0:
+                # 按实际显示宽度计算缩放后的高度
+                scale_ratio = label_width / pixmap_width
+                img_display_height = pixmap_height * scale_ratio
+            else:
+                img_display_height = 200
+        else:
+            img_display_height = 200
+        
+        # 控制条高度约 60px（播放按钮+滑块+间距+padding）
+        control_height = 60
+        # 内容区域的上下 padding
+        padding = 20
+        
+        total_height = img_display_height + control_height + padding
+        # 范围：最小 300px，最大窗口高度的 80%，给设置栏和其他留空间
+        min_h = 300
+        max_h = 800  # 限制最大高度防止过大
+        return max(min_h, min(max_h, total_height))
 
     def check_preview_label_size(self):
-        """检查预览标签大小是否改变，如果改变则刷新预览"""
+        """检查预览标签大小是否改变，刷新预览但不调整高度"""
         if not self.is_expanded or not self.preview_label.pixmap():
             return
         
         current_size = (self.preview_label.width(), self.preview_label.height())
         
-        # 只有当大小真正改变了，且不在处理中时，才刷新
+        # 只有当大小真正改变了，且不在处理中时，才刷新预览（但不调整高度）
         if self.last_preview_label_size != current_size and not self.pending_refresh:
             self.last_preview_label_size = current_size
             self.pending_refresh = True
-            # 使用 QTimer 延迟刷新，避免频繁重新计算
-            QTimer.singleShot(0, lambda: self._do_refresh_preview())
+            # 标签尺寸改变时，重新渲染预览（缩放图片以适应新宽度）
+            QTimer.singleShot(100, self._refresh_preview_for_size_change)
 
-    def _do_refresh_preview(self):
-        """执行预览刷新"""
+    def _refresh_preview_for_size_change(self):
+        """标签尺寸改变时重新渲染预览"""
+        if not self.is_expanded or not self.preview_label.pixmap():
+            self.pending_refresh = False
+            return
+        
+        # 仅刷新预览显示，不改变卡片高度（防止抖动）
         try:
             self.display_frame(self.current_frame_index)
         finally:
@@ -723,19 +942,22 @@ class SequenceCard(QFrame):
 
     def update_animation(self):
         """Update expand/collapse animation"""
+        # 若有正在运行的动画，先停止，避免状态错乱
+        if self.toggle_animation.state() == QPropertyAnimation.Running:
+            self.toggle_animation.stop()
+
         self.toggle_animation.setStartValue(self.content_widget.height())
         if self.is_expanded:
-            # 如果是手动切换展开（不是自动调整），使用默认高度
-            # 自动调整会在 auto_adjust_content_height 中直接修改动画
-            if self.content_widget.maximumHeight() == 16777215:  # 未设置最大高度时
-                target_height = 350
-                self.content_widget.setMaximumHeight(target_height)
-            else:
-                target_height = self.content_widget.maximumHeight()
+            # 计算合理的展开高度
+            target_height = self._calculate_expand_height()
+            # 立即移除高度限制，允许拖拽自由调整
+            # 不要再次设置最大高度限制，让其保持之前拖拽的值或最大值
+            if self.content_widget.maximumHeight() < target_height:
+                self.content_widget.setMaximumHeight(16777215)
             self.toggle_animation.setEndValue(target_height)
         else:
+            # 收缩时不需要改最大高度，动画会自然结束
             self.toggle_animation.setEndValue(0)
-            self.stop_playback()
         self.toggle_animation.start()
 
     def display_frame(self, index):
@@ -823,10 +1045,41 @@ class SequenceCard(QFrame):
         next_index = (self.current_frame_index + 1) % len(sorted_frames)
         self.display_frame(next_index)
 
+    def cleanup(self):
+        """清理所有资源和定时器"""
+        # 停止所有定时器
+        if hasattr(self, 'size_monitor_timer') and self.size_monitor_timer.isActive():
+            self.size_monitor_timer.stop()
+        if hasattr(self, 'playback_timer') and self.playback_timer.isActive():
+            self.playback_timer.stop()
+        
+        # 停止所有动画
+        if hasattr(self, 'toggle_animation') and self.toggle_animation.state() == self.toggle_animation.Running:
+            self.toggle_animation.stop()
+        
+        # 断开所有信号连接
+        try:
+            if hasattr(self, 'size_monitor_timer'):
+                self.size_monitor_timer.timeout.disconnect()
+        except:
+            pass
+        try:
+            if hasattr(self, 'playback_timer'):
+                self.playback_timer.timeout.disconnect()
+        except:
+            pass
+        try:
+            if hasattr(self, 'toggle_animation'):
+                self.toggle_animation.finished.disconnect()
+        except:
+            pass
+        
+        # 清理缓存的像素图
+        self._cached_pixmap = None
+
     def closeEvent(self, event):
         """关闭时清理定时器"""
-        self.size_monitor_timer.stop()
-        self.playback_timer.stop()
+        self.cleanup()
         super().closeEvent(event)
 
     def mouseDoubleClickEvent(self, event):
