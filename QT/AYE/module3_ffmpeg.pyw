@@ -16,13 +16,29 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEas
 from PySide6.QtGui import QPainter, QColor, QFont, QPalette
 from pathlib import Path
 
+# =============================================================================
+# FFmpeg 信息缓存和异步加载
+# =============================================================================
+_ffmpeg_info_cache = None
+
+class FFmpegInfoWorker(QThread):
+    """在后台线程中获取 FFmpeg 信息，避免 UI 阻塞。"""
+    info_ready = Signal(dict)
+
+    def run(self):
+        """执行耗时操作并发出信号。"""
+        global _ffmpeg_info_cache
+        info = get_ffmpeg_info()
+        _ffmpeg_info_cache = info  # 缓存结果
+        self.info_ready.emit(info)
+
 # FFmpeg 可执行文件检查
 def get_ffmpeg_info():
     """获取 FFmpeg 可执行文件的路径和版本信息"""
     ffmpeg_path = shutil.which('ffmpeg')
     if ffmpeg_path:
         try:
-            result = subprocess.run([ffmpeg_path, '-version'], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([ffmpeg_path, '-version'], capture_output=True, text=True, timeout=15)
             version_line = result.stdout.split('\n')[0] if result.stdout else "版本未知"
             return {
                 'available': True,
@@ -235,16 +251,46 @@ class SequenceViewerWidget(QWidget):
             'total_light', 'velocity', 'effectsresult'
         ]
 
+        # 标志：标记初始化是否完成
+        self._initialization_complete = False
+        
         self.setup_ui()
-        self.scan_directory()
+        
+        # 标记 UI 已设置好，但内容还在加载
+        self._initialization_complete = True
+        
+        # 延迟扫描目录和启动自动刷新定时器，避免初始化时卡顿
+        # Defer scanning to avoid UI freezing during initialization
+        QTimer.singleShot(200, self._deferred_init)
 
+        # 简单日志缓存（同时输出到界面日志）
+        self._last_message = ""
+    
+        # 异步获取 FFmpeg 信息
+        self.ffmpeg_worker = FFmpegInfoWorker()
+        self.ffmpeg_worker.info_ready.connect(self._on_ffmpeg_info_ready)
+
+    def _on_ffmpeg_info_ready(self, ffmpeg_info):
+        """处理来自后台线程的 FFmpeg 信息。"""
+        if ffmpeg_info['available']:
+            self.log(f"🎬 FFmpeg: {ffmpeg_info['path']}")
+            self.log(f"   {ffmpeg_info['version']}")
+            self.log(f"✅ FFmpeg 库已就绪")
+        else:
+            self.log(f"❌ FFmpeg 未找到或无法执行: {ffmpeg_info.get('error', '未知错误')}")
+            if ffmpeg_info.get('path'):
+                self.log(f"   路径: {ffmpeg_info['path']}")
+        self.log("")
+
+    def _deferred_init(self):
+        """后台初始化：启动扫描和自动刷新"""
+        # 启动第一次扫描
+        self.scan_directory()
+        
         # Auto-refresh timer
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(5000) # 5 seconds
         self.refresh_timer.timeout.connect(self.scan_directory)
-
-        # 简单日志缓存（同时输出到界面日志）
-        self._last_message = ""
 
     def log(self, msg: str):
         self._last_message = msg
@@ -957,17 +1003,14 @@ class SequenceViewerWidget(QWidget):
         """Override showEvent to refresh when the widget is shown."""
         super().showEvent(event)
         
-        # 显示 FFmpeg 信息
-        ffmpeg_info = get_ffmpeg_info()
-        if ffmpeg_info['available']:
-            self.log(f"🎬 FFmpeg: {ffmpeg_info['path']}")
-            self.log(f"   {ffmpeg_info['version']}")
-            self.log(f"✅ FFmpeg 库已就绪")
+        # 异步获取 FFmpeg 信息（如果尚未缓存）
+        global _ffmpeg_info_cache
+        if _ffmpeg_info_cache is None:
+            if not self.ffmpeg_worker.isRunning():
+                self.ffmpeg_worker.start()
         else:
-            self.log(f"❌ FFmpeg 未找到或无法执行: {ffmpeg_info.get('error', '未知错误')}")
-            if ffmpeg_info.get('path'):
-                self.log(f"   路径: {ffmpeg_info['path']}")
-        self.log("")
+            # 如果已缓存，直接使用缓存信息
+            self._on_ffmpeg_info_ready(_ffmpeg_info_cache)
         
         # We use a QTimer to delay the scan slightly, ensuring the UI is fully visible
         # and responsive before the scan starts.
