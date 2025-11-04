@@ -64,19 +64,44 @@ def discover_modules():
 
 def load_module_widget(module_name):
     """
-    动态导入模块并获取主窗口类（假设主类名为 ModuleNameWidget 格式）
+    动态导入模块并获取主窗口类。
+    优先选择最具体的类（排除通用辅助类如 CollapsibleBox, FrameVizWidget, PlaybackControlBar 等）
     """
     try:
         module = importlib.import_module(module_name)
-        # 寻找第一个继承自 QWidget 的类作为主窗口类
+        
+        # 通用辅助类的名称模式（通常不是主窗口）
+        generic_class_patterns = [
+            'CollapsibleBox', 'FrameVizWidget', 'PlaybackControlBar', 
+            'ScanWorker', 'Worker', 'ResizableHandle', 'ResizableCollapsibleBox',
+            'ElidedLabel', 'FpsInputDialog', 'SequenceCard'
+        ]
+        
+        main_widget_candidates = []
+        
+        # 收集所有继承自 QWidget 的类
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
             if isinstance(attr, type) and issubclass(attr, QWidget) and attr != QWidget:
-                return attr
-        # 如果没有找到，返回 None
+                # 排除通用辅助类
+                if attr_name not in generic_class_patterns:
+                    main_widget_candidates.append((attr_name, attr))
+        
+        # 优先选择名字中包含 'Widget' 的类（最可能是主窗口）
+        for class_name, class_obj in main_widget_candidates:
+            if 'Widget' in class_name:
+                return class_obj
+        
+        # 如果没有找到，返回第一个候选类
+        if main_widget_candidates:
+            return main_widget_candidates[0][1]
+        
+        # 如果仍没有找到，返回 None
         return None
     except Exception as e:
         print(f"Failed to load module {module_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 class Widget(QWidget):
