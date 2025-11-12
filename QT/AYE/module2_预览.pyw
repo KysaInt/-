@@ -1053,39 +1053,54 @@ class SequenceCard(QFrame):
         # 关键：不要设置 SetMinimumSize，让卡片正常伸展
         # main_layout.setSizeConstraint(QVBoxLayout.SetMinimumSize)  # 注释掉
         
-        # Header (clickable)
+        # Header (clickable) 重构：名称 | (可前端省略的统计信息) | 完成度百分比
         self.header_widget = QFrame()
         self.header_widget.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setContentsMargins(4, 4, 4, 4)
 
-        name_label = ElidedLabel(self.name)
-        # 使用粗体以替代富文本 <b>，避免影响省略计算
-        f = name_label.font()
-        f.setBold(True)
-        name_label.setFont(f)
-        completeness_label = QLabel(f"{self.completeness:.1%}")
-        header_layout.addWidget(name_label)
-        header_layout.addStretch()
-        header_layout.addWidget(completeness_label)
-        
+        # 左侧名称（末尾被截断时用右侧省略）
+        name_label = ElidedLabel(self.name, mode=Qt.ElideRight)
+        f = name_label.font(); f.setBold(True); name_label.setFont(f)
+        name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 中间合并统计 + 百分比（前方省略，确保末尾百分比能显示）
+        stats_text = (
+            f"范围: {self.min_frame}-{self.max_frame} "
+            f"总帧: {self.total_frames} "
+            f"缺失: {self.total_frames - self.found_frames} | {self.completeness:.1%}"
+        )
+        self.stats_label = ElidedLabel(stats_text, mode=Qt.ElideLeft)
+        # 允许在很窄时被压缩，触发左侧省略，尽量保留末端的百分比
+        self.stats_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        # 最小宽度从 100 改为 50 以便更窄
+        self.stats_label.setMinimumWidth(50)
+        self.stats_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # 布局顺序：名称 | 统计+百分比
+        header_layout.addWidget(name_label, 1)
+        header_layout.addWidget(self.stats_label, 2)
         main_layout.addWidget(self.header_widget)
+
+        # 下方时间信息行（保持与之前逻辑一致，仍然可省略）
+        time_layout = QHBoxLayout()
+        time_layout.setSpacing(6)
+        time_layout.setContentsMargins(8, 2, 8, 2)
         
-        # Info line - single line with all info
-        info_layout = QHBoxLayout()
-        info_layout.setSpacing(12)
-        info_layout.setContentsMargins(8, 2, 8, 2)
-        main_layout.addLayout(info_layout)
-        
-        # Add all info in one line
-        info_layout.addWidget(QLabel(f"范围: {self.min_frame}-{self.max_frame}"))
-        info_layout.addWidget(QLabel(f"总帧: {self.total_frames}"))
-        info_layout.addWidget(QLabel(f"缺失: {self.total_frames - self.found_frames}"))
-        info_layout.addWidget(QLabel(f"ST: {self.start_time_str}"))
-        info_layout.addWidget(QLabel(f"ET: {self.end_time_str}"))
-        info_layout.addWidget(QLabel(f"DUR: {self.duration_str}"))
-        info_layout.addWidget(QLabel(f"AVG: {self.avg_time_str}"))
-        info_layout.addStretch()
+        # 第二行：合并为一个标签，按 AVG | DUR | ST | ET 顺序，右对齐，左侧省略
+        time_line_text = (
+            f"ST: {self.start_time_str} | "
+            f"ET: {self.end_time_str} | "
+            f"DUR: {self.duration_str} | "
+            f"AVG: {self.avg_time_str}"
+        )
+        self.time_line_label = ElidedLabel(time_line_text, mode=Qt.ElideLeft)
+        self.time_line_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.time_line_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.time_line_label.setMinimumWidth(0)
+        time_layout.addWidget(self.time_line_label)
+
+        main_layout.addLayout(time_layout)
 
         # Visualization (这部分不会被压缩)
         self.viz_widget = FrameVizWidget(self.min_frame, self.max_frame, self.data['frames'])
@@ -1107,7 +1122,8 @@ class SequenceCard(QFrame):
         self.preview_label.setAlignment(Qt.AlignCenter | Qt.AlignTop)  # 改为从上对齐
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.preview_label.setMinimumHeight(200)
-        self.preview_label.setMinimumWidth(300)
+        # 预览区也允许更窄
+        self.preview_label.setMinimumWidth(50)
         # 移除最大高度限制，让它可以无限制增长
         self.preview_label.setStyleSheet("QLabel { background-color: #2a2a2a; border: 1px solid #555; padding: 5px; }")
         self.preview_label.setScaledContents(False)
@@ -1155,6 +1171,17 @@ class SequenceCard(QFrame):
         
         # Connect header click
         self.header_widget.mousePressEvent = self.toggle_expanded
+        
+        # 在 setup_ui 结束时，延迟调用一次来更新标签显示
+        QTimer.singleShot(50, self._update_info_labels_visibility)
+
+    def _update_info_labels_visibility(self):
+        """更新信息行显示状态：
+        - 顶部 stats_label 使用 ElideLeft 自动省略，无需手动隐藏
+        - 时间信息标签始终可见，依靠 ElideRight 自动省略
+        """
+        if hasattr(self, 'time_label'):
+            self.time_label.show()
 
     def toggle_expanded(self, event):
         """Toggle expanded state"""
@@ -1175,6 +1202,11 @@ class SequenceCard(QFrame):
             self.size_monitor_timer.stop()
             self.stop_playback()
         self.update_animation()
+
+    def resizeEvent(self, event):
+        """处理卡片大小变化，根据宽度自动隐藏 info 标签"""
+        super().resizeEvent(event)
+        self._update_info_labels_visibility()
 
     def _calculate_expand_height(self):
         """计算合理的展开高度"""
