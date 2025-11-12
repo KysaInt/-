@@ -1,0 +1,9 @@
+{
+  "modules": [
+    { "name": "module1_渲染", "title": "渲染" },
+    { "name": "module2_预览", "title": "预览" },
+    { "name": "module3_ffmpeg", "title": "FFmpeg" },
+    { "name": "module4_切分", "title": "切分" },
+    { "name": "module5_命名", "title": "命名" }
+  ]
+}

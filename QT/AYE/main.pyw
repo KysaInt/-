@@ -6,6 +6,7 @@ import ctypes  # For setting Windows AppUserModelID so taskbar/icon works proper
 import re
 import importlib
 from pathlib import Path
+import json
 
 def check_and_regenerate_ui():
     """
@@ -38,29 +39,104 @@ from PySide6.QtGui import QIcon
 #     pyside2-uic form.ui -o ui_form.py
 from ui_form import Ui_Widget
 
-def discover_modules():
+def _read_modules_config(script_dir: str):
+    """读取可选的 modules.json（若存在）定义模块顺序与显示名。
+    格式示例：
+    {
+      "modules": [
+        {"name": "module1_渲染", "title": "渲染"},
+        {"name": "module2_预览"}
+      ]
+    }
     """
-    自动发现同目录下的 moduleX_*.pyw 文件，并返回按序号排序的模块信息列表。
-    返回格式: [(module_num, module_name, display_name, module_file), ...]
-    其中 display_name 是文件名中 '_' 后面的部分（不含扩展名）
+    cfg_path = os.path.join(script_dir, "modules.json")
+    if not os.path.exists(cfg_path):
+        return None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to read modules.json: {e}")
+        return None
+
+def discover_plugins():
+    """
+    发现同目录下可作为插件的模块文件，并根据 modules.json 或约定进行排序。
+    返回列表，每项为 dict：
+      {
+        'name': 模块导入名（文件名不含扩展名）, 
+        'title': 显示名称,
+        'file': 绝对路径,
+        'order': 用于排序的整数或 None
+      }
+    说明：
+      - 首先尝试读取 modules.json 按指定顺序加载；
+      - 若无配置，则按文件名自动发现并尽量从 "moduleX_*" 中提取序号排序；
+      - 显示名优先取 MODULE_META.title 或文件名中的中文部分。
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    modules = []
-    
-    # 查找所有 moduleX_*.pyw 文件
-    pattern = re.compile(r'module(\d+)_(.+)\.(pyw|py)$')
-    
-    for file in Path(script_dir).glob('module*_*.py*'):
-        match = pattern.match(file.name)
-        if match:
-            module_num = int(match.group(1))
-            display_name = match.group(2)
-            module_name = file.stem  # 不含扩展名的文件名
-            modules.append((module_num, module_name, display_name, str(file)))
-    
-    # 按序号排序
-    modules.sort(key=lambda x: x[0])
-    return modules
+    config = _read_modules_config(script_dir)
+
+    # 扫描所有候选 py/pyw 文件（排除以下划线开头的临时/库）
+    all_files = [p for p in Path(script_dir).glob("*.py*") if not p.name.startswith("_")]
+
+    # 建立索引：module_name -> path
+    name_to_path = {p.stem: str(p) for p in all_files}
+
+    plugins = []
+
+    def make_entry(name: str, path: str):
+        # 从文件名提取候选顺序与标题
+        m = re.match(r"module(\d+)_([^\\/.]+)", name)
+        order = int(m.group(1)) if m else None
+        display = m.group(2) if (m and len(m.groups()) >= 2) else name
+        return {"name": name, "title": display, "file": path, "order": order}
+
+    if config and isinstance(config, dict) and isinstance(config.get("modules"), list):
+        # 先按配置中的顺序加入
+        for item in config["modules"]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            path = name_to_path.get(name)
+            if not path:
+                print(f"Warning: module '{name}' listed in modules.json not found on disk")
+                continue
+            entry = make_entry(name, path)
+            # 配置中可覆盖标题或顺序
+            if "title" in item:
+                entry["title"] = item["title"]
+            if "order" in item:
+                entry["order"] = item["order"]
+            plugins.append(entry)
+
+        # 再把未在配置中的其余模块追加到末尾
+        configured = {p["name"] for p in plugins}
+        for name, path in name_to_path.items():
+            if name not in configured and name not in {"main", "ui_form", "form_ui", "form", "mf_pyside6"}:
+                plugins.append(make_entry(name, path))
+    else:
+        # 无配置：仅自动发现以 module*_*.py* 命名或包含 QWidget 的模块
+        for p in all_files:
+            name = p.stem
+            if name in {"main", "ui_form", "form_ui", "form", "mf_pyside6"}:
+                continue
+            # 以 moduleX_* 优先
+            if re.match(r"module\d+_", name):
+                plugins.append(make_entry(name, str(p)))
+        # 若没有任何符合 moduleX_* 的，也允许全部按字母加入以保证可用
+        if not plugins:
+            for p in all_files:
+                name = p.stem
+                if name in {"main", "ui_form", "form_ui", "form", "mf_pyside6"}:
+                    continue
+                plugins.append(make_entry(name, str(p)))
+
+    # 排序：优先使用 order，其次按标题/名称
+    plugins.sort(key=lambda e: (e["order"] is None, e["order"] if e["order"] is not None else 0, e["title"]))
+    return plugins
 
 def load_module_widget(module_name):
     """
@@ -129,122 +205,123 @@ class Widget(QWidget):
         from PySide6.QtWidgets import QListWidgetItem, QWidget as _QW, QVBoxLayout as _QVL
         from PySide6.QtCore import QTimer
         
-        # ===== 模块预加载系统 =====
-        self.module_widgets = {}  # 存储已加载的模块 widget
-        self.module_pages = {}    # 存储已创建的页面
-        
-        # 自动发现并加载所有 moduleX_*.pyw 模块
-        modules = discover_modules()
-        self.all_modules = modules  # 保存所有模块信息
-        
-        print(f"Discovered {len(modules)} modules: {modules}")
-        
-        # 初始创建导航列表项和页面占位符
-        for module_num, module_name, display_name, module_file in modules:
-            if module_num <= 3:
-                # 前三个模块使用 UI 中预定义的页面，只更新导航
-                nav_item = self.ui.navigationList.item(module_num - 1)
-                if nav_item:
-                    nav_item.setText(display_name)
-            else:
-                # 后续模块动态创建占位页面
-                page = _QW()
-                page.setObjectName(f"page_{module_num}")
-                self.ui.stackedWidget.addWidget(page)
-                self.module_pages[module_num] = page
-                
-                # 添加导航列表项
-                QListWidgetItem(self.ui.navigationList)
-                nav_item = self.ui.navigationList.item(module_num - 1)
-                if nav_item:
-                    nav_item.setText(display_name)
-        
+        # ===== 插件化：完全解除与“fixed 5 模块/固定顺序”的耦合 =====
+        # 清空 UI 原本在 .ui 里放置的占位页与导航项
+        try:
+            self.ui.navigationList.clear()
+        except Exception:
+            pass
+        try:
+            while self.ui.stackedWidget.count() > 0:
+                w = self.ui.stackedWidget.widget(0)
+                self.ui.stackedWidget.removeWidget(w)
+                w.deleteLater()
+        except Exception:
+            pass
+
+        # ===== 模块预加载系统（插件） =====
+        self.module_widgets = {}   # key: index -> widget instance
+        self.module_pages = {}     # key: index -> page QWidget
+        self.plugins = discover_plugins()  # [{'name','title','file','order'}]
+
+        print(f"Discovered {len(self.plugins)} plugin modules:")
+        for i, p in enumerate(self.plugins, 1):
+            print(f"  {i}. {p['name']} (title={p['title']}, order={p['order']})")
+
+        # 为每个插件创建导航和页面占位
+        for idx, plugin in enumerate(self.plugins):
+            # 导航项
+            QListWidgetItem(plugin["title"], self.ui.navigationList)
+            # 页面占位
+            page = _QW()
+            page.setObjectName(f"page_{idx}")
+            self.ui.stackedWidget.addWidget(page)
+            self.module_pages[idx] = page
+
         # 连接导航列表的点击事件
         self.ui.navigationList.itemClicked.connect(self._on_navigation_clicked)
-        
-        # ===== 关键改进：在后台线程预加载所有模块 =====
+
+        # 默认选中并显示第一个插件（若存在）
+        if self.plugins:
+            self.ui.navigationList.setCurrentRow(0)
+            self.ui.stackedWidget.setCurrentIndex(0)
+
         # 使用 QTimer 在后台逐个加载模块，不阻塞 UI
-        self._modules_to_load = list(modules)
         self._load_index = 0
-        
-        print("Starting background module preloading...")
-        # 所有模块都用 QTimer 异步加载，避免阻塞 UI
-        if modules:
-            # 第一个模块延迟 100ms 加载（给 UI 时间渲染）
+        print("Starting background plugin preloading...")
+        if self.plugins:
             QTimer.singleShot(100, self._preload_next_module)
     
     def _preload_next_module(self):
         """在后台逐个预加载模块"""
         from PySide6.QtCore import QTimer
         
-        if self._load_index >= len(self._modules_to_load):
+        if self._load_index >= len(self.plugins):
             print("✓ All modules preloaded!")
             return
         
-        module_num, module_name, display_name, module_file = self._modules_to_load[self._load_index]
+        plugin = self.plugins[self._load_index]
+        module_name = plugin["name"]
+        display_name = plugin["title"]
         module_index = self._load_index
         
-        print(f"⏳ Preloading module {module_num}: {module_name}...")
+        print(f"⏳ Preloading module {module_index+1}: {module_name}...")
         try:
-            self._load_module_blocking(module_num, module_name, display_name, module_index)
-            print(f"  ✓ Module {module_num} preloaded")
+            self._load_module_blocking(module_index, module_name, display_name)
+            print(f"  ✓ Module {module_index+1} preloaded")
         except Exception as e:
-            print(f"  ✗ Failed to preload module {module_num}: {e}")
+            print(f"  ✗ Failed to preload module {module_index+1}: {e}")
         
         self._load_index += 1
         
         # 继续加载下一个模块（FFmpeg 模块给更多时间）
-        if self._load_index < len(self._modules_to_load):
-            # 如果是第三个模块（FFmpeg），延迟更久，让其他操作完成
-            delay = 300 if self._modules_to_load[self._load_index][0] == 3 else 150
+        if self._load_index < len(self.plugins):
+            # 简单启发：名字含 ffmpeg 的插件稍微延迟
+            next_name = self.plugins[self._load_index]["name"].lower()
+            delay = 300 if ("ffmpeg" in next_name or "video" in next_name) else 150
             QTimer.singleShot(delay, self._preload_next_module)
     
-    def _load_module_blocking(self, module_num, module_name, display_name, module_index):
+    def _load_module_blocking(self, module_index, module_name, display_name):
         """直接加载模块（同步）"""
         from PySide6.QtWidgets import QListWidgetItem, QWidget as _QW, QVBoxLayout as _QVL
         
-        # 动态导入模块
-        widget_class = load_module_widget(module_name)
-        
-        if widget_class is None:
-            print(f"  ⚠️  Warning: Could not find widget class in module {module_name}")
+        # 动态导入模块并优先使用模块工厂函数 create_widget(parent)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as e:
+            print(f"  ✗ Import failed for {module_name}: {e}")
             return
-        
-        # 创建 widget 实例
-        widget_instance = widget_class(self)
-        self.module_widgets[module_num] = widget_instance
-        
-        # 根据模块号决定是否需要替换或新建页面
-        if module_num <= 3:
-            # 前三个模块使用 UI 中预定义的页面
-            page_attr = f"page_{module_num}"
-            if hasattr(self.ui, page_attr):
-                page = getattr(self.ui, page_attr)
-                page_layout = page.layout()
-                while page_layout.count():
-                    item = page_layout.takeAt(0)
-                    w = item.widget()
-                    if w is not None:
-                        w.deleteLater()
-                page_layout.addWidget(widget_instance)
-                self.module_pages[module_num] = page
+
+        if hasattr(module, "create_widget") and callable(getattr(module, "create_widget")):
+            try:
+                widget_instance = module.create_widget(self)
+            except Exception as e:
+                print(f"  ✗ create_widget() failed in {module_name}: {e}")
+                return
         else:
-            # 第四个及以后的模块替换占位页面中的内容
-            if module_num in self.module_pages:
-                page = self.module_pages[module_num]
-                # 清空页面中的所有控件
-                while page.layout() and page.layout().count():
+            widget_class = load_module_widget(module_name)
+            if widget_class is None:
+                print(f"  ⚠️  Warning: Could not find widget class in module {module_name}")
+                return
+            widget_instance = widget_class(self)
+
+        self.module_widgets[module_index] = widget_instance
+
+        # 使用统一的动态页面逻辑：无论第几个都相同处理
+        if module_index in self.module_pages:
+            page = self.module_pages[module_index]
+            # 清空页面中的所有控件
+            if page.layout():
+                while page.layout().count():
                     item = page.layout().takeAt(0)
                     w = item.widget()
                     if w is not None:
                         w.deleteLater()
-                # 如果页面没有布局，创建一个
-                if not page.layout():
-                    page_layout = _QVL(page)
-                    page_layout.setContentsMargins(0, 0, 0, 0)
-                else:
-                    page_layout = page.layout()
-                page_layout.addWidget(widget_instance)
+                page_layout = page.layout()
+            else:
+                page_layout = _QVL(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.addWidget(widget_instance)
     
     def _on_navigation_clicked(self, item):
         """导航项被点击时的回调 - 现在只需要切换，不需要加载"""
