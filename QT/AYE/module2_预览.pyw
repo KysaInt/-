@@ -248,15 +248,17 @@ class SequencePreviewWidget(QWidget):
         self.min_frame_threshold = 5
         self.max_frame_threshold = 10000
         
-        # 实时播放相关设置
-        self.realtime_playback_enabled = False
-        self.realtime_target_fps = 24.0  # 目标帧率（实际播放时的FPS）
+        # 实时播放相关设置（默认启用，60fps）
+        self.realtime_playback_enabled = True
+        self.realtime_target_fps = 60.0  # 目标帧率（实际播放时的FPS）
         
         # 状态保存用于模块切换时的恢复
         self._saved_state = {
             'card_states': {},  # 保存每张卡片的展开状态和高度
             'scroll_position': 0,  # 保存滚动条位置
         }
+        # 刷新时的临时快照容器
+        self._refresh_snapshot = {}
         # 首次显示标志
         self._first_show = True
 
@@ -470,6 +472,12 @@ class SequencePreviewWidget(QWidget):
         if self.scan_worker and self.scan_worker.isRunning():
             return # Don't start a new scan if one is already running
 
+        # 刷新前快照当前卡片的折叠/高度状态
+        try:
+            self._refresh_snapshot = self._snapshot_card_fold_states()
+        except Exception as _e:
+            self._refresh_snapshot = {}
+
         self.path_edit.setText(self.current_path)
         self.select_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
@@ -520,7 +528,60 @@ class SequencePreviewWidget(QWidget):
         # 在所有卡片添加完后，在最下方添加拉伸来填充剩余空间
         self.card_layout.addStretch()
         
+        # 刷新后恢复卡片折叠/关闭状态（无动画）
+        try:
+            if hasattr(self, '_refresh_snapshot') and self._refresh_snapshot:
+                self._restore_card_fold_states_after_refresh(self._refresh_snapshot)
+        finally:
+            self._refresh_snapshot = {}
+
         self.scan_worker = None
+
+    def _snapshot_card_fold_states(self):
+        """采集当前卡片的折叠/展开状态与内容高度，用于刷新后恢复。"""
+        snapshot = {}
+        for card in getattr(self, 'cards', []):
+            try:
+                snapshot[card.name] = {
+                    'is_expanded': getattr(card, 'is_expanded', False),
+                    'max_height': card.content_widget.maximumHeight() if hasattr(card, 'content_widget') else 0,
+                }
+            except Exception:
+                pass
+        return snapshot
+
+    def _restore_card_fold_states_after_refresh(self, snapshot):
+        """在刷新生成新卡片后，按名称恢复折叠/展开状态，不触发动画。"""
+        for card in getattr(self, 'cards', []):
+            state = snapshot.get(card.name)
+            if not state:
+                continue
+            was_expanded = state.get('is_expanded', False)
+            saved_height = int(state.get('max_height', 0) or 0)
+
+            # 停止动画，直接设置
+            if hasattr(card, 'toggle_animation') and card.toggle_animation.state() == card.toggle_animation.Running:
+                card.toggle_animation.stop()
+
+            card.is_expanded = was_expanded
+            if was_expanded:
+                # 合理的目标高度：优先使用保存高度，否则按当前内容计算
+                target_h = saved_height if saved_height > 0 else card._calculate_expand_height()
+                card.content_widget.setMaximumHeight(16777215)
+                card.content_widget.setMinimumHeight(0)
+                card.content_widget.resize(card.content_widget.width(), target_h)
+                card.content_widget.setMaximumHeight(target_h)
+                # 确保有一帧显示
+                if len(card.all_frame_files) > 0 and not card.preview_label.pixmap():
+                    card.display_frame(0)
+                # 启动尺寸监听
+                if hasattr(card, 'size_monitor_timer'):
+                    card.size_monitor_timer.start()
+            else:
+                # 收起
+                card.content_widget.setMaximumHeight(0)
+                if hasattr(card, 'size_monitor_timer'):
+                    card.size_monitor_timer.stop()
 
     def update_min_threshold(self, value):
         self.min_frame_threshold = value
