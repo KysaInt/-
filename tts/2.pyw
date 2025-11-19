@@ -566,6 +566,7 @@ class CollapsibleBox(QWidget):
         self.anim = QPropertyAnimation(self.content_area, b"maximumHeight")
         self.anim.setDuration(duration)
         self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.anim.finished.connect(self._on_anim_finished)
 
         # 布局
         lay = QVBoxLayout(self)
@@ -597,13 +598,36 @@ class CollapsibleBox(QWidget):
 
         self.anim.stop()
         self.anim.setStartValue(self.content_area.maximumHeight())
-        self.anim.setEndValue(h if checked else 0)
+        # 展开：先动画到内容高度，完成后解除上限以自适应窗口最大高度
+        # 收起：动画到 0，并限制高度
+        if checked:
+            # 展开前先允许增长
+            self.content_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+            self.anim.setEndValue(h)
+        else:
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.content_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.anim.setEndValue(0)
         self.anim.start()
 
     def _update_arrow(self, expanded):
         """更新箭头"""
         arrow = "▼" if expanded else "►"
         self.toggle_button.setText(f"{arrow} {self._title}")
+
+    def _on_anim_finished(self):
+        """动画结束后的高度与策略修正：展开后解除最大高度限制，以便填满剩余空间。"""
+        if self.toggle_button.isChecked():
+            # 解除最大高度限制，使用一个很大的上限以自适应父布局
+            self.content_area.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+            self.content_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        else:
+            # 收起时固定为 0，保持贴顶
+            self.content_area.setMaximumHeight(0)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.content_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
 
 # ============================================================================
@@ -741,7 +765,7 @@ class SubtitlePauseMatcherUI(QWidget):
         self.min_silence_spin = QDoubleSpinBox()
         self.min_silence_spin.setRange(0.01, 10.0)
         self.min_silence_spin.setSingleStep(0.01)
-        self.min_silence_spin.setValue(0.01)
+        self.min_silence_spin.setValue(0.10)
         settings_layout.addWidget(self.min_silence_spin, 1, 1)
 
         settings_box.setContentLayout(settings_layout)
@@ -818,7 +842,7 @@ class SubtitlePauseMatcherUI(QWidget):
         # 默认展开分析结果面板，展开向下延展
         info_box.toggle_button.setChecked(True)
         info_box._on_toggled(True)
-        root_layout.addWidget(info_box)
+        root_layout.addWidget(info_box, 1)
 
         # 底部伸缩
         root_layout.addStretch()
