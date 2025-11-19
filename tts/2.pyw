@@ -18,7 +18,8 @@ from scipy.io import wavfile
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QLabel, QLineEdit, QFileDialog, QSpinBox, QDoubleSpinBox, QCheckBox,
-    QComboBox, QFrame, QScrollArea, QProgressBar, QMessageBox, QGridLayout
+    QComboBox, QFrame, QScrollArea, QProgressBar, QMessageBox, QGridLayout,
+    QSizePolicy
 )
 from PySide6.QtCore import QThread, Signal, Qt, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QPalette, QFontDatabase, QIcon
@@ -542,6 +543,9 @@ class CollapsibleBox(QWidget):
         super().__init__(parent)
         self._title = title
 
+        # 保证折叠时不占据多余空间，配合下方弹簧可贴顶
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
         # 标题按钮
         self.toggle_button = QPushButton()
         f = self.toggle_button.font()
@@ -765,6 +769,9 @@ class SubtitlePauseMatcherUI(QWidget):
         self.reset_btn.clicked.connect(self._reset)
         action_layout.addWidget(self.reset_btn)
 
+        # 自动执行后无需手动点击，按钮默认隐藏（保留逻辑备用）
+        self.analyze_btn.setVisible(False)
+        self.match_btn.setVisible(False)
         root_layout.addLayout(action_layout)
 
         # ====== 进度条 ======
@@ -808,6 +815,9 @@ class SubtitlePauseMatcherUI(QWidget):
         info_layout.addWidget(self.log_text, 5, 0, 1, 2)
 
         info_box.setContentLayout(info_layout)
+        # 默认展开分析结果面板，展开向下延展
+        info_box.toggle_button.setChecked(True)
+        info_box._on_toggled(True)
         root_layout.addWidget(info_box)
 
         # 底部伸缩
@@ -819,29 +829,43 @@ class SubtitlePauseMatcherUI(QWidget):
 
     def _select_audio(self):
         """选择音频文件"""
+        # 默认目录 ../AE
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        default_dir = os.path.normpath(os.path.join(base_dir, "..", "AE"))
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择音频文件",
-            "",
+            default_dir if os.path.isdir(default_dir) else "",
             "音频文件 (*.wav *.mp3 *.flac);;所有文件 (*)"
         )
         if path:
             self.audio_path = path
             self.audio_path_edit.setText(Path(path).name)
             self._log(f"✓ 已选择音频: {Path(path).name}")
+            # 自动开始分析
+            # 若分析线程正在运行则跳过
+            if not (self.analysis_worker and self.analysis_worker.isRunning()):
+                self._analyze_audio()
 
     def _select_srt(self):
         """选择字幕文件"""
+        # 默认目录 ./output
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        default_dir = os.path.normpath(os.path.join(base_dir, "output"))
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择字幕文件",
-            "",
+            default_dir if os.path.isdir(default_dir) else "",
             "SRT 字幕 (*.srt);;所有文件 (*)"
         )
         if path:
             self.srt_path = path
             self.srt_path_edit.setText(Path(path).name)
             self._log(f"✓ 已选择字幕: {Path(path).name}")
+            # 若已有分析结果则自动匹配；否则等待分析完成后自动匹配
+            if self.current_silences:
+                if not (self.matching_worker and self.matching_worker.isRunning()):
+                    self._match_subtitles()
 
     def _analyze_audio(self):
         """分析音频"""
@@ -884,6 +908,10 @@ class SubtitlePauseMatcherUI(QWidget):
         for i, s in enumerate(silences, 1):
             self._log(f"  {i}. {s.start:.2f}s - {s.end:.2f}s (时长: {s.duration:.2f}s)")
 
+        # 若已选定字幕文件，自动开始匹配
+        if self.srt_path and not (self.matching_worker and self.matching_worker.isRunning()):
+            self._match_subtitles()
+
     def _on_analysis_error(self, error: str):
         """分析出错"""
         self.progress_bar.setVisible(False)
@@ -893,6 +921,9 @@ class SubtitlePauseMatcherUI(QWidget):
 
     def _match_subtitles(self):
         """匹配字幕"""
+        # 防重入
+        if self.matching_worker and self.matching_worker.isRunning():
+            return
         if not self.srt_path:
             QMessageBox.warning(self, "警告", "请先选择字幕文件")
             return
@@ -944,22 +975,22 @@ class SubtitlePauseMatcherUI(QWidget):
             QMessageBox.warning(self, "警告", "没有可导出的字幕")
             return
 
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存字幕文件",
-            "output_subtitles.srt",
-            "SRT 字幕 (*.srt)"
-        )
+        # 使用所选字幕文件所在目录，自动命名为 原名+replace.srt
+        if not self.srt_path:
+            QMessageBox.warning(self, "警告", "尚未选择字幕文件，无法确定导出位置")
+            return
+        srt_dir = os.path.dirname(self.srt_path)
+        base_name = Path(self.srt_path).stem + "replace.srt"
+        save_path = os.path.join(srt_dir, base_name)
 
-        if save_path:
-            try:
-                SRTParser.save(save_path, self.current_subtitles)
-                self._log(f"✓ 字幕已保存: {save_path}")
-                QMessageBox.information(self, "成功", f"字幕已导出至:\n{save_path}")
-                self.export_btn.setEnabled(False)
-            except Exception as e:
-                self._log(f"❌ 导出失败: {str(e)}")
-                QMessageBox.critical(self, "导出错误", str(e))
+        try:
+            SRTParser.save(save_path, self.current_subtitles)
+            self._log(f"✓ 字幕已保存: {save_path}")
+            QMessageBox.information(self, "成功", f"字幕已导出至:\n{save_path}")
+            self.export_btn.setEnabled(False)
+        except Exception as e:
+            self._log(f"❌ 导出失败: {str(e)}")
+            QMessageBox.critical(self, "导出错误", str(e))
 
     def _open_output(self):
         """打开输出目录"""
