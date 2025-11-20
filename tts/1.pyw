@@ -596,6 +596,7 @@ class TTSWorker(QThread):
         styledegree: str = "1.0",
         role: str = "",
         subtitle_lines: int = 1,
+        selected_txt_files: list[str] | None = None,
     ):
         super().__init__(parent)
         self.voice = voice
@@ -617,6 +618,8 @@ class TTSWorker(QThread):
         self.style = style
         self.styledegree = styledegree
         self.role = role
+        # 仅处理的文本文件（可选）：若为 None 则扫描目录全部 .txt
+        self.selected_txt_files = list(selected_txt_files) if selected_txt_files else None
 
     def build_ssml_text(self, text: str):
         """构建包含情绪标签的文本
@@ -772,10 +775,15 @@ class TTSWorker(QThread):
             self.progress.emit(f"    ⚠ [{self.voice}] 写入字幕失败: {exc}")
 
     async def main_task(self):
-        dir_path = os.path.dirname(os.path.abspath(__file__))
-        files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
+        dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "txt")
+        os.makedirs(dir_path, exist_ok=True)
+        # 使用传入的选择列表，否则扫描 txt 子目录全部
+        if self.selected_txt_files is not None:
+            files = [f for f in self.selected_txt_files if f.lower().endswith('.txt')]
+        else:
+            files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
         if not files:
-            self.progress.emit(f"[{self.voice}] 未找到任何 .txt 文件！")
+            self.progress.emit(f"[{self.voice}] txt 子目录未找到任何 .txt 文件！")
             return
 
         self.progress.emit(f"[{self.voice}] 开始处理任务...")
@@ -837,6 +845,9 @@ class TTSApp(QWidget):
         # 根布局
         self.root_layout = QVBoxLayout(self)
 
+        # 确保 ./txt 子目录存在并迁移当前同级旧版 txt 文件
+        self._ensure_text_dir_and_migrate()
+
         # 语音模型树
         self.label_voice = QLabel("选择语音模型 (可多选):")
         self.voice_tree = QTreeWidget()
@@ -850,18 +861,9 @@ class TTSApp(QWidget):
         self.voice_items = {}
         self.populate_voices()
         
-        # 添加已选择模型的提示标签
+        # 添加已选择模型的提示标签（无背景，使用主题文本色）
         self.selected_voices_label = QLabel("已选择: 0 个模型")
-        self.selected_voices_label.setStyleSheet("""
-            QLabel {
-                color: #2196F3;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #E3F2FD;
-                border-radius: 3px;
-                border: 1px solid #90CAF9;
-            }
-        """)
+        self.selected_voices_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
         self.selected_voices_label.setWordWrap(True)
         
         # 连接树控件的itemChanged信号以更新选择提示
@@ -879,7 +881,7 @@ class TTSApp(QWidget):
         self.punctuation_combo.addItem("中文标点 → 英文标点", "to_halfwidth")
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
         self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
-        self.punctuation_combo.setToolTip("选择后立即对同目录下所有 txt 文件执行转换")
+        self.punctuation_combo.setToolTip("选择后立即对 txt 子目录内所有 txt 文件执行转换")
         self.punctuation_layout.addWidget(self.refresh_auth_button)
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
@@ -1103,6 +1105,28 @@ class TTSApp(QWidget):
         self.settings_box.setContentLayout(settings_inner)
         self.splitter.addWidget(self.settings_box)
 
+        # 文本选择面板（新增加）
+        self.text_box = CollapsibleBox("文本选择", expanded=True)
+        text_inner = QVBoxLayout(); text_inner.setContentsMargins(8,8,8,8); text_inner.setSpacing(6)
+        self.label_text = QLabel("选择文本 (可多选):")
+        self.text_tree = QTreeWidget()
+        self.text_tree.setHeaderLabels(["文件名"]) 
+        self.text_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        # 已选择文本提示标签（无背景，使用主题文本色）
+        self.selected_texts_label = QLabel("已选择: 0 个文本")
+        self.selected_texts_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
+        self.selected_texts_label.setWordWrap(True)
+        # 填充TXT文件树（默认全选）
+        self.populate_texts()
+        # 连接改变信号
+        self.text_tree.itemChanged.connect(self._update_selected_texts_label)
+        text_inner.addWidget(self.label_text)
+        text_inner.addWidget(self.selected_texts_label)
+        text_inner.addWidget(self.text_tree)
+        self.text_box.setContentLayout(text_inner)
+        # 插入到 设置 与 语音 模块之间
+        self.splitter.addWidget(self.text_box)
+
         # 语音模型面板
         self.voice_box = CollapsibleBox("语音模型", expanded=True)
         voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
@@ -1124,8 +1148,8 @@ class TTSApp(QWidget):
         self.splitter.addWidget(self.bottom_filler)
 
         # 保存展开尺寸
-        self._panel_saved_sizes = {"voice": None, "log": None}
-        for b in (self.settings_box, self.voice_box, self.log_box):
+        self._panel_saved_sizes = {"text": None, "voice": None, "log": None}
+        for b in (self.settings_box, self.text_box, self.voice_box, self.log_box):
             b.toggled.connect(self.update_splitter_sizes)
         self.splitter.splitterMoved.connect(lambda *_: self._store_expanded_sizes())
         # 附加：拖动后进行约束修正，避免覆盖折叠标题或挤压内容
@@ -1151,27 +1175,77 @@ class TTSApp(QWidget):
         self.log_view.append("===============================")
         self.log_view.append(" 微软 Edge TTS 文本转语音助手")
         self.log_view.append("===============================")
-        self.log_view.append("1. 将需要转换的文本放在本目录的 .txt 文件中")
+        self.log_view.append("1. 将需要转换的文本放在 txt 子目录 (./txt) 内的 .txt 文件中")
         self.log_view.append("2. 在下方树状列表中勾选一个或多个语音模型")
         self.log_view.append("3. 点击“开始转换”按钮启动")
         self.log_view.append("4. 可选：勾选“同步生成 SRT 字幕文件”并调整参数")
         self.log_view.append("")
 
+    def populate_texts(self):
+        """扫描 txt 子目录的 .txt 文件，填充至文本树（默认全选）。"""
+        try:
+            self.text_tree.blockSignals(True)
+            self.text_tree.clear()
+            dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "txt")
+            os.makedirs(dir_path, exist_ok=True)
+            txt_files = sorted([f for f in os.listdir(dir_path) if f.lower().endswith('.txt')])
+            # 顶层汇总节点，便于一键全选/全不选
+            root_item = QTreeWidgetItem(self.text_tree, ["TXT 文件"])
+            root_item.setFlags(root_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
+            root_item.setCheckState(0, Qt.Checked)
+            for name in txt_files:
+                child = QTreeWidgetItem(root_item, [name])
+                child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.Checked)
+        finally:
+            self.text_tree.blockSignals(False)
+        # 初始化已选择提示
+        self._update_selected_texts_label()
+
+    def get_selected_texts(self) -> list[str]:
+        """返回用户勾选的 .txt 文件名列表（位于 ./txt 子目录）。"""
+        results: list[str] = []
+        root = self.text_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            top = root.child(i)
+            for j in range(top.childCount()):
+                item = top.child(j)
+                if item.checkState(0) == Qt.Checked:
+                    results.append(item.text(0))
+            # 若意外无子项且顶层被选中
+            if top.childCount() == 0 and top.checkState(0) == Qt.Checked:
+                name = top.text(0)
+                if name.lower().endswith('.txt'):
+                    results.append(name)
+        return results
+
+    def _update_selected_texts_label(self, *args):
+        selected = self.get_selected_texts()
+        count = len(selected)
+        if count == 0:
+            self.selected_texts_label.setText("已选择: 0 个文本")
+        elif count <= 5:
+            names = ", ".join(selected)
+            self.selected_texts_label.setText(f"已选择 {count} 个文本: {names}")
+        else:
+            preview = ", ".join(selected[:5])
+            self.selected_texts_label.setText(f"已选择 {count} 个文本: {preview}... 等")
+
     def _on_manual_refresh_auth(self):
         """手动刷新 Edge TTS 鉴权参数。"""
         try:
-            self.log_view.append("↻ 正在刷新 Edge TTS 鉴权…")
+            # 起始提示不再显示（按需求仅显示完成信息），故不记录此行
             QApplication.setOverrideCursor(Qt.WaitCursor)
             success = asyncio.run(refresh_edge_tts_key_async(force=True))
         except Exception as e:
             success = False
-            self.log_view.append(f"⚠ 刷新异常: {e}")
+            self.log_view.append(f"⚠ 刷新异常: {e} AYE:建议切换网络后尝试..")
         finally:
             QApplication.restoreOverrideCursor()
         if success:
             self.log_view.append("✓ 鉴权刷新成功。")
         else:
-            self.log_view.append("⚠ 鉴权刷新失败，请稍后重试或检查网络。")
+            self.log_view.append("⚠ 鉴权刷新失败，请稍后重试或检查网络。AYE:建议切换网络后尝试..")
 
     # ---------- Splitter 尺寸控制 ----------
     def _store_expanded_sizes(self):
@@ -1183,18 +1257,21 @@ class TTSApp(QWidget):
                 pass
         
         sizes = self.splitter.sizes()
-        if len(sizes) < 4:
+        if len(sizes) < 5:
             return
-        # sizes: [settings, voice, log, filler]
+        # sizes: [settings, text, voice, log, filler]
+        if self.text_box.is_expanded():
+            self._panel_saved_sizes['text'] = max(0, sizes[1])
         if self.voice_box.is_expanded():
-            self._panel_saved_sizes['voice'] = max(0, sizes[1])
+            self._panel_saved_sizes['voice'] = max(0, sizes[2])
         if self.log_box.is_expanded():
-            self._panel_saved_sizes['log'] = max(0, sizes[2])
+            self._panel_saved_sizes['log'] = max(0, sizes[3])
 
     def update_splitter_sizes(self):
         splitter = self.splitter
         total_h = max(1, splitter.height())
         header_s = self.settings_box.header_height()
+        header_t = self.text_box.header_height()
         header_v = self.voice_box.header_height()
         header_l = self.log_box.header_height()
         MAX_COMPACT = 500  # 增加高度以容纳情绪控制面板
@@ -1209,12 +1286,13 @@ class TTSApp(QWidget):
             set_h = header_s
 
         all_collapsed = (not self.settings_box.is_expanded() and
+                         not self.text_box.is_expanded() and
                          not self.voice_box.is_expanded() and
                          not self.log_box.is_expanded())
         if all_collapsed:
-            filler = max(0, total_h - (header_s + header_v + header_l))
-            splitter.setSizes([header_s, header_v, header_l, filler])
-            for box, h in [(self.settings_box, header_s), (self.voice_box, header_v), (self.log_box, header_l)]:
+            filler = max(0, total_h - (header_s + header_t + header_v + header_l))
+            splitter.setSizes([header_s, header_t, header_v, header_l, filler])
+            for box, h in [(self.settings_box, header_s), (self.text_box, header_t), (self.voice_box, header_v), (self.log_box, header_l)]:
                 box.setMinimumHeight(h); box.setMaximumHeight(h)
             self.bottom_filler.setMinimumHeight(0)
             self.bottom_filler.setMaximumHeight(16777215)
@@ -1222,28 +1300,44 @@ class TTSApp(QWidget):
             return
 
         remaining = max(0, total_h - set_h)
-        voice_exp = self.voice_box.is_expanded()
-        log_exp = self.log_box.is_expanded()
         MIN_CONTENT = 80
-        voice_h = header_v
-        log_h = header_l
-        if voice_exp and log_exp:
-            sv = self._panel_saved_sizes.get('voice') or 1
-            sl = self._panel_saved_sizes.get('log') or 1
-            tot = sv + sl
-            if tot <= 0: tot = 2; sv = sl = 1
-            voice_h = max(MIN_CONTENT, int(remaining * (sv / tot)))
-            log_h = max(MIN_CONTENT, remaining - voice_h)
-        elif voice_exp and not log_exp:
-            log_h = header_l
-            voice_h = max(MIN_CONTENT, remaining - log_h)
-        elif log_exp and not voice_exp:
-            voice_h = header_v
-            log_h = max(MIN_CONTENT, remaining - voice_h)
+        # 计算文本/语音/日志三个面板的高度
+        panels = [
+            ("text", self.text_box, header_t),
+            ("voice", self.voice_box, header_v),
+            ("log", self.log_box, header_l),
+        ]
+        expanded = [(key, box, header) for (key, box, header) in panels if box.is_expanded()]
+        collapsed = [(key, box, header) for (key, box, header) in panels if not box.is_expanded()]
 
-        used = set_h + voice_h + log_h
+        heights = {"text": header_t, "voice": header_v, "log": header_l}
+        if expanded:
+            # 使用已保存尺寸作为权重分配剩余高度
+            weights = []
+            for key, _, _ in expanded:
+                w = self._panel_saved_sizes.get(key) or 1
+                weights.append(max(1, int(w)))
+            total_w = sum(weights) if sum(weights) > 0 else len(expanded)
+            # 初步分配
+            alloc = []
+            for w in weights:
+                alloc.append(max(MIN_CONTENT, int(remaining * (w / total_w))))
+            # 调整最后一个填满剩余
+            rem_used = sum(alloc)
+            if rem_used > remaining:
+                # 轻微缩放
+                scale = remaining / rem_used if rem_used > 0 else 1
+                alloc = [max(MIN_CONTENT, int(a * scale)) for a in alloc]
+                rem_used = sum(alloc)
+            if alloc:
+                alloc[-1] = max(MIN_CONTENT, remaining - sum(alloc[:-1]))
+            # 写入高度
+            for (key, _, _), h in zip(expanded, alloc):
+                heights[key] = h
+
+        used = set_h + heights["text"] + heights["voice"] + heights["log"]
         filler = max(0, total_h - used)
-        splitter.setSizes([set_h, voice_h, log_h, filler])
+        splitter.setSizes([set_h, heights["text"], heights["voice"], heights["log"], filler])
 
         # 约束高度
         if self.settings_box.is_expanded():
@@ -1253,11 +1347,12 @@ class TTSApp(QWidget):
             self.settings_box.setMinimumHeight(header_s)
             self.settings_box.setMaximumHeight(header_s)
 
-        for box, expanded, header, h in [
-            (self.voice_box, voice_exp, header_v, voice_h),
-            (self.log_box, log_exp, header_l, log_h)
+        for (box, expanded_state, header, h) in [
+            (self.text_box, self.text_box.is_expanded(), header_t, heights["text"]),
+            (self.voice_box, self.voice_box.is_expanded(), header_v, heights["voice"]),
+            (self.log_box, self.log_box.is_expanded(), header_l, heights["log"]),
         ]:
-            if expanded:
+            if expanded_state:
                 box.setMinimumHeight(MIN_CONTENT)
                 box.setMaximumHeight(16777215)
             else:
@@ -1274,13 +1369,14 @@ class TTSApp(QWidget):
         - 展开面板 >= MIN_CONTENT
         """
         sizes = self.splitter.sizes()
-        if len(sizes) < 4:
+        if len(sizes) < 5:
             return
         header_s = self.settings_box.header_height()
+        header_t = self.text_box.header_height()
         header_v = self.voice_box.header_height()
         header_l = self.log_box.header_height()
         MIN_CONTENT = 80
-        set_h, voice_h, log_h, filler = sizes
+        set_h, text_h, voice_h, log_h, filler = sizes
         if not self.settings_box.is_expanded():
             set_h = header_s
         else:
@@ -1289,6 +1385,10 @@ class TTSApp(QWidget):
                 set_h = fixed
             else:
                 set_h = max(set_h, header_s + 40)
+        if not self.text_box.is_expanded():
+            text_h = header_t
+        else:
+            text_h = max(text_h, MIN_CONTENT)
         if not self.voice_box.is_expanded():
             voice_h = header_v
         else:
@@ -1298,16 +1398,17 @@ class TTSApp(QWidget):
         else:
             log_h = max(log_h, MIN_CONTENT)
         total = sum(sizes)
-        used = set_h + voice_h + log_h
+        used = set_h + text_h + voice_h + log_h
         filler = max(0, total - used)
         if used > total:
             scale = total / used if used > 0 else 1
             set_h = int(set_h * scale)
+            text_h = int(text_h * scale)
             voice_h = int(voice_h * scale)
             log_h = int(log_h * scale)
-            used = set_h + voice_h + log_h
+            used = set_h + text_h + voice_h + log_h
             filler = max(0, total - used)
-        self.splitter.setSizes([set_h, voice_h, log_h, filler])
+        self.splitter.setSizes([set_h, text_h, voice_h, log_h, filler])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1577,6 +1678,8 @@ class TTSApp(QWidget):
             if isinstance(panel_states, dict):
                 if "settings" in panel_states:
                     self.settings_box.set_expanded(bool(panel_states.get("settings", True)))
+                if "text" in panel_states and hasattr(self, 'text_box'):
+                    self.text_box.set_expanded(bool(panel_states.get("text", True)))
                 if "voice" in panel_states:
                     self.voice_box.set_expanded(bool(panel_states.get("voice", True)))
                 if "log" in panel_states:
@@ -1619,6 +1722,7 @@ class TTSApp(QWidget):
             "voice_role": self.role_combo.currentData() or "",
             "panel_states": {
                 "settings": self.settings_box.is_expanded(),
+                "text": self.text_box.is_expanded(),
                 "voice": self.voice_box.is_expanded(),
                 "log": self.log_box.is_expanded(),
             },
@@ -1659,6 +1763,10 @@ class TTSApp(QWidget):
         if not selected_voices:
             self.log_view.append("错误：请至少选择一个语音模型。")
             return
+        selected_texts = self.get_selected_texts() if hasattr(self, 'get_selected_texts') else []
+        if not selected_texts:
+            self.log_view.append("错误：请至少勾选一个文本文件。")
+            return
 
         default_output_enabled = self.default_output_checkbox.isChecked()
         extra_line_output = self.extra_line_checkbox.isChecked()
@@ -1692,23 +1800,7 @@ class TTSApp(QWidget):
         subtitle_rule = self.subtitle_rule_combo.currentData() or SubtitleGenerator.RULE_SMART
 
         self.start_button.setEnabled(False)
-        self.log_view.append("任务开始...")
-        self.log_view.append(f"选中的语音模型: {', '.join(selected_voices)}")
-        self.log_view.append(f"整段输出：{'开启' if default_output_enabled else '关闭'}")
-        if default_output_enabled:
-            if srt_enabled:
-                self.log_view.append(f"字幕分段规则：{self.subtitle_rule_combo.currentText()}")
-                self.log_view.append(
-                    f"字幕选项：开启，单行约 {line_length_value} 字，每块 {subtitle_lines_value} 行"
-                )
-            else:
-                self.log_view.append("字幕选项：关闭")
-        else:
-            self.log_view.append("字幕选项：不可用（整段输出已关闭）")
-        if extra_line_output:
-            self.log_view.append("行级输出：开启 (仅音频)")
-        else:
-            self.log_view.append("行级输出：关闭")
+        # 根据需求：不显示开始执行的提示，仅在完成/错误时输出内容。
         
         self.workers.clear()
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1733,19 +1825,20 @@ class TTSApp(QWidget):
                 styledegree=str(self.styledegree_slider.value() / 100.0),
                 role=self.role_combo.currentData() or "",
                 subtitle_lines=subtitle_lines_value,
+                selected_txt_files=selected_texts,
             )
-            worker.progress.connect(self.log_view.append)
+            worker.progress.connect(self._append_filtered_log)
             worker.finished.connect(self.on_worker_finished)
             self.workers[voice] = worker
             worker.start()
 
     def on_worker_finished(self, voice):
-        self.log_view.append(f"线程 {voice} 已完成。")
+        self.log_view.append(f"✓ 线程 {voice} 已完成。")
         if voice in self.workers:
             del self.workers[voice]
         
         if not self.workers:
-            self.log_view.append("\n所有任务均已完成！")
+            self.log_view.append("\n✓ 所有任务均已完成！")
             self.start_button.setEnabled(True)
 
     def execute_punctuation_conversion(self):
@@ -1754,12 +1847,16 @@ class TTSApp(QWidget):
         if conversion_type == "none":
             return
         
-        # 获取同目录下所有txt文件
-        dir_path = os.path.dirname(os.path.abspath(__file__))
-        txt_files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
+        # 获取被勾选的 txt 文件（若无面板则退化为全量），路径改为 ./txt
+        dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "txt")
+        os.makedirs(dir_path, exist_ok=True)
+        if hasattr(self, 'get_selected_texts'):
+            txt_files = [f for f in self.get_selected_texts() if f.lower().endswith('.txt')]
+        else:
+            txt_files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
         
         if not txt_files:
-            self.log_view.append("同目录下未找到任何.txt文件")
+            self.log_view.append("txt 子目录内未找到任何 .txt 文件")
             return
         
         converted_count = 0
@@ -1793,7 +1890,7 @@ class TTSApp(QWidget):
             except Exception as e:
                 self.log_view.append(f"✗ 处理文件失败 {txt_file}: {e}")
         
-        self.log_view.append(f"标点转换完成，共处理 {converted_count} 个文件")
+        self.log_view.append(f"✓ 标点转换完成，共处理 {converted_count} 个文件")
 
     # ---------- 语音模型选择提示更新 ----------
     def _update_selected_voices_label(self, *args):
@@ -1803,44 +1900,17 @@ class TTSApp(QWidget):
         
         if count == 0:
             self.selected_voices_label.setText("已选择: 0 个模型")
-            self.selected_voices_label.setStyleSheet("""
-                QLabel {
-                    color: #757575;
-                    font-weight: bold;
-                    padding: 5px;
-                    background-color: #F5F5F5;
-                    border-radius: 3px;
-                    border: 1px solid #E0E0E0;
-                }
-            """)
+            self.selected_voices_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
         elif count <= 3:
             # 显示所有选中的模型名称
             voices_text = ", ".join(selected)
             self.selected_voices_label.setText(f"已选择 {count} 个模型: {voices_text}")
-            self.selected_voices_label.setStyleSheet("""
-                QLabel {
-                    color: #2196F3;
-                    font-weight: bold;
-                    padding: 5px;
-                    background-color: #E3F2FD;
-                    border-radius: 3px;
-                    border: 1px solid #90CAF9;
-                }
-            """)
+            self.selected_voices_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
         else:
             # 只显示前3个，其余用省略号
             voices_preview = ", ".join(selected[:3])
             self.selected_voices_label.setText(f"已选择 {count} 个模型: {voices_preview}... 等")
-            self.selected_voices_label.setStyleSheet("""
-                QLabel {
-                    color: #4CAF50;
-                    font-weight: bold;
-                    padding: 5px;
-                    background-color: #E8F5E9;
-                    border-radius: 3px;
-                    border: 1px solid #A5D6A7;
-                }
-            """)
+            self.selected_voices_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
 
     # ---------- 情绪控制辅助方法 ----------
     def _toggle_emotion_controls(self, state):
@@ -1858,6 +1928,41 @@ class TTSApp(QWidget):
         """更新情绪强度标签"""
         degree = value / 100.0
         self.styledegree_label.setText(f"强度: {degree:.2f}")
+
+    # ---------- 日志过滤输出 ----------
+    def _append_filtered_log(self, text: str):
+        """只输出完成/结果类日志，过滤掉开始、进行中提示。"""
+        if not isinstance(text, str):
+            return
+        stripped = text.strip()
+        if not stripped:
+            return
+        # 过滤关键词集合（开始/进行中）
+        exclude_keywords = ["开始", "正在", "→", "↻"]
+        if any(k in stripped for k in exclude_keywords):
+            return
+        # 允许的正向特征（完成/结果/错误/警告/勾/叉等）
+        include_markers = ["✓", "⚠", "✗", "失败", "完成", "已保存", "任务处理完毕", "错误", "已生成", "已输出"]
+        if any(m in stripped for m in include_markers):
+            self.log_view.append(stripped)
+        # 其余普通行默认丢弃，保持日志简洁
+
+    # ---------- txt 目录迁移助手 ----------
+    def _ensure_text_dir_and_migrate(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        text_dir = os.path.join(script_dir, "txt")
+        os.makedirs(text_dir, exist_ok=True)
+        for name in os.listdir(script_dir):
+            if name.lower().endswith('.txt'):
+                src = os.path.join(script_dir, name)
+                dst = os.path.join(text_dir, name)
+                if os.path.abspath(src) == os.path.abspath(dst):
+                    continue
+                if not os.path.exists(dst):
+                    try:
+                        os.rename(src, dst)
+                    except Exception:
+                        pass
 
 
 if __name__ == "__main__":
