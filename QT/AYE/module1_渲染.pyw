@@ -431,6 +431,8 @@ class C4DMonitorWidget(QWidget):
         self._auto_scroll_reenable_timer.setSingleShot(True)
         self._auto_scroll_reenable_timer.timeout.connect(self._reenable_auto_scroll)
         self.history_view.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
+        # 缓存上次渲染内容，避免不必要的 setHtml 触发滚动条闪动
+        self._last_history_text = None
 
     def eventFilter(self, obj, event):
         if obj is self.preview_label and event.type() == QEvent.Resize:
@@ -527,13 +529,16 @@ class C4DMonitorWidget(QWidget):
             empty_char=fill_char,  # 同字符不同颜色
             global_scale=scale
         ))
-        # 保持滚动位置逻辑
+        # 保持滚动位置逻辑：使用“距底部距离”更稳健
         sb = self.history_view.verticalScrollBar()
-        at_bottom = sb.value() == sb.maximum()
+        old_max = sb.maximum()
+        old_val = sb.value()
+        distance_from_bottom = max(0, old_max - old_val)
         self._suppress_scroll_signal = True
         self._set_history_html(history_text)
-        if at_bottom:
-            self.history_view.moveCursor(QTextCursor.End)
+        new_max = sb.maximum()
+        target = max(0, new_max - distance_from_bottom)
+        sb.setValue(target)
         self._suppress_scroll_signal = False
 
     def _history_html_from_text(self, history_text: str) -> str:
@@ -608,10 +613,16 @@ class C4DMonitorWidget(QWidget):
         self.worker.start()
 
     def update_ui(self, history_text, status_text):
+        # 若内容无变化，避免重复渲染引发滚动条跳动
+        if self._last_history_text == history_text:
+            self.fixed_line_label.setText(status_text)
+            self.update_preview_if_needed()
+            return
+
         sb = self.history_view.verticalScrollBar()
-        # 当用户手动滚动后（auto_scroll_enabled=False），在刷新期间保持原始滚动值，
-        # 避免因内容增加而按照“距底部距离”推进，导致阅读位置被不断向下顶。
-        preserve_value = sb.value() if not self.auto_scroll_enabled else None
+        old_max = sb.maximum()
+        old_val = sb.value()
+        distance_from_bottom = max(0, old_max - old_val)
 
         self._suppress_scroll_signal = True
         self._set_history_html(history_text)
@@ -619,10 +630,10 @@ class C4DMonitorWidget(QWidget):
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
             new_max = sb.maximum()
-            # 保持刷新前的位置，若超出新范围则夹紧
-            target = min(preserve_value if preserve_value is not None else 0, new_max)
-            sb.setValue(max(0, target))
+            target = max(0, new_max - distance_from_bottom)
+            sb.setValue(target)
         self._suppress_scroll_signal = False
+        self._last_history_text = history_text
         # 更新固定行文本内容（虽然名为固定行，但可显示动态统计）
         self.fixed_line_label.setText(status_text)
         # 如有新文件则更新预览
@@ -685,8 +696,10 @@ class C4DMonitorWidget(QWidget):
     def log_message(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
         sb = self.history_view.verticalScrollBar()
-        # 在手动滚动暂停自动滚动期间，记录原始滚动值，刷新后保持不变。
-        preserve_value = sb.value() if not self.auto_scroll_enabled else None
+        # 在手动滚动暂停自动滚动期间，按“距底部距离”维持阅读位置
+        old_max = sb.maximum()
+        old_val = sb.value()
+        distance_from_bottom = max(0, old_max - old_val) if not self.auto_scroll_enabled else None
 
         self._suppress_scroll_signal = True
         self.history_view.append(f"[{timestamp}] {message}")
@@ -694,8 +707,8 @@ class C4DMonitorWidget(QWidget):
             self.history_view.moveCursor(QTextCursor.MoveOperation.End)
         else:
             new_max = sb.maximum()
-            target = min(preserve_value if preserve_value is not None else 0, new_max)
-            sb.setValue(max(0, target))
+            target = max(0, new_max - (distance_from_bottom or 0))
+            sb.setValue(target)
         self._suppress_scroll_signal = False
 
     def open_folder(self):
