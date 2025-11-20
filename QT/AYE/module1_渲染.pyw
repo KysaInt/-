@@ -294,6 +294,16 @@ class Worker(QThread):
                         last_move_time = now
 
                 except Exception as e:
+                    # 忽略文件仍在写入/被占用的临时错误 (WinError 32/33 或提示关键字)，等待下次循环再尝试
+                    win_err = getattr(e, 'winerror', None)
+                    msg = str(e)
+                    lock_keywords = [
+                        '占用', '使用该文件', 'used by another process', 'being used by another process',
+                        'cannot access the file', '因为它正被另一个进程使用'
+                    ]
+                    if win_err in (32, 33) or any(k.lower() in msg.lower() for k in lock_keywords):
+                        # 静默跳过，不产生窗口日志
+                        continue
                     self.log_signal.emit(f"移动文件失败: {e}")
 
         if moved_this_round > 0:
