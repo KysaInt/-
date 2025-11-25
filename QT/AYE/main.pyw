@@ -360,6 +360,20 @@ if __name__ == "__main__":
     # 当前 UI 宽度为 700，所以最小宽度约为 233
     widget.setMinimumWidth(235)
     widget.setMinimumHeight(300)
+
+    # ===== 根据当前屏幕可用高度的百分比设置默认高度 =====
+    # 例如占用 80% 的可用高度，可自行调整 ratio
+    from PySide6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.primaryScreen()
+    if screen is not None:
+        available_geometry = screen.availableGeometry()
+        screen_height = available_geometry.height()
+        ratio = 0.8  # 使用 80% 的屏幕可用高度
+        target_height = int(screen_height * ratio)
+        # 保证不小于最小高度
+        target_height = max(target_height, widget.minimumHeight())
+        widget.resize(widget.width() or 700, target_height)
     
     widget.show()
     sys.exit(app.exec())

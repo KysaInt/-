@@ -1,0 +1,49 @@
+{
+  "hotkey": "ctrl+alt+t",
+  "checked_voices": [
+    "zh-CN-XiaoxiaoNeural"
+  ],
+  "output_device_id": 3,
+  "monitor_device_id": 3,
+  "output_dir_enabled": false,
+  "output_dir_path": "",
+  "panel_states": {},
+  "panel_order": [
+    "settings",
+    "voice",
+    "log"
+  ],
+  "splitter_sizes": [
+    433,
+    354,
+    267
+  ],
+  "saved_panel_sizes": {},
+  "expanded_regions": [
+    "亚洲"
+  ],
+  "expanded_languages": [
+    "亚洲||ja-JP (日语)",
+    "亚洲||zh-CN (中文)",
+    "亚洲||zh-CN-henan (中文)",
+    "亚洲||zh-CN-liaoning (中文)",
+    "亚洲||zh-CN-shaanxi (中文)",
+    "亚洲||zh-CN-shandong (中文)",
+    "亚洲||zh-CN-sichuan (中文)",
+    "亚洲||zh-HK (中文)",
+    "亚洲||zh-TW (中文)"
+  ],
+  "window_geometry": [
+    835,
+    121,
+    520,
+    1086
+  ],
+  "voice_rate": "+25%",
+  "voice_pitch": "+25Hz",
+  "voice_volume": "+0%",
+  "enable_emotion": false,
+  "voice_style": "general",
+  "voice_styledegree": "1.0",
+  "voice_role": ""
+}
