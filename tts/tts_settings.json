@@ -7,25 +7,25 @@
   "subtitle_rule": "rule_2",
   "selected_voices": [
     "zh-CN-XiaoxiaoMultilingualNeural",
-    "zh-CN-YunyangNeural"
+    "zh-CN-YunyiMultilingualNeural"
   ],
   "voice_rate": "+0%",
   "voice_pitch": "+0Hz",
   "voice_volume": "+0%",
-  "enable_emotion": false,
+  "enable_emotion": true,
   "voice_style": "general",
   "voice_styledegree": "1.0",
   "voice_role": "",
   "panel_states": {
     "settings": true,
-    "text": false,
-    "voice": false,
+    "text": true,
+    "voice": true,
     "log": true
   },
   "window_geometry": [
     9,
     9,
     709,
-    1225
+    1147
   ]
 }

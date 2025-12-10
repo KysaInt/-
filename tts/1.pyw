@@ -648,33 +648,59 @@ class TTSWorker(QThread):
         return text
 
     async def tts_async(self, text, voice, output):
-        # 构建包含情绪的SSML文本
+        """调用 Edge TTS（新版优先）并在失败时做多重回退：
+        1) 优先使用 async_api.Communicate（edge-tts 新接口）
+        2) 失败后回退到旧版 edge_tts.Communicate
+        3) 若疑似鉴权/403，刷新 VoicesManager 后再试一次
+        4) 若仍无音频，禁用自定义 SSML 情绪补丁，改用纯文本重试
+        5) 所有失败路径均避免产生 0 字节文件，并输出明确错误信息
+        """
+
+        def _remove_if_empty(path: str):
+            if os.path.exists(path) and os.path.getsize(path) == 0:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+        # 第一次：按当前设置构建 SSML（可能包含 mstts:express-as）
         ssml_text = self.build_ssml_text(text)
 
-        # 针对偶发 401/Unauthorized/Invalid response status，做一次刷新后重试
         last_error: Exception | None = None
-        for attempt in range(2):  # 最多重试 1 次
+
+        async def _try_save(current_text: str, use_async_api: bool) -> None:
+            if use_async_api:
+                from edge_tts import async_api
+                communicate = async_api.Communicate(
+                    current_text, voice,
+                    rate=self.rate,
+                    pitch=self.pitch,
+                    volume=self.volume
+                )
+                self.progress.emit(f"    → [{self.voice}] 使用新版 Edge API 合成…")
+            else:
+                communicate = edge_tts.Communicate(
+                    current_text, voice,
+                    rate=self.rate,
+                    pitch=self.pitch,
+                    volume=self.volume
+                )
+                self.progress.emit(f"    → [{self.voice}] 使用旧版兼容 API 合成…")
+
+            await communicate.save(output)
+            # 防止 0 字节伪成功
+            if os.path.exists(output) and os.path.getsize(output) == 0:
+                _remove_if_empty(output)
+                raise Exception("生成的音频文件为空 (0 bytes)。可能是网络连接被拒绝或服务暂时不可用。")
+
+        # 尝试顺序：async_api -> 旧版；遇到鉴权错误时刷新一次再试
+        for attempt in range(2):
             try:
                 try:
-                    from edge_tts import async_api
-                    communicate = async_api.Communicate(
-                        ssml_text, voice,
-                        rate=self.rate,
-                        pitch=self.pitch,
-                        volume=self.volume
-                    )
-                    self.progress.emit(f"    → [{self.voice}] 正在调用微软语音服务...")
-                    await communicate.save(output)
-                except Exception as inner_e:
-                    # 首先尝试使用旧版 API 兼容路径
-                    communicate = edge_tts.Communicate(
-                        ssml_text, voice,
-                        rate=self.rate,
-                        pitch=self.pitch,
-                        volume=self.volume
-                    )
-                    self.progress.emit(f"    → [{self.voice}] 检测到旧版 API，已切换兼容模式。")
-                    await communicate.save(output)
+                    await _try_save(ssml_text, use_async_api=True)
+                except Exception:
+                    await _try_save(ssml_text, use_async_api=False)
+
                 # 成功
                 self.progress.emit(f"    ✓ [{self.voice}] 语音已保存到 {os.path.basename(output)}")
                 return
@@ -682,27 +708,39 @@ class TTSWorker(QThread):
                 last_error = e
                 err = str(e)
                 auth_error = (
-                    ('401' in err) or 
-                    ('Unauthorized' in err) or 
-                    ('Invalid response status' in err)
+                    ('401' in err) or
+                    ('403' in err) or
+                    ('Unauthorized' in err) or
+                    ('Invalid response status' in err) or
+                    ('No audio was received' in err)
                 )
                 if auth_error and attempt == 0:
-                    # 刷新鉴权参数后重试一次
-                    self.progress.emit(f"    ↻ [{self.voice}] 鉴权异常，正在刷新后重试…")
+                    self.progress.emit(f"    ↻ [{self.voice}] 疑似鉴权/403，正在刷新参数后重试…")
                     try:
                         await refresh_edge_tts_key_async(force=True)
                     except Exception as rf_e:
                         self.progress.emit(f"    ⚠ 刷新鉴权失败: {rf_e}")
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.8)
                     continue
-                # 非鉴权问题或已重试过
                 break
 
-        # 若到此仍失败，抛出最后错误
-        if last_error:
-            raise last_error
-        else:
-            raise RuntimeError("未知错误：TTS 合成失败且未捕获异常。")
+        # 若到此仍失败：尝试禁用情绪 SSML，改用纯文本重试（部分服务端策略会拒绝自定义 SSML）
+        self.progress.emit(f"    ⚠ [{self.voice}] SSML情绪可能被拒绝，改用纯文本回退…")
+        plain_text = text.strip()
+        try:
+            try:
+                await _try_save(plain_text, use_async_api=True)
+            except Exception:
+                await _try_save(plain_text, use_async_api=False)
+            self.progress.emit(f"    ✓ [{self.voice}] 纯文本回退成功，已保存 {os.path.basename(output)}")
+            return
+        except Exception as e2:
+            _remove_if_empty(output)
+            # 最终失败，抛出更明确的错误
+            raise Exception(
+                f"Edge TTS 合成失败：{e2}. 可能原因：服务端拒绝（403/NoAudio），或 Read Aloud API 政策变更。\n"
+                f"建议：更换网络出口/代理后重试，或在设置中改用 Azure Speech 官方 TTS。"
+            )
 
     def get_audio_duration(self, audio_path: str) -> float:
         try:
