@@ -6,6 +6,7 @@ import sys
 import subprocess
 import importlib
 import re
+import threading
 from datetime import datetime
 from collections import defaultdict
 
@@ -126,12 +127,43 @@ def ensure_edge_tts():
     # 移除当前脚本所在目录，避免导入冲突
     if script_dir in sys.path:
         sys.path.remove(script_dir)
-    try:
+
+    def _has_required_api(mod) -> bool:
+        # edge-tts 7.x：主入口就是 edge_tts.Communicate
+        try:
+            _ = getattr(mod, "Communicate")
+            _ = getattr(mod, "VoicesManager")
+        except Exception:
+            return False
+        return True
+
+    def _import_edge_tts():
         return importlib.import_module("edge_tts")
+
+    def _purge_edge_tts_modules():
+        # 升级后需要清理缓存，否则可能还在用旧模块
+        for k in list(sys.modules.keys()):
+            if k == "edge_tts" or k.startswith("edge_tts."):
+                sys.modules.pop(k, None)
+    try:
+        mod = _import_edge_tts()
+        if not _has_required_api(mod):
+            print("检测到 edge-tts 版本缺少必要接口（Communicate/VoicesManager），正在自动升级……")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "edge-tts"])
+            _purge_edge_tts_modules()
+            mod = _import_edge_tts()
+        return mod
     except ImportError:
         print("未检测到 edge-tts，正在自动安装……")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "edge-tts", "PySide6"])
-        return importlib.import_module("edge_tts")
+        _purge_edge_tts_modules()
+        mod = _import_edge_tts()
+        if not _has_required_api(mod):
+            print("已安装 edge-tts 但仍缺少必要接口，尝试强制升级……")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "edge-tts"])
+            _purge_edge_tts_modules()
+            mod = _import_edge_tts()
+        return mod
     finally:
         # 恢复 sys.path
         if script_dir not in sys.path:
@@ -149,6 +181,10 @@ _mutagen_mp3_module = None
 # 通过调用 VoicesManager.create() 触发 edge-tts 内部重新拉取参数，可缓解该问题。
 _EDGE_REFRESH_LAST_TS: float = 0.0
 _EDGE_REFRESH_INTERVAL: float = 30.0  # 秒，避免过于频繁的刷新
+_EDGE_REFRESH_LOCK = threading.Lock()
+
+# 避免网络卡死导致“没有任何结果发回”
+_EDGE_TTS_SAVE_TIMEOUT: float = 120.0  # 秒
 
 async def refresh_edge_tts_key_async(force: bool = True) -> bool:
     """刷新 edge-tts 内部鉴权/配置。
@@ -157,18 +193,19 @@ async def refresh_edge_tts_key_async(force: bool = True) -> bool:
     并做时间间隔节流，防止在高频错误时导致请求风暴。
     """
     global _EDGE_REFRESH_LAST_TS
-    now = time.time()
-    if not force and (now - _EDGE_REFRESH_LAST_TS) < _EDGE_REFRESH_INTERVAL:
-        return True
-    try:
-        # 创建一次 VoicesManager 即可触发内部参数/密钥的重新协商
-        await edge_tts.VoicesManager.create()
-        _EDGE_REFRESH_LAST_TS = now
-        print("Edge TTS 鉴权参数刷新成功")
-        return True
-    except Exception as e:
-        print(f"刷新 Edge TTS 鉴权参数失败: {e}")
-        return False
+    with _EDGE_REFRESH_LOCK:
+        now = time.time()
+        if not force and (now - _EDGE_REFRESH_LAST_TS) < _EDGE_REFRESH_INTERVAL:
+            return True
+        try:
+            # 创建一次 VoicesManager 即可触发内部参数/密钥的重新协商
+            await edge_tts.VoicesManager.create()
+            _EDGE_REFRESH_LAST_TS = now
+            print("Edge TTS 鉴权参数刷新成功")
+            return True
+        except Exception as e:
+            print(f"刷新 Edge TTS 鉴权参数失败: {e}")
+            return False
 
 
 def ensure_mutagen_mp3():
@@ -649,8 +686,8 @@ class TTSWorker(QThread):
 
     async def tts_async(self, text, voice, output):
         """调用 Edge TTS（新版优先）并在失败时做多重回退：
-        1) 优先使用 async_api.Communicate（edge-tts 新接口）
-        2) 失败后回退到旧版 edge_tts.Communicate
+        1) 若运行环境存在 async_api.Communicate，则优先使用
+        2) 否则直接使用 edge_tts.Communicate（edge-tts 7.x 主入口）
         3) 若疑似鉴权/403，刷新 VoicesManager 后再试一次
         4) 若仍无音频，禁用自定义 SSML 情绪补丁，改用纯文本重试
         5) 所有失败路径均避免产生 0 字节文件，并输出明确错误信息
@@ -668,38 +705,54 @@ class TTSWorker(QThread):
 
         last_error: Exception | None = None
 
-        async def _try_save(current_text: str, use_async_api: bool) -> None:
-            if use_async_api:
-                from edge_tts import async_api
+        def _has_async_api() -> bool:
+            try:
+                _ = getattr(edge_tts, "async_api")
+                from edge_tts import async_api  # type: ignore
+                _ = getattr(async_api, "Communicate")
+                return True
+            except Exception:
+                return False
+
+        async def _try_save(current_text: str, prefer_async_api: bool) -> None:
+            communicate = None
+            if prefer_async_api and _has_async_api():
+                from edge_tts import async_api  # type: ignore
                 communicate = async_api.Communicate(
-                    current_text, voice,
+                    current_text,
+                    voice,
                     rate=self.rate,
                     pitch=self.pitch,
-                    volume=self.volume
+                    volume=self.volume,
                 )
-                self.progress.emit(f"    → [{self.voice}] 使用新版 Edge API 合成…")
+                self.progress.emit(f"    → [{self.voice}] 使用 async_api 合成…")
             else:
                 communicate = edge_tts.Communicate(
-                    current_text, voice,
+                    current_text,
+                    voice,
                     rate=self.rate,
                     pitch=self.pitch,
-                    volume=self.volume
+                    volume=self.volume,
                 )
-                self.progress.emit(f"    → [{self.voice}] 使用旧版兼容 API 合成…")
+                self.progress.emit(f"    → [{self.voice}] 使用 Communicate 合成…")
 
-            await communicate.save(output)
+            try:
+                await asyncio.wait_for(communicate.save(output), timeout=_EDGE_TTS_SAVE_TIMEOUT)
+            except asyncio.TimeoutError:
+                _remove_if_empty(output)
+                raise Exception(f"合成超时（>{int(_EDGE_TTS_SAVE_TIMEOUT)}s）。可能是网络阻断/服务不可达/连接卡死。")
             # 防止 0 字节伪成功
             if os.path.exists(output) and os.path.getsize(output) == 0:
                 _remove_if_empty(output)
                 raise Exception("生成的音频文件为空 (0 bytes)。可能是网络连接被拒绝或服务暂时不可用。")
 
-        # 尝试顺序：async_api -> 旧版；遇到鉴权错误时刷新一次再试
+        # 尝试顺序：若可用则 async_api -> Communicate；遇到鉴权错误时刷新一次再试
         for attempt in range(2):
             try:
                 try:
-                    await _try_save(ssml_text, use_async_api=True)
+                    await _try_save(ssml_text, prefer_async_api=True)
                 except Exception:
-                    await _try_save(ssml_text, use_async_api=False)
+                    await _try_save(ssml_text, prefer_async_api=False)
 
                 # 成功
                 self.progress.emit(f"    ✓ [{self.voice}] 语音已保存到 {os.path.basename(output)}")
@@ -729,9 +782,9 @@ class TTSWorker(QThread):
         plain_text = text.strip()
         try:
             try:
-                await _try_save(plain_text, use_async_api=True)
+                await _try_save(plain_text, prefer_async_api=True)
             except Exception:
-                await _try_save(plain_text, use_async_api=False)
+                await _try_save(plain_text, prefer_async_api=False)
             self.progress.emit(f"    ✓ [{self.voice}] 纯文本回退成功，已保存 {os.path.basename(output)}")
             return
         except Exception as e2:
@@ -821,7 +874,8 @@ class TTSWorker(QThread):
         else:
             files = [f for f in os.listdir(dir_path) if f.lower().endswith('.txt')]
         if not files:
-            self.progress.emit(f"[{self.voice}] txt 子目录未找到任何 .txt 文件！")
+            # 需要穿透日志过滤（否则用户只看到线程结束，看不到原因）
+            self.progress.emit(f"⚠ [{self.voice}] txt 子目录未找到任何 .txt 文件！")
             return
 
         self.progress.emit(f"[{self.voice}] 开始处理任务...")
@@ -831,7 +885,8 @@ class TTSWorker(QThread):
                 with open(txt_path, 'r', encoding='utf-8') as f:
                     text = f.read().strip()
                 if not text:
-                    self.progress.emit(f"[{self.voice}] {txt_file} 为空，跳过。")
+                    # 需要穿透日志过滤（否则用户只看到没输出）
+                    self.progress.emit(f"⚠ [{self.voice}] {txt_file} 为空，已跳过。")
                     continue
 
                 self.progress.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.voice}] 开始处理 {txt_file}")
@@ -860,7 +915,8 @@ class TTSWorker(QThread):
                 self.progress.emit("")
 
             except Exception as e:
-                self.progress.emit(f"处理 {txt_file} 时出错: {e}")
+                # 需要穿透日志过滤（否则错误会被过滤掉，表现为“鉴权没用/没结果”）
+                self.progress.emit(f"✗ [{self.voice}] 处理 {txt_file} 出错: {e}")
         
         self.progress.emit(f"[{self.voice}] 任务处理完毕！")
 
@@ -879,6 +935,9 @@ class TTSApp(QWidget):
         self._default_geometry = (160, 160, 560, 800)  # 增加窗口高度以容纳情绪控制面板
         self.setGeometry(*self._default_geometry)
         self._settings_geometry_loaded = False
+
+        # 日志视图（提前创建，确保 populate_voices 的错误能显示在 UI 中）
+        self.log_view = QTextEdit(); self.log_view.setReadOnly(True)
 
         # 根布局
         self.root_layout = QVBoxLayout(self)
@@ -1093,9 +1152,6 @@ class TTSApp(QWidget):
         # 开始按钮
         self.start_button = QPushButton("开始转换")
         self.start_button.clicked.connect(self.start_tts)
-
-        # 日志视图
-        self.log_view = QTextEdit(); self.log_view.setReadOnly(True)
 
         # ========== 折叠面板结构 ==========
         self.splitter = QSplitter(Qt.Vertical)
@@ -1544,42 +1600,51 @@ class TTSApp(QWidget):
                 "非洲": ["af", "sw"]
             }
 
-            # 使用 utf-8 编码获取语音列表
-            result = subprocess.run(
-                [sys.executable, "-m", "edge_tts", "--list-voices"],
-                capture_output=True, text=True, encoding='utf-8', errors='ignore'
-            )
-            lines = result.stdout.strip().split('\n')
+            # 直接用 VoicesManager 获取结构化列表，避免解析 CLI 表格导致丢失
+            async def _load_voices():
+                manager = await edge_tts.VoicesManager.create()
+                return manager.voices or []
 
-            voices_by_region_lang = defaultdict(lambda: defaultdict(list))
-            # 从第三行开始解析，跳过标题和分隔线
-            for line in lines[2:]:
-                raw_parts = line.split(maxsplit=4)
-                if len(raw_parts) < 2:
+            try:
+                voices = asyncio.run(_load_voices())
+            except RuntimeError:
+                # 兼容已有事件循环环境
+                loop = asyncio.new_event_loop()
+                try:
+                    voices = loop.run_until_complete(_load_voices())
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+
+            # 兜底：若获取为空，提示并回退到 CLI（尽量保持可用）
+            if not voices:
+                raise RuntimeError("VoicesManager 未返回语音列表（可能是网络/区域/被拦截）。")
+
+            voices_by_region_lang: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+            for v in voices:
+                short_name = str(v.get('ShortName') or v.get('Name') or '').strip()
+                locale = str(v.get('Locale') or '').strip()
+                if not short_name or not locale:
                     continue
-                # Ensure we have at least 4 columns
-                while len(raw_parts) < 4:
-                    raw_parts.append("")
 
-                name = raw_parts[0]
-                lang_code = "-".join(name.split('-')[:2])
-                lang_prefix = lang_code.split('-')[0]
-                
+                lang_prefix = locale.split('-')[0].lower()
+
                 # 确定语言所属的区域
                 region = "其他"
                 for r, langs in regions.items():
-                    if lang_prefix in langs or lang_code in langs:
+                    if lang_prefix in langs or locale in langs:
                         region = r
                         break
-                    
+
                 # 获取语言中文名称
-                lang_display = lang_code
+                lang_display = locale
                 if lang_prefix in language_names:
                     chinese_name = language_names[lang_prefix]
-                    lang_display = f"{lang_code} ({chinese_name})"
-                
-                # 添加所有语言，不再仅限于中文
-                voices_by_region_lang[region][lang_display].append(raw_parts)
+                    lang_display = f"{locale} ({chinese_name})"
+
+                voices_by_region_lang[region][lang_display].append(v)
 
             # 按区域和语言创建树形结构
             for region, lang_map in sorted(voices_by_region_lang.items()):
@@ -1592,11 +1657,23 @@ class TTSApp(QWidget):
                     lang_item.setFlags(lang_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
                     lang_item.setCheckState(0, Qt.Unchecked)
 
-                    for parts in sorted(voice_rows, key=lambda row: row[0]):
-                        child = QTreeWidgetItem(lang_item, parts[:4])
+                    def _voice_sort_key(v):
+                        return str(v.get('ShortName') or '')
+
+                    for v in sorted(voice_rows, key=_voice_sort_key):
+                        short_name = str(v.get('ShortName') or '')
+                        gender = str(v.get('Gender') or '')
+                        locale = str(v.get('Locale') or '')
+                        status = str(v.get('Status') or '')
+                        # 个性：尽量从 VoiceTag 提取，取不到就显示状态
+                        voice_tag = v.get('VoiceTag') or {}
+                        personalities = voice_tag.get('VoicePersonalities') or []
+                        personalities_text = ",".join(map(str, personalities[:3])) if personalities else status
+
+                        child = QTreeWidgetItem(lang_item, [short_name, gender, locale, personalities_text])
                         child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                         child.setCheckState(0, Qt.Unchecked)
-                        self.voice_items[parts[0]] = child
+                        self.voice_items[short_name] = child
 
             # 默认展开中文区域项目
             for i in range(self.voice_tree.topLevelItemCount()):
@@ -1610,7 +1687,12 @@ class TTSApp(QWidget):
                             lang_item.setExpanded(True)
 
         except Exception as e:
-            self.log_view.append(f"获取语音模型列表失败: {e}")
+            log_view = getattr(self, "log_view", None)
+            msg = f"获取语音模型列表失败: {e}"
+            if log_view is not None:
+                log_view.append(msg)
+            else:
+                print(msg)
             # 提供备用选项
             fallback_region = QTreeWidgetItem(self.voice_tree, ["亚洲"])
             fallback_region.setFlags(fallback_region.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
@@ -1679,6 +1761,18 @@ class TTSApp(QWidget):
 
             selected_voices = data.get("selected_voices", [])
             self.apply_saved_voice_selection(selected_voices)
+
+            # 提示：若接口返回的语音列表变少，旧设置里部分模型会找不到
+            try:
+                missing = [v for v in selected_voices if v not in self.voice_items]
+                if missing:
+                    preview = ", ".join(missing[:6])
+                    more = "" if len(missing) <= 6 else f" 等{len(missing)}个"
+                    self.log_view.append(
+                        f"⚠ 已保存语音模型中有 {len(missing)} 个当前未加载到（可能网络/区域/拦截导致列表变少）：{preview}{more}"
+                    )
+            except Exception:
+                pass
             
             # 恢复语音参数
             self.rate_combo.setCurrentText(data.get("voice_rate", "+0%"))
@@ -1774,16 +1868,16 @@ class TTSApp(QWidget):
             self.log_view.append(f"⚠ 保存设置失败: {exc}")
 
     def apply_saved_voice_selection(self, voices: list[str]) -> None:
-        # 先全部清空
+        # 先全部清空（结构：region -> locale -> voice）
         root = self.voice_tree.invisibleRootItem()
         for i in range(root.childCount()):
-            lang_item = root.child(i)
-            lang_item.setCheckState(0, Qt.Unchecked)
-            for j in range(lang_item.childCount()):
-                gender_item = lang_item.child(j)
-                gender_item.setCheckState(0, Qt.Unchecked)
-                for k in range(gender_item.childCount()):
-                    voice_item = gender_item.child(k)
+            region_item = root.child(i)
+            region_item.setCheckState(0, Qt.Unchecked)
+            for j in range(region_item.childCount()):
+                lang_item = region_item.child(j)
+                lang_item.setCheckState(0, Qt.Unchecked)
+                for k in range(lang_item.childCount()):
+                    voice_item = lang_item.child(k)
                     voice_item.setCheckState(0, Qt.Unchecked)
 
         for voice in voices:
@@ -1980,7 +2074,7 @@ class TTSApp(QWidget):
         if any(k in stripped for k in exclude_keywords):
             return
         # 允许的正向特征（完成/结果/错误/警告/勾/叉等）
-        include_markers = ["✓", "⚠", "✗", "失败", "完成", "已保存", "任务处理完毕", "错误", "已生成", "已输出"]
+        include_markers = ["✓", "⚠", "✗", "失败", "完成", "已保存", "任务处理完毕", "错误", "出错", "异常", "已生成", "已输出"]
         if any(m in stripped for m in include_markers):
             self.log_view.append(stripped)
         # 其余普通行默认丢弃，保持日志简洁
