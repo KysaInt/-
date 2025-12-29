@@ -378,8 +378,8 @@ from PySide6.QtWidgets import (
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QLineEdit, QCheckBox,
     QComboBox, QSplitter, QSizePolicy, QSlider
 )
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QIntValidator, QIcon
+from PySide6.QtCore import QThread, Signal, Qt, QUrl
+from PySide6.QtGui import QIntValidator, QIcon, QDesktopServices
 
 
 # ==================== edge-tts SSML情绪标签补丁 ====================
@@ -1527,18 +1527,9 @@ class TTSApp(QWidget):
 
         # 标点转换控件
         self.punctuation_layout = QHBoxLayout()
-        # 手动刷新鉴权按钮（放在标点转换行的最左侧）
-        self.refresh_auth_button = QPushButton("刷新鉴权")
-        self.refresh_auth_button.setToolTip("手动刷新 Edge TTS 的鉴权参数，解决 401/连接异常后立即恢复。")
-        self.refresh_auth_button.clicked.connect(self._on_manual_refresh_auth)
-
-        # 获取远程用量指标（Azure Monitor）
+        # 获取用量：打开 Azure Portal 的 Metrics 页面
         self.fetch_metrics_button = QPushButton("获取用量")
-        self.fetch_metrics_button.setToolTip(
-            "从 Azure Monitor 拉取 Speech 资源用量指标（需要服务主体与资源信息环境变量）。\n"
-            "需要：AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET\n"
-            "以及：AZURE_SUBSCRIPTION_ID / AZURE_RESOURCE_GROUP / AZURE_SPEECH_RESOURCE_NAME"
-        )
+        self.fetch_metrics_button.setToolTip("打开 Azure Portal 的 Speech 资源 Metrics 页面。")
         self.fetch_metrics_button.clicked.connect(self._on_fetch_remote_metrics)
 
         self.punctuation_label = QLabel("标点转换:")
@@ -1548,7 +1539,6 @@ class TTSApp(QWidget):
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
         self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
         self.punctuation_combo.setToolTip("选择后立即对 txt 子目录内所有 txt 文件执行转换")
-        self.punctuation_layout.addWidget(self.refresh_auth_button)
         self.punctuation_layout.addWidget(self.fetch_metrics_button)
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
@@ -1740,68 +1730,66 @@ class TTSApp(QWidget):
         settings_inner.addWidget(QLabel("<b>基础参数:</b>"))
         settings_inner.addLayout(self.voice_params_layout)
         
-        # 添加情绪控制
-        settings_inner.addWidget(QLabel("<b>🎭 情绪控制 (SSML):</b>"))
-        
-        # 添加说明标签
-        emotion_help_label = QLabel("⚠️ 注意：不同语音支持的情绪不同，部分情绪可能无效果。\n推荐使用中文语音（如晓晓/云希/云扬）测试情绪功能。")
-        emotion_help_label.setWordWrap(True)
-        emotion_help_label.setStyleSheet("color: #666; font-size: 10px; padding: 3px; background: #f0f0f0; border-radius: 3px;")
-        settings_inner.addWidget(emotion_help_label)
-        
-        settings_inner.addWidget(self.enable_emotion_checkbox)
-        
-        # 情绪选择
-        emotion_style_layout = QHBoxLayout()
-        emotion_style_layout.addWidget(self.style_label)
-        emotion_style_layout.addWidget(self.style_combo, 1)
-        settings_inner.addLayout(emotion_style_layout)
-        
-        # 强度滑动条
-        settings_inner.addWidget(self.styledegree_label)
-        settings_inner.addWidget(self.styledegree_slider)
-        
-        # 角色控制
-        role_layout = QHBoxLayout()
-        role_layout.addWidget(self.role_label)
-        role_layout.addWidget(self.role_combo)
-        role_layout.addStretch()
-        settings_inner.addLayout(role_layout)
-        
-        settings_inner.addWidget(self.start_button, 0, Qt.AlignLeft)
-        self.settings_box.setContentLayout(settings_inner)
-        self.splitter.addWidget(self.settings_box)
-
-        # 文本选择面板（新增加）
+        # --- 子折叠栏：文本选择 ---
         self.text_box = CollapsibleBox("文本选择", expanded=True)
         text_inner = QVBoxLayout(); text_inner.setContentsMargins(8,8,8,8); text_inner.setSpacing(6)
         self.label_text = QLabel("选择文本 (可多选):")
         self.text_tree = QTreeWidget()
-        self.text_tree.setHeaderLabels(["文件名"]) 
+        self.text_tree.setHeaderLabels(["文件名"])
         self.text_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        # 已选择文本提示标签（无背景，使用主题文本色）
         self.selected_texts_label = QLabel("已选择: 0 个文本")
         self.selected_texts_label.setStyleSheet("QLabel { font-weight: bold; padding: 3px; }")
         self.selected_texts_label.setWordWrap(True)
-        # 填充TXT文件树（默认全选）
         self.populate_texts()
-        # 连接改变信号
         self.text_tree.itemChanged.connect(self._update_selected_texts_label)
         text_inner.addWidget(self.label_text)
         text_inner.addWidget(self.selected_texts_label)
         text_inner.addWidget(self.text_tree)
         self.text_box.setContentLayout(text_inner)
-        # 插入到 设置 与 语音 模块之间
-        self.splitter.addWidget(self.text_box)
+        settings_inner.addWidget(self.text_box)
 
-        # 语音模型面板
+        # --- 子折叠栏：情绪控制 ---
+        self.emotion_box = CollapsibleBox("情绪控制", expanded=False)
+        emotion_inner = QVBoxLayout(); emotion_inner.setContentsMargins(8,8,8,8); emotion_inner.setSpacing(6)
+        emotion_help_label = QLabel("⚠️ 注意：不同语音支持的情绪不同，部分情绪可能无效果。\n推荐使用中文语音（如晓晓/云希/云扬）测试情绪功能。")
+        emotion_help_label.setWordWrap(True)
+        emotion_help_label.setStyleSheet("color: #666; font-size: 10px; padding: 3px; background: #f0f0f0; border-radius: 3px;")
+        emotion_inner.addWidget(emotion_help_label)
+        emotion_inner.addWidget(self.enable_emotion_checkbox)
+        emotion_style_layout = QHBoxLayout()
+        emotion_style_layout.addWidget(self.style_label)
+        emotion_style_layout.addWidget(self.style_combo, 1)
+        emotion_inner.addLayout(emotion_style_layout)
+        emotion_inner.addWidget(self.styledegree_label)
+        emotion_inner.addWidget(self.styledegree_slider)
+        role_layout = QHBoxLayout()
+        role_layout.addWidget(self.role_label)
+        role_layout.addWidget(self.role_combo)
+        role_layout.addStretch()
+        emotion_inner.addLayout(role_layout)
+        self.emotion_box.setContentLayout(emotion_inner)
+        settings_inner.addWidget(self.emotion_box)
+
+        # --- 子折叠栏：语音模型 ---
         self.voice_box = CollapsibleBox("语音模型", expanded=True)
         voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
         voice_inner.addWidget(self.label_voice)
-        voice_inner.addWidget(self.selected_voices_label)  # 添加已选择模型提示
+        voice_inner.addWidget(self.selected_voices_label)
         voice_inner.addWidget(self.voice_tree)
         self.voice_box.setContentLayout(voice_inner)
-        self.splitter.addWidget(self.voice_box)
+        settings_inner.addWidget(self.voice_box)
+
+        # 开始按钮：全宽、3倍高度、背景跟折叠按钮一致
+        try:
+            self.start_button.setFont(self.settings_box.toggle_button.font())
+            self.start_button.setStyleSheet(self.settings_box.toggle_button.styleSheet())
+            self.start_button.setPalette(self.settings_box.toggle_button.palette())
+        except Exception:
+            pass
+        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        settings_inner.addWidget(self.start_button)
+        self.settings_box.setContentLayout(settings_inner)
+        self.splitter.addWidget(self.settings_box)
 
         # 日志面板
         self.log_box = CollapsibleBox("日志", expanded=True)
@@ -1815,8 +1803,8 @@ class TTSApp(QWidget):
         self.splitter.addWidget(self.bottom_filler)
 
         # 保存展开尺寸
-        self._panel_saved_sizes = {"text": None, "voice": None, "log": None}
-        for b in (self.settings_box, self.text_box, self.voice_box, self.log_box):
+        self._panel_saved_sizes = {"log": None}
+        for b in (self.settings_box, self.text_box, self.emotion_box, self.voice_box, self.log_box):
             b.toggled.connect(self.update_splitter_sizes)
         self.splitter.splitterMoved.connect(lambda *_: self._store_expanded_sizes())
         # 附加：拖动后进行约束修正，避免覆盖折叠标题或挤压内容
@@ -1824,7 +1812,14 @@ class TTSApp(QWidget):
 
         # 初始尺寸分配（异步等待渲染完成）
         from PySide6.QtCore import QTimer as _QT
-        _QT.singleShot(0, self.update_splitter_sizes)
+        def _post_layout_adjust():
+            try:
+                base_h = max(1, int(self.start_button.sizeHint().height()))
+                self.start_button.setMinimumHeight(base_h * 3)
+            except Exception:
+                pass
+            self.update_splitter_sizes()
+        _QT.singleShot(0, _post_layout_adjust)
 
         # 信号连接（原有逻辑）
         self.punctuation_combo.currentIndexChanged.connect(self.execute_punctuation_conversion)

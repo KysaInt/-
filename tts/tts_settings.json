@@ -1,12 +1,13 @@
 {
   "default_output": true,
   "srt_enabled": true,
-  "extra_line_output": false,
+  "extra_line_output": true,
   "line_length": 28,
   "subtitle_lines": 1,
   "subtitle_rule": "rule_2",
   "selected_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural"
+    "zh-CN-XiaoxiaoMultilingualNeural",
+    "zh-CN-YunyiMultilingualNeural"
   ],
   "voice_rate": "+0%",
   "voice_pitch": "+0Hz",
@@ -19,13 +20,13 @@
     "settings": true,
     "text": false,
     "voice": true,
-    "log": true
+    "log": false
   },
   "window_geometry": [
-    1735,
-    194,
-    713,
-    1401
+    869,
+    188,
+    939,
+    1400
   ],
   "tts_mode": "azure",
   "azure_tts_endpoint": ""
