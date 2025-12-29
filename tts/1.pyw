@@ -1910,69 +1910,14 @@ class TTSApp(QWidget):
             self.log_view.append("⚠ 鉴权刷新失败，请稍后重试或检查网络。AYE:建议切换网络后尝试..")
 
     def _on_fetch_remote_metrics(self):
-        """拉取 Azure Monitor 远程指标并输出到日志。"""
-
-        class _MetricsWorker(QThread):
-            log = Signal(str)
-
-            def run(self):
-                try:
-                    totals = _azure_fetch_speech_usage_metrics(days=30)
-                    # 输出关键指标
-                    chars = totals.get("SynthesizedCharacters")
-                    vid_secs = totals.get("VideoSecondsSynthesized")
-                    host_hours = totals.get("VoiceModelHostingHours")
-                    train_mins = totals.get("VoiceModelTrainingMinutes")
-
-                    self.log.emit("✓ Azure 远程用量（近30天，总计）:")
-                    if chars is not None:
-                        self.log.emit(f"  - SynthesizedCharacters: {int(chars):,}")
-                    if vid_secs is not None:
-                        self.log.emit(f"  - VideoSecondsSynthesized: {int(vid_secs):,}")
-                    if host_hours is not None:
-                        self.log.emit(f"  - VoiceModelHostingHours: {host_hours:.2f}")
-                    if train_mins is not None:
-                        self.log.emit(f"  - VoiceModelTrainingMinutes: {train_mins:.2f}")
-
-                    # 若没有任何值，提示用户去 Portal 确认
-                    if not totals:
-                        self.log.emit("⚠ 未返回任何指标值（可能是权限不足/资源类型不对/时间范围内无数据）。")
-                except Exception as e:
-                    self.log.emit(
-                        "⚠ 获取 Azure 远程用量失败。常见原因：\n"
-                        "1) 服务主体未被授予该资源的读取/监控权限（至少 Reader 或 Monitoring Reader）\n"
-                        "2) 环境变量缺少订阅/资源组/资源名\n"
-                        "3) 订阅或资源信息不匹配\n"
-                        f"错误: {e}"
-                    )
-
+        """打开 Azure Portal 的 Metrics 页面。"""
+        url = "https://portal.azure.com/#@942303933qq.onmicrosoft.com/resource/subscriptions/586d6cfd-72bc-44f6-ac49-3b3b6c7e87dc/resourcegroups/1/providers/microsoft.cognitiveservices/accounts/aye/metrics"
         try:
-            self.fetch_metrics_button.setEnabled(False)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            w = _MetricsWorker(self)
-            w.log.connect(self.log_view.append)
-
-            def _cleanup():
-                try:
-                    self.fetch_metrics_button.setEnabled(True)
-                except Exception:
-                    pass
-                try:
-                    QApplication.restoreOverrideCursor()
-                except Exception:
-                    pass
-
-            w.finished.connect(_cleanup)
-            # 防 GC
-            self._metrics_worker = w
-            w.start()
+            ok = QDesktopServices.openUrl(QUrl(url))
+            if not ok:
+                self.log_view.append(f"⚠ 无法打开浏览器：{url}")
         except Exception as e:
-            try:
-                QApplication.restoreOverrideCursor()
-            except Exception:
-                pass
-            self.fetch_metrics_button.setEnabled(True)
-            self.log_view.append(f"⚠ 启动指标获取失败: {e}")
+            self.log_view.append(f"⚠ 打开 Azure Portal 失败: {e}")
 
     # ---------- Splitter 尺寸控制 ----------
     def _store_expanded_sizes(self):
@@ -1984,107 +1929,54 @@ class TTSApp(QWidget):
                 pass
         
         sizes = self.splitter.sizes()
-        if len(sizes) < 5:
+        if len(sizes) < 3:
             return
-        # sizes: [settings, text, voice, log, filler]
-        if self.text_box.is_expanded():
-            self._panel_saved_sizes['text'] = max(0, sizes[1])
-        if self.voice_box.is_expanded():
-            self._panel_saved_sizes['voice'] = max(0, sizes[2])
+        # sizes: [settings, log, filler]
         if self.log_box.is_expanded():
-            self._panel_saved_sizes['log'] = max(0, sizes[3])
+            self._panel_saved_sizes['log'] = max(0, sizes[1])
 
     def update_splitter_sizes(self):
         splitter = self.splitter
         total_h = max(1, splitter.height())
         header_s = self.settings_box.header_height()
-        header_t = self.text_box.header_height()
-        header_v = self.voice_box.header_height()
         header_l = self.log_box.header_height()
-        MAX_COMPACT = 500  # 增加高度以容纳情绪控制面板
+        MIN_CONTENT = 80
 
-        # 设置面板高度
+        # 设置面板高度：尽量给内容留空间，同时给日志至少留出一个最小高度
         if self.settings_box.is_expanded():
             content_h = self.settings_box.content_area.sizeHint().height()
-            set_h = min(MAX_COMPACT, content_h + header_s)
+            min_log_h = header_l + (MIN_CONTENT if self.log_box.is_expanded() else 0)
+            max_set_h = max(header_s, total_h - min_log_h)
+            set_h = min(max_set_h, content_h + header_s)
             set_h = max(set_h, header_s + 40)
             self._expanded_settings_height = set_h
         else:
             set_h = header_s
 
-        all_collapsed = (not self.settings_box.is_expanded() and
-                         not self.text_box.is_expanded() and
-                         not self.voice_box.is_expanded() and
-                         not self.log_box.is_expanded())
-        if all_collapsed:
-            filler = max(0, total_h - (header_s + header_t + header_v + header_l))
-            splitter.setSizes([header_s, header_t, header_v, header_l, filler])
-            for box, h in [(self.settings_box, header_s), (self.text_box, header_t), (self.voice_box, header_v), (self.log_box, header_l)]:
-                box.setMinimumHeight(h); box.setMaximumHeight(h)
-            self.bottom_filler.setMinimumHeight(0)
-            self.bottom_filler.setMaximumHeight(16777215)
-            self._store_expanded_sizes()
-            return
+        # 日志面板高度
+        if self.log_box.is_expanded():
+            log_h = max(MIN_CONTENT, total_h - set_h)
+        else:
+            log_h = header_l
 
-        remaining = max(0, total_h - set_h)
-        MIN_CONTENT = 80
-        # 计算文本/语音/日志三个面板的高度
-        panels = [
-            ("text", self.text_box, header_t),
-            ("voice", self.voice_box, header_v),
-            ("log", self.log_box, header_l),
-        ]
-        expanded = [(key, box, header) for (key, box, header) in panels if box.is_expanded()]
-        collapsed = [(key, box, header) for (key, box, header) in panels if not box.is_expanded()]
-
-        heights = {"text": header_t, "voice": header_v, "log": header_l}
-        if expanded:
-            # 使用已保存尺寸作为权重分配剩余高度
-            weights = []
-            for key, _, _ in expanded:
-                w = self._panel_saved_sizes.get(key) or 1
-                weights.append(max(1, int(w)))
-            total_w = sum(weights) if sum(weights) > 0 else len(expanded)
-            # 初步分配
-            alloc = []
-            for w in weights:
-                alloc.append(max(MIN_CONTENT, int(remaining * (w / total_w))))
-            # 调整最后一个填满剩余
-            rem_used = sum(alloc)
-            if rem_used > remaining:
-                # 轻微缩放
-                scale = remaining / rem_used if rem_used > 0 else 1
-                alloc = [max(MIN_CONTENT, int(a * scale)) for a in alloc]
-                rem_used = sum(alloc)
-            if alloc:
-                alloc[-1] = max(MIN_CONTENT, remaining - sum(alloc[:-1]))
-            # 写入高度
-            for (key, _, _), h in zip(expanded, alloc):
-                heights[key] = h
-
-        used = set_h + heights["text"] + heights["voice"] + heights["log"]
+        used = set_h + log_h
         filler = max(0, total_h - used)
-        splitter.setSizes([set_h, heights["text"], heights["voice"], heights["log"], filler])
+        splitter.setSizes([set_h, log_h, filler])
 
-        # 约束高度
+        # 约束顶部/折叠固定高度
         if self.settings_box.is_expanded():
-            self.settings_box.setMinimumHeight(set_h)
-            self.settings_box.setMaximumHeight(set_h)
+            self.settings_box.setMinimumHeight(MIN_CONTENT)
+            self.settings_box.setMaximumHeight(16777215)
         else:
             self.settings_box.setMinimumHeight(header_s)
             self.settings_box.setMaximumHeight(header_s)
 
-        for (box, expanded_state, header, h) in [
-            (self.text_box, self.text_box.is_expanded(), header_t, heights["text"]),
-            (self.voice_box, self.voice_box.is_expanded(), header_v, heights["voice"]),
-            (self.log_box, self.log_box.is_expanded(), header_l, heights["log"]),
-        ]:
-            if expanded_state:
-                box.setMinimumHeight(MIN_CONTENT)
-                box.setMaximumHeight(16777215)
-            else:
-                box.setMinimumHeight(header)
-                box.setMaximumHeight(header)
+        if self.log_box.is_expanded():
+            self.log_box.setMinimumHeight(MIN_CONTENT)
+            self.log_box.setMaximumHeight(16777215)
+        else:
+            self.log_box.setMinimumHeight(header_l)
+            self.log_box.setMaximumHeight(header_l)
 
         self.bottom_filler.setMinimumHeight(0)
         self.bottom_filler.setMaximumHeight(16777215)
@@ -2096,14 +1988,12 @@ class TTSApp(QWidget):
         - 展开面板 >= MIN_CONTENT
         """
         sizes = self.splitter.sizes()
-        if len(sizes) < 5:
+        if len(sizes) < 3:
             return
         header_s = self.settings_box.header_height()
-        header_t = self.text_box.header_height()
-        header_v = self.voice_box.header_height()
         header_l = self.log_box.header_height()
         MIN_CONTENT = 80
-        set_h, text_h, voice_h, log_h, filler = sizes
+        set_h, log_h, filler = sizes
         if not self.settings_box.is_expanded():
             set_h = header_s
         else:
@@ -2112,30 +2002,20 @@ class TTSApp(QWidget):
                 set_h = fixed
             else:
                 set_h = max(set_h, header_s + 40)
-        if not self.text_box.is_expanded():
-            text_h = header_t
-        else:
-            text_h = max(text_h, MIN_CONTENT)
-        if not self.voice_box.is_expanded():
-            voice_h = header_v
-        else:
-            voice_h = max(voice_h, MIN_CONTENT)
         if not self.log_box.is_expanded():
             log_h = header_l
         else:
             log_h = max(log_h, MIN_CONTENT)
         total = sum(sizes)
-        used = set_h + text_h + voice_h + log_h
+        used = set_h + log_h
         filler = max(0, total - used)
         if used > total:
             scale = total / used if used > 0 else 1
             set_h = int(set_h * scale)
-            text_h = int(text_h * scale)
-            voice_h = int(voice_h * scale)
             log_h = int(log_h * scale)
-            used = set_h + text_h + voice_h + log_h
+            used = set_h + log_h
             filler = max(0, total - used)
-        self.splitter.setSizes([set_h, text_h, voice_h, log_h, filler])
+        self.splitter.setSizes([set_h, log_h, filler])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
