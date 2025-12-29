@@ -7,8 +7,371 @@ import subprocess
 import importlib
 import re
 import threading
+import urllib.request
+import urllib.error
+import urllib.parse
 from datetime import datetime
 from collections import defaultdict
+from xml.sax.saxutils import escape
+
+
+_DEFAULT_AZURE_ENDPOINT_BASE = "https://eastasia.api.cognitive.microsoft.com/"
+
+
+def _normalize_azure_speech_endpoint(endpoint_or_base: str, region: str = "") -> str:
+    """Normalize various Azure Speech endpoints into a TTS endpoint.
+
+    Accepts:
+    - https://<region>.tts.speech.microsoft.com/cognitiveservices/v1
+    - https://<region>.api.cognitive.microsoft.com/
+    - https://<resource>.cognitiveservices.azure.com/
+    and returns an endpoint suitable for POST /cognitiveservices/v1.
+    """
+    ep = (endpoint_or_base or "").strip()
+    if not ep:
+        ep = ""
+
+    # Strip trailing slash
+    if ep.endswith("/"):
+        ep = ep[:-1]
+
+    # If user gives the legacy regional Cognitive Services base, derive the Speech TTS endpoint
+    # e.g. https://eastasia.api.cognitive.microsoft.com -> https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1
+    try:
+        if ep.startswith("http://") or ep.startswith("https://"):
+            from urllib.parse import urlparse
+
+            u = urlparse(ep)
+            host = (u.hostname or "").lower()
+            if host.endswith(".api.cognitive.microsoft.com"):
+                inferred_region = host.split(".")[0]
+                r = (region or inferred_region or "").strip()
+                if r:
+                    return f"https://{r}.tts.speech.microsoft.com/cognitiveservices/v1"
+
+            # Resource endpoint shape: https://<resource>.cognitiveservices.azure.com
+            if host.endswith(".cognitiveservices.azure.com"):
+                # Speech resource endpoint supports /cognitiveservices/v1
+                base = f"{u.scheme}://{u.netloc}"
+                return base + "/cognitiveservices/v1"
+    except Exception:
+        pass
+
+    # If already points to the TTS endpoint, keep it.
+    if ep.endswith("/cognitiveservices/v1"):
+        return ep
+
+    # If it looks like a base that isn't the legacy api.cognitive domain, append /cognitiveservices/v1
+    if ep and (ep.startswith("http://") or ep.startswith("https://")):
+        return ep + "/cognitiveservices/v1"
+
+    # If only region provided
+    r = (region or "").strip()
+    if r:
+        return f"https://{r}.tts.speech.microsoft.com/cognitiveservices/v1"
+
+    return ""
+
+
+def _azure_voices_list_url_from_tts_endpoint(tts_endpoint: str) -> str:
+    base = (tts_endpoint or "").strip()
+    if base.endswith("/"):
+        base = base[:-1]
+    if base.endswith("/cognitiveservices/v1"):
+        base = base[: -len("/cognitiveservices/v1")]
+    if base.endswith("/"):
+        base = base[:-1]
+    return base + "/cognitiveservices/voices/list"
+
+
+def _get_windows_env_var_from_registry(name: str, scope: str) -> str | None:
+    """Read Windows environment variables from registry.
+
+    This helps when the current process environment (os.environ) hasn't been refreshed,
+    e.g. VS Code was started before user variables were set.
+
+    scope: 'user' or 'system'
+    """
+    try:
+        if os.name != "nt":
+            return None
+        import winreg  # type: ignore
+
+        if scope == "user":
+            root = winreg.HKEY_CURRENT_USER
+            path = r"Environment"
+        else:
+            root = winreg.HKEY_LOCAL_MACHINE
+            path = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+
+        with winreg.OpenKey(root, path) as key:
+            value, value_type = winreg.QueryValueEx(key, name)
+            if value is None:
+                return None
+            if isinstance(value, str):
+                # Expand %VAR% if present
+                return os.path.expandvars(value).strip()
+            return str(value).strip()
+    except Exception:
+        return None
+
+
+def _get_env_var(name: str) -> str | None:
+    """Get environment variable from process env, with Windows registry fallback."""
+    v = os.environ.get(name)
+    if v is not None and str(v).strip() != "":
+        return str(v).strip()
+    # Windows fallback: user then system
+    v = _get_windows_env_var_from_registry(name, scope="user")
+    if v:
+        return v
+    v = _get_windows_env_var_from_registry(name, scope="system")
+    if v:
+        return v
+    return None
+
+
+def _utc_now_iso() -> str:
+    # Azure Monitor expects ISO 8601 UTC with Z
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _utc_iso_minus_days(days: int) -> str:
+    try:
+        from datetime import timedelta
+
+        dt = datetime.utcnow() - timedelta(days=max(0, int(days)))
+        return dt.replace(microsecond=0).isoformat() + "Z"
+    except Exception:
+        return _utc_now_iso()
+
+
+def _azure_arm_get_token(tenant_id: str, client_id: str, client_secret: str) -> str:
+    """Get Azure Resource Manager access token.
+
+    Priority:
+    1) `AZURE_ARM_TOKEN` env var (advanced override)
+    2) Service principal (client_credentials) via AAD (v2 scope, fallback v1 resource)
+    3) Azure CLI login context (`az account get-access-token`)
+    """
+    # 1) Explicit token override
+    explicit = _get_env_var("AZURE_ARM_TOKEN")
+    if explicit:
+        return explicit
+
+    tenant_id = (tenant_id or "").strip()
+    client_id = (client_id or "").strip()
+    client_secret = (client_secret or "").strip()
+
+    def _missing_sp_fields() -> list[str]:
+        missing: list[str] = []
+        if not tenant_id:
+            missing.append("AZURE_TENANT_ID")
+        if not client_id:
+            missing.append("AZURE_CLIENT_ID")
+        if not client_secret:
+            missing.append("AZURE_CLIENT_SECRET")
+        return missing
+
+    def _try_az_cli_token() -> str | None:
+        try:
+            # Requires: Azure CLI installed + `az login` done.
+            out = subprocess.check_output(
+                [
+                    "az",
+                    "account",
+                    "get-access-token",
+                    "--resource",
+                    "https://management.azure.com/",
+                    "--query",
+                    "accessToken",
+                    "-o",
+                    "tsv",
+                ],
+                stderr=subprocess.STDOUT,
+                timeout=30,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            token = (out or "").strip()
+            if token:
+                return token
+            return None
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+
+    # If SP credentials are incomplete, try Azure CLI as a convenience fallback.
+    if _missing_sp_fields():
+        cli_token = _try_az_cli_token()
+        if cli_token:
+            return cli_token
+
+        missing = " / ".join(_missing_sp_fields())
+        raise Exception(
+            "缺少用于获取 Azure Monitor 指标的认证信息："
+            f"{missing}。\n"
+            "可选方案：\n"
+            "- 方案A（推荐，服务主体）：设置 AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET\n"
+            "- 方案B（无需服务主体）：安装 Azure CLI 并先执行 `az login`，再重试\n"
+            "- 方案C（高级）：直接设置 AZURE_ARM_TOKEN（ARM Bearer token）"
+        )
+
+    def _post_form(url: str, data: dict[str, str]) -> dict:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        return json.loads(raw)
+
+    # v2.0
+    try:
+        token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://management.azure.com/.default",
+        }
+        data = _post_form(token_url, payload)
+        token = str(data.get("access_token") or "").strip()
+        if not token:
+            raise Exception(f"Token 响应缺少 access_token: {data}")
+        return token
+    except Exception:
+        pass
+
+    # v1
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/token"
+    payload = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "resource": "https://management.azure.com/",
+    }
+    data = _post_form(token_url, payload)
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise Exception(f"Token 响应缺少 access_token: {data}")
+    return token
+
+
+def _azure_require_env_for_metrics(subscription_id: str, resource_group: str, resource_name: str):
+    missing: list[str] = []
+    if not (subscription_id or "").strip():
+        missing.append("AZURE_SUBSCRIPTION_ID")
+    if not (resource_group or "").strip():
+        missing.append("AZURE_RESOURCE_GROUP")
+    if not (resource_name or "").strip():
+        missing.append("AZURE_SPEECH_RESOURCE_NAME(或 AZURE_COGNITIVE_ACCOUNT_NAME)")
+    if missing:
+        raise Exception("缺少资源定位环境变量：" + " / ".join(missing))
+
+
+def _azure_arm_get_json(url: str, token: str) -> dict:
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "tts/1.pyw",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(raw)
+
+
+def _azure_build_resource_id(subscription_id: str, resource_group: str, resource_name: str) -> str:
+    subscription_id = (subscription_id or "").strip()
+    resource_group = (resource_group or "").strip()
+    resource_name = (resource_name or "").strip()
+    if not subscription_id or not resource_group or not resource_name:
+        raise Exception("缺少 AZURE_SUBSCRIPTION_ID / AZURE_RESOURCE_GROUP / AZURE_SPEECH_RESOURCE_NAME。")
+    return (
+        f"/subscriptions/{subscription_id}"
+        f"/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.CognitiveServices/accounts/{resource_name}"
+    )
+
+
+def _azure_fetch_speech_usage_metrics(days: int = 30) -> dict[str, float]:
+    """Fetch usage metrics from Azure Monitor for Speech resource.
+
+    Returns totals (sum over interval) for supported metrics.
+    """
+    tenant_id = _get_env_var("AZURE_TENANT_ID") or ""
+    client_id = _get_env_var("AZURE_CLIENT_ID") or ""
+    client_secret = _get_env_var("AZURE_CLIENT_SECRET") or ""
+
+    subscription_id = _get_env_var("AZURE_SUBSCRIPTION_ID") or ""
+    resource_group = _get_env_var("AZURE_RESOURCE_GROUP") or ""
+    resource_name = (
+        _get_env_var("AZURE_SPEECH_RESOURCE_NAME")
+        or _get_env_var("AZURE_COGNITIVE_ACCOUNT_NAME")
+        or ""
+    )
+
+    token = _azure_arm_get_token(tenant_id, client_id, client_secret)
+
+    _azure_require_env_for_metrics(subscription_id, resource_group, resource_name)
+    resource_id = _azure_build_resource_id(subscription_id, resource_group, resource_name)
+
+    start = _utc_iso_minus_days(days)
+    end = _utc_now_iso()
+    timespan = f"{start}/{end}"
+
+    metricnames = "SynthesizedCharacters,VideoSecondsSynthesized,VoiceModelHostingHours,VoiceModelTrainingMinutes"
+
+    params = {
+        "api-version": "2019-07-01",
+        "metricnames": metricnames,
+        "timespan": timespan,
+        "interval": "PT1H",
+        "aggregation": "Total",
+    }
+    url = "https://management.azure.com" + resource_id + "/providers/microsoft.insights/metrics?" + urllib.parse.urlencode(params)
+    data = _azure_arm_get_json(url, token)
+
+    totals: dict[str, float] = {}
+    values = data.get("value")
+    if not isinstance(values, list):
+        raise Exception(f"Metrics 返回格式异常: {data}")
+
+    for metric in values:
+        try:
+            name_obj = metric.get("name") or {}
+            metric_name = str(name_obj.get("value") or name_obj.get("localizedValue") or "").strip()
+            if not metric_name:
+                continue
+            total_value = 0.0
+            timeseries = metric.get("timeseries") or []
+            if isinstance(timeseries, list):
+                for ts in timeseries:
+                    points = ts.get("data") or []
+                    if not isinstance(points, list):
+                        continue
+                    for p in points:
+                        v = p.get("total")
+                        if v is None:
+                            continue
+                        try:
+                            total_value += float(v)
+                        except Exception:
+                            continue
+            totals[metric_name] = total_value
+        except Exception:
+            continue
+
+    return totals
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -618,6 +981,7 @@ class TTSWorker(QThread):
         self,
         voice: str,
         parent=None,
+        tts_mode: str = "edge",
         srt_enabled: bool = False,
         line_length: int = 28,
         convert_punctuation: bool = False,
@@ -637,6 +1001,7 @@ class TTSWorker(QThread):
     ):
         super().__init__(parent)
         self.voice = voice
+        self.tts_mode = (tts_mode or "edge").strip().lower()
         self.output_ext = ".mp3"
         self.srt_enabled = srt_enabled
         self.line_length = max(5, int(line_length or 0))
@@ -657,6 +1022,179 @@ class TTSWorker(QThread):
         self.role = role
         # 仅处理的文本文件（可选）：若为 None 则扫描目录全部 .txt
         self.selected_txt_files = list(selected_txt_files) if selected_txt_files else None
+
+    def _get_azure_endpoint_and_keys(self) -> tuple[str, list[str]]:
+        parent = self.parent()
+
+        endpoint = ""
+        region = ""
+        keys: list[str] = []
+
+        if parent is not None:
+            endpoint = str(getattr(parent, "azure_tts_endpoint", "") or "")
+            region = str(getattr(parent, "azure_speech_region", "") or "")
+            raw_keys = getattr(parent, "azure_speech_keys", None)
+            if isinstance(raw_keys, list):
+                keys = [str(k) for k in raw_keys if str(k).strip()]
+
+        env_endpoint = _get_env_var("AZURE_TTS_ENDPOINT") or _get_env_var("AZURE_SPEECH_ENDPOINT")
+        if env_endpoint:
+            endpoint = env_endpoint
+
+        env_region = (
+            _get_env_var("AZURE_SPEECH_REGION")
+            or _get_env_var("AZURE_TTS_REGION")
+            or _get_env_var("AZURE_REGION")
+        )
+        if env_region:
+            region = env_region
+
+        # Keys: prefer AZURE_SPEECH_KEYS="k1,k2"; fallback to KEY/KEY2
+        env_keys = _get_env_var("AZURE_SPEECH_KEYS") or _get_env_var("AZURE_TTS_KEYS")
+        if env_keys:
+            keys = [k.strip() for k in env_keys.split(",") if k.strip()]
+        else:
+            key1 = _get_env_var("AZURE_SPEECH_KEY") or _get_env_var("AZURE_TTS_KEY")
+            key2 = _get_env_var("AZURE_SPEECH_KEY2") or _get_env_var("AZURE_TTS_KEY2")
+            if key1:
+                keys = [key1.strip()]
+                if key2 and key2.strip() and key2.strip() != key1.strip():
+                    keys.append(key2.strip())
+
+        # 内置默认终结点（避免用户未设置 endpoint/region 导致 Azure 模式直接报错）
+        if not endpoint and not region:
+            endpoint = _DEFAULT_AZURE_ENDPOINT_BASE
+
+        endpoint = _normalize_azure_speech_endpoint(endpoint_or_base=endpoint, region=region)
+
+        return endpoint, keys
+
+    def _build_azure_ssml(self, text: str, force_plain: bool = False) -> str:
+        plain = escape(text.strip())
+
+        # 只有在启用情绪控制且情绪不是普通时才添加标签
+        use_emotion = (not force_plain) and self.enable_emotion and self.style != "general"
+        if use_emotion:
+            express_attrs = [f'style="{self.style}"', f'styledegree="{self.styledegree}"']
+            if self.role:
+                express_attrs.append(f'role="{self.role}"')
+            attrs_str = " ".join(express_attrs)
+            inner = f"<mstts:express-as {attrs_str}>{plain}</mstts:express-as>"
+        else:
+            inner = plain
+
+        return (
+            "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
+            "xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='zh-CN'>"
+            f"<voice name='{self.voice}'>"
+            f"<prosody pitch='{self.pitch}' rate='{self.rate}' volume='{self.volume}'>"
+            f"{inner}"
+            "</prosody>"
+            "</voice>"
+            "</speak>"
+        )
+
+    def _azure_tts_save_sync(self, ssml: str, endpoint: str, keys: list[str], output: str) -> None:
+        if not endpoint:
+            raise Exception(
+                "Azure 模式缺少 Endpoint/Region。请设置环境变量 AZURE_TTS_ENDPOINT 或 AZURE_SPEECH_REGION。"
+            )
+        if not keys:
+            raise Exception(
+                "Azure 模式缺少 Key。请设置环境变量 AZURE_SPEECH_KEY（可选 AZURE_SPEECH_KEY2 / AZURE_SPEECH_KEYS）。"
+            )
+
+        last_error: Exception | None = None
+        for idx, key in enumerate(keys):
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=ssml.encode("utf-8"),
+                    method="POST",
+                    headers={
+                        "Ocp-Apim-Subscription-Key": key,
+                        "Content-Type": "application/ssml+xml",
+                        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                        "User-Agent": "tts/1.pyw",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    audio = resp.read()
+
+                if not audio:
+                    raise Exception("Azure TTS 返回空内容。")
+
+                with open(output, "wb") as f:
+                    f.write(audio)
+                return
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    body = ""
+
+                msg = f"Azure TTS 请求失败（HTTP {getattr(e, 'code', '?')}）"
+                if body.strip():
+                    msg += f": {body.strip()}"
+
+                # 401/403 时尝试备用 Key
+                if getattr(e, "code", None) in (401, 403) and idx < (len(keys) - 1):
+                    last_error = Exception(msg)
+                    continue
+
+                raise Exception(msg)
+            except Exception as e:
+                last_error = e
+                if idx < (len(keys) - 1):
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise Exception("Azure TTS 调用失败（未知原因）。")
+
+    async def azure_tts_async(self, text: str, output: str) -> None:
+        endpoint, keys = self._get_azure_endpoint_and_keys()
+
+        def _remove_if_empty(path: str):
+            if os.path.exists(path) and os.path.getsize(path) == 0:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+        ssml = self._build_azure_ssml(text, force_plain=False)
+        try:
+            await asyncio.to_thread(self._azure_tts_save_sync, ssml, endpoint, keys, output)
+            if os.path.exists(output) and os.path.getsize(output) == 0:
+                _remove_if_empty(output)
+                raise Exception("生成的音频文件为空 (0 bytes)。")
+            self.progress.emit(f"    ✓ [{self.voice}] (Azure) 语音已保存到 {os.path.basename(output)}")
+            return
+        except Exception as e:
+            # 若启用了情绪，尝试纯文本回退
+            if self.enable_emotion and self.style != "general":
+                self.progress.emit(f"    ⚠ [{self.voice}] (Azure) 情绪 SSML 可能不被接受，改用纯文本回退…")
+                try:
+                    ssml_plain = self._build_azure_ssml(text, force_plain=True)
+                    await asyncio.to_thread(self._azure_tts_save_sync, ssml_plain, endpoint, keys, output)
+                    if os.path.exists(output) and os.path.getsize(output) == 0:
+                        _remove_if_empty(output)
+                        raise Exception("生成的音频文件为空 (0 bytes)。")
+                    self.progress.emit(f"    ✓ [{self.voice}] (Azure) 纯文本回退成功，已保存 {os.path.basename(output)}")
+                    return
+                except Exception as e2:
+                    _remove_if_empty(output)
+                    raise Exception(
+                        f"Azure TTS 合成失败：{e2}.\n"
+                        "请检查：Endpoint/Region 是否正确、Key 是否有效、网络是否可访问 Azure Speech。"
+                    )
+
+            _remove_if_empty(output)
+            raise Exception(
+                f"Azure TTS 合成失败：{e}.\n"
+                "请检查：Endpoint/Region 是否正确、Key 是否有效、网络是否可访问 Azure Speech。"
+            )
 
     def build_ssml_text(self, text: str):
         """构建包含情绪标签的文本
@@ -685,6 +1223,11 @@ class TTSWorker(QThread):
         return text
 
     async def tts_async(self, text, voice, output):
+        # Azure 模式：走 Azure Speech 官方 REST TTS
+        if (self.tts_mode or "edge") == "azure":
+            await self.azure_tts_async(text=text, output=output)
+            return
+
         """调用 Edge TTS（新版优先）并在失败时做多重回退：
         1) 若运行环境存在 async_api.Communicate，则优先使用
         2) 否则直接使用 edge_tts.Communicate（edge-tts 7.x 主入口）
@@ -942,6 +1485,22 @@ class TTSApp(QWidget):
         # 根布局
         self.root_layout = QVBoxLayout(self)
 
+        # Azure 配置（可由环境变量或 tts_settings.json 提供）
+        self.azure_speech_region: str = ""
+        # 默认给 eastasia 的基础终结点，避免 Azure 模式提示“未设置终结点”
+        self.azure_tts_endpoint: str = _DEFAULT_AZURE_ENDPOINT_BASE
+        self.azure_speech_keys: list[str] = []
+
+        # 模式选择（满行下拉栏，默认 Azure）
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Azure 模式", "azure")
+        self.mode_combo.addItem("Edge 模式", "edge")
+        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.setToolTip("选择 TTS 接口模式：Azure Speech（官方）或 Edge（免 Key）。")
+        self.mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
+
         # 确保 ./txt 子目录存在并迁移当前同级旧版 txt 文件
         self._ensure_text_dir_and_migrate()
 
@@ -972,6 +1531,16 @@ class TTSApp(QWidget):
         self.refresh_auth_button = QPushButton("刷新鉴权")
         self.refresh_auth_button.setToolTip("手动刷新 Edge TTS 的鉴权参数，解决 401/连接异常后立即恢复。")
         self.refresh_auth_button.clicked.connect(self._on_manual_refresh_auth)
+
+        # 获取远程用量指标（Azure Monitor）
+        self.fetch_metrics_button = QPushButton("获取用量")
+        self.fetch_metrics_button.setToolTip(
+            "从 Azure Monitor 拉取 Speech 资源用量指标（需要服务主体与资源信息环境变量）。\n"
+            "需要：AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET\n"
+            "以及：AZURE_SUBSCRIPTION_ID / AZURE_RESOURCE_GROUP / AZURE_SPEECH_RESOURCE_NAME"
+        )
+        self.fetch_metrics_button.clicked.connect(self._on_fetch_remote_metrics)
+
         self.punctuation_label = QLabel("标点转换:")
         self.punctuation_combo = QComboBox()
         self.punctuation_combo.addItem("不转换", "none")
@@ -980,8 +1549,11 @@ class TTSApp(QWidget):
         self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
         self.punctuation_combo.setToolTip("选择后立即对 txt 子目录内所有 txt 文件执行转换")
         self.punctuation_layout.addWidget(self.refresh_auth_button)
+        self.punctuation_layout.addWidget(self.fetch_metrics_button)
         self.punctuation_layout.addWidget(self.punctuation_label)
         self.punctuation_layout.addWidget(self.punctuation_combo)
+
+
 
         # 选项区
         self.options_layout = QHBoxLayout()
@@ -1160,6 +1732,7 @@ class TTSApp(QWidget):
         # 设置面板（顶部）
         self.settings_box = CollapsibleBox("设置", expanded=True)
         settings_inner = QVBoxLayout(); settings_inner.setContentsMargins(8,8,8,8); settings_inner.setSpacing(6)
+        settings_inner.addWidget(self.mode_combo)
         settings_inner.addLayout(self.punctuation_layout)
         settings_inner.addLayout(self.options_layout)
         
@@ -1340,6 +1913,71 @@ class TTSApp(QWidget):
             self.log_view.append("✓ 鉴权刷新成功。")
         else:
             self.log_view.append("⚠ 鉴权刷新失败，请稍后重试或检查网络。AYE:建议切换网络后尝试..")
+
+    def _on_fetch_remote_metrics(self):
+        """拉取 Azure Monitor 远程指标并输出到日志。"""
+
+        class _MetricsWorker(QThread):
+            log = Signal(str)
+
+            def run(self):
+                try:
+                    totals = _azure_fetch_speech_usage_metrics(days=30)
+                    # 输出关键指标
+                    chars = totals.get("SynthesizedCharacters")
+                    vid_secs = totals.get("VideoSecondsSynthesized")
+                    host_hours = totals.get("VoiceModelHostingHours")
+                    train_mins = totals.get("VoiceModelTrainingMinutes")
+
+                    self.log.emit("✓ Azure 远程用量（近30天，总计）:")
+                    if chars is not None:
+                        self.log.emit(f"  - SynthesizedCharacters: {int(chars):,}")
+                    if vid_secs is not None:
+                        self.log.emit(f"  - VideoSecondsSynthesized: {int(vid_secs):,}")
+                    if host_hours is not None:
+                        self.log.emit(f"  - VoiceModelHostingHours: {host_hours:.2f}")
+                    if train_mins is not None:
+                        self.log.emit(f"  - VoiceModelTrainingMinutes: {train_mins:.2f}")
+
+                    # 若没有任何值，提示用户去 Portal 确认
+                    if not totals:
+                        self.log.emit("⚠ 未返回任何指标值（可能是权限不足/资源类型不对/时间范围内无数据）。")
+                except Exception as e:
+                    self.log.emit(
+                        "⚠ 获取 Azure 远程用量失败。常见原因：\n"
+                        "1) 服务主体未被授予该资源的读取/监控权限（至少 Reader 或 Monitoring Reader）\n"
+                        "2) 环境变量缺少订阅/资源组/资源名\n"
+                        "3) 订阅或资源信息不匹配\n"
+                        f"错误: {e}"
+                    )
+
+        try:
+            self.fetch_metrics_button.setEnabled(False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            w = _MetricsWorker(self)
+            w.log.connect(self.log_view.append)
+
+            def _cleanup():
+                try:
+                    self.fetch_metrics_button.setEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
+
+            w.finished.connect(_cleanup)
+            # 防 GC
+            self._metrics_worker = w
+            w.start()
+        except Exception as e:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            self.fetch_metrics_button.setEnabled(True)
+            self.log_view.append(f"⚠ 启动指标获取失败: {e}")
 
     # ---------- Splitter 尺寸控制 ----------
     def _store_expanded_sizes(self):
@@ -1537,6 +2175,14 @@ class TTSApp(QWidget):
 
     def populate_voices(self):
         try:
+            # 尽量保留用户当前勾选
+            previous_selected: list[str] = []
+            try:
+                previous_selected = self.get_selected_voices() if hasattr(self, 'get_selected_voices') else []
+            except Exception:
+                previous_selected = []
+
+            self.voice_tree.blockSignals(True)
             self.voice_tree.clear()
             self.voice_items.clear()
 
@@ -1601,26 +2247,123 @@ class TTSApp(QWidget):
             }
 
             # 直接用 VoicesManager 获取结构化列表，避免解析 CLI 表格导致丢失
-            async def _load_voices():
-                manager = await edge_tts.VoicesManager.create()
-                return manager.voices or []
-
+            mode = "azure"
             try:
-                voices = asyncio.run(_load_voices())
-            except RuntimeError:
-                # 兼容已有事件循环环境
-                loop = asyncio.new_event_loop()
-                try:
-                    voices = loop.run_until_complete(_load_voices())
-                finally:
+                if hasattr(self, 'mode_combo'):
+                    mode = str(self.mode_combo.currentData() or 'azure')
+            except Exception:
+                mode = "azure"
+
+            def _get_azure_endpoint_and_keys() -> tuple[str, list[str]]:
+                endpoint = str(getattr(self, "azure_tts_endpoint", "") or "")
+                region = str(getattr(self, "azure_speech_region", "") or "")
+                keys: list[str] = []
+
+                raw_keys = getattr(self, "azure_speech_keys", None)
+                if isinstance(raw_keys, list):
+                    keys = [str(k) for k in raw_keys if str(k).strip()]
+
+                env_endpoint = _get_env_var("AZURE_TTS_ENDPOINT") or _get_env_var("AZURE_SPEECH_ENDPOINT")
+                if env_endpoint:
+                    endpoint = env_endpoint
+
+                env_region = (
+                    _get_env_var("AZURE_SPEECH_REGION")
+                    or _get_env_var("AZURE_TTS_REGION")
+                    or _get_env_var("AZURE_REGION")
+                )
+                if env_region:
+                    region = env_region
+
+                env_keys = _get_env_var("AZURE_SPEECH_KEYS") or _get_env_var("AZURE_TTS_KEYS")
+                if env_keys:
+                    keys = [k.strip() for k in env_keys.split(",") if k.strip()]
+                else:
+                    key1 = _get_env_var("AZURE_SPEECH_KEY") or _get_env_var("AZURE_TTS_KEY")
+                    key2 = _get_env_var("AZURE_SPEECH_KEY2") or _get_env_var("AZURE_TTS_KEY2")
+                    if key1:
+                        keys = [key1.strip()]
+                        if key2 and key2.strip() and key2.strip() != key1.strip():
+                            keys.append(key2.strip())
+
+                if not endpoint and not region:
+                    endpoint = _DEFAULT_AZURE_ENDPOINT_BASE
+                endpoint = _normalize_azure_speech_endpoint(endpoint_or_base=endpoint, region=region)
+                return endpoint, keys
+
+            def _load_azure_voices_sync() -> list[dict]:
+                endpoint, keys = _get_azure_endpoint_and_keys()
+                if not endpoint:
+                    raise RuntimeError("Azure 模式缺少 Endpoint/Region。请设置 AZURE_SPEECH_REGION 或 AZURE_TTS_ENDPOINT。")
+                if not keys:
+                    raise RuntimeError("Azure 模式缺少 Key。请设置 AZURE_SPEECH_KEYS 或 AZURE_SPEECH_KEY。")
+                url = _azure_voices_list_url_from_tts_endpoint(endpoint)
+                last_error: Exception | None = None
+                for idx, key in enumerate(keys):
                     try:
-                        loop.close()
-                    except Exception:
-                        pass
+                        req = urllib.request.Request(
+                            url,
+                            method="GET",
+                            headers={
+                                "Ocp-Apim-Subscription-Key": key,
+                                "User-Agent": "tts/1.pyw",
+                            },
+                        )
+                        with urllib.request.urlopen(req, timeout=30) as resp:
+                            raw = resp.read().decode("utf-8", errors="ignore")
+                        data = json.loads(raw)
+                        if not isinstance(data, list):
+                            raise RuntimeError("Azure voices/list 返回格式异常（不是列表）。")
+                        return data
+                    except urllib.error.HTTPError as e:
+                        code = getattr(e, "code", None)
+                        if code in (401, 403) and idx < (len(keys) - 1):
+                            last_error = e
+                            continue
+                        try:
+                            body = e.read().decode("utf-8", errors="ignore")
+                        except Exception:
+                            body = ""
+                        raise RuntimeError(f"Azure voices/list 失败（HTTP {code}）：{body.strip() or e}")
+                    except Exception as e:
+                        last_error = e
+                        if idx < (len(keys) - 1):
+                            continue
+                        raise
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("Azure voices/list 获取失败（未知原因）。")
+
+            voices: list[dict] = []
+            if mode == "azure":
+                try:
+                    voices = _load_azure_voices_sync()
+                except Exception as e:
+                    # Azure 拉取失败时，回退 Edge 列表，避免界面空
+                    self.log_view.append(f"⚠ Azure 语音列表获取失败，已回退 Edge 列表：{e}")
+                    mode = "edge"
+
+            if mode != "azure":
+                async def _load_edge_voices():
+                    manager = await edge_tts.VoicesManager.create()
+                    return manager.voices or []
+
+                try:
+                    voices = asyncio.run(_load_edge_voices())
+                except RuntimeError:
+                    # 兼容已有事件循环环境
+                    loop = asyncio.new_event_loop()
+                    try:
+                        voices = loop.run_until_complete(_load_edge_voices())
+                    finally:
+                        try:
+                            loop.close()
+                        except Exception:
+                            pass
 
             # 兜底：若获取为空，提示并回退到 CLI（尽量保持可用）
             if not voices:
-                raise RuntimeError("VoicesManager 未返回语音列表（可能是网络/区域/被拦截）。")
+                raise RuntimeError("语音列表为空（可能网络/区域/被拦截/Key 配置错误）。")
 
             voices_by_region_lang: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
             for v in voices:
@@ -1668,12 +2411,32 @@ class TTSApp(QWidget):
                         # 个性：尽量从 VoiceTag 提取，取不到就显示状态
                         voice_tag = v.get('VoiceTag') or {}
                         personalities = voice_tag.get('VoicePersonalities') or []
-                        personalities_text = ",".join(map(str, personalities[:3])) if personalities else status
+                        # Azure voices/list 常见字段：StyleList / VoiceType；Edge voices: VoiceTag/Status
+                        style_list = v.get('StyleList') or []
+                        if isinstance(style_list, list) and style_list:
+                            personalities_text = ",".join(map(str, style_list[:3]))
+                        else:
+                            personalities_text = ",".join(map(str, personalities[:3])) if personalities else (status or str(v.get('VoiceType') or ''))
 
                         child = QTreeWidgetItem(lang_item, [short_name, gender, locale, personalities_text])
                         child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                         child.setCheckState(0, Qt.Unchecked)
                         self.voice_items[short_name] = child
+
+            # 恢复之前勾选（仅恢复仍存在的）
+            if previous_selected:
+                self.apply_saved_voice_selection(previous_selected)
+
+            # 统计中文语音数量，便于用户确认“是否全”
+            try:
+                zh_count = 0
+                for v in voices:
+                    locale = str(v.get('Locale') or '')
+                    if locale.lower().startswith('zh-') or locale.lower() == 'zh-cn' or locale.lower() == 'zh':
+                        zh_count += 1
+                self.log_view.append(f"✓ 已加载语音：{len(self.voice_items)} 个（中文相关 {zh_count} 个），模式={mode}")
+            except Exception:
+                pass
 
             # 默认展开中文区域项目
             for i in range(self.voice_tree.topLevelItemCount()):
@@ -1707,6 +2470,12 @@ class TTSApp(QWidget):
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.Unchecked)
                 self.voice_items[voice] = child
+
+        finally:
+            try:
+                self.voice_tree.blockSignals(False)
+            except Exception:
+                pass
 
     def get_selected_voices(self):
         selected = []
@@ -1743,6 +2512,30 @@ class TTSApp(QWidget):
 
         self._loading_settings = True
         try:
+            # 读取 Azure 配置（不做 UI 展示；用于 Azure 模式合成）
+            self.azure_speech_region = str(data.get("azure_speech_region", "") or "")
+            self.azure_tts_endpoint = str(data.get("azure_tts_endpoint", "") or "") or _DEFAULT_AZURE_ENDPOINT_BASE
+            raw_keys = data.get("azure_speech_keys")
+            if isinstance(raw_keys, str):
+                self.azure_speech_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            elif isinstance(raw_keys, list):
+                self.azure_speech_keys = [str(k).strip() for k in raw_keys if str(k).strip()]
+            else:
+                self.azure_speech_keys = []
+
+            # 恢复模式选择（默认 Azure）
+            mode_value = str(data.get("tts_mode", "azure") or "azure")
+            mode_index = self.mode_combo.findData(mode_value)
+            if mode_index != -1:
+                self.mode_combo.setCurrentIndex(mode_index)
+
+
+            # 按当前模式重新拉取语音列表（Azure 模式可避免中文语音变少）
+            try:
+                self.populate_voices()
+            except Exception:
+                pass
+
             self.default_output_checkbox.setChecked(data.get("default_output", True))
             self.srt_checkbox.setChecked(data.get("srt_enabled", True))
             self.extra_line_checkbox.setChecked(data.get("extra_line_output", False))
@@ -1827,6 +2620,18 @@ class TTSApp(QWidget):
         if getattr(self, "_loading_settings", False):
             return
 
+        # 先读取已有设置，避免覆盖用户手动添加的字段（例如 Azure Key/Endpoint）
+        existing: dict = {}
+        path = self.get_settings_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
+
         try:
             line_length = int(self.line_length_input.text())
         except (TypeError, ValueError):
@@ -1837,7 +2642,8 @@ class TTSApp(QWidget):
         except (TypeError, ValueError):
             subtitle_lines = 1
 
-        settings = {
+        settings = dict(existing)
+        settings.update({
             "default_output": self.default_output_checkbox.isChecked(),
             "srt_enabled": self.srt_checkbox.isChecked(),
             "extra_line_output": self.extra_line_checkbox.isChecked(),
@@ -1845,6 +2651,7 @@ class TTSApp(QWidget):
             "subtitle_lines": max(1, min(10, subtitle_lines)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
+            "tts_mode": self.mode_combo.currentData() or "azure",
             "voice_rate": self.rate_combo.currentText(),
             "voice_pitch": self.pitch_combo.currentText(),
             "voice_volume": self.volume_combo.currentText(),
@@ -1859,13 +2666,25 @@ class TTSApp(QWidget):
                 "log": self.log_box.is_expanded(),
             },
             "window_geometry": [self.x(), self.y(), self.width(), self.height()],
-        }
+        })
 
         try:
-            with open(self.get_settings_path(), "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except OSError as exc:
             self.log_view.append(f"⚠ 保存设置失败: {exc}")
+
+    def _on_mode_changed(self, *args):
+        # 切换模式后立即保存，保持下次启动一致
+        self.save_settings()
+        # 切换模式后刷新语音列表，避免“显示不全/选了用不了”
+        try:
+            self.populate_voices()
+        except Exception as e:
+            try:
+                self.log_view.append(f"⚠ 切换模式后刷新语音列表失败: {e}")
+            except Exception:
+                pass
 
     def apply_saved_voice_selection(self, voices: list[str]) -> None:
         # 先全部清空（结构：region -> locale -> voice）
@@ -1942,6 +2761,7 @@ class TTSApp(QWidget):
             worker = TTSWorker(
                 voice=voice,
                 parent=self,
+                tts_mode=str(self.mode_combo.currentData() or "azure"),
                 srt_enabled=srt_enabled,
                 line_length=line_length_value,
                 convert_punctuation=convert_punctuation,

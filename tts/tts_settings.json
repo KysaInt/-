@@ -6,26 +6,28 @@
   "subtitle_lines": 1,
   "subtitle_rule": "rule_2",
   "selected_voices": [
-    "zh-CN-XiaoxiaoNeural",
-    "zh-CN-YunxiNeural"
+    "zh-CN-XiaoxiaoMultilingualNeural",
+    "zh-CN-YunyiMultilingualNeural"
   ],
   "voice_rate": "+0%",
   "voice_pitch": "+0Hz",
   "voice_volume": "+0%",
   "enable_emotion": true,
   "voice_style": "general",
-  "voice_styledegree": "1.0",
+  "voice_styledegree": "0.94",
   "voice_role": "",
   "panel_states": {
     "settings": true,
-    "text": true,
+    "text": false,
     "voice": true,
     "log": true
   },
   "window_geometry": [
-    9,
-    9,
-    709,
-    1251
-  ]
+    1029,
+    57,
+    713,
+    1401
+  ],
+  "tts_mode": "azure",
+  "azure_tts_endpoint": ""
 }
