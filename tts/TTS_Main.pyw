@@ -245,6 +245,24 @@ if __name__ == "__main__":
     if app_icon is not None:
         w.setWindowIcon(app_icon)
 
+    # 默认启动高度：固定 1000px（超出屏幕可用高度则取可用高度），并居中
+    try:
+        screen = QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen is not None else None
+        if geo is not None:
+            cur = w.geometry()
+            new_h = min(1000, geo.height())
+            new_w = cur.width()
+            # 保持原宽度为主，避免过窄/过宽
+            new_w = max(600, min(new_w, int(geo.width() * 0.95)))
+            x = geo.x() + max(0, int((geo.width() - new_w) / 2))
+            y = geo.y() + max(0, int((geo.height() - new_h) / 2))
+            w.setGeometry(x, y, new_w, new_h)
+        else:
+            w.resize(max(600, w.width()), 1000)
+    except Exception:
+        pass
+
     # 创建系统托盘图标（可从任务栏最右侧看到，避免白纸）
     _ensure_system_tray(w, app_icon)
 

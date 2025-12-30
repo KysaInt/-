@@ -376,10 +376,10 @@ def _azure_fetch_speech_usage_metrics(days: int = 30) -> dict[str, float]:
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QLineEdit, QCheckBox,
-    QComboBox, QSplitter, QSizePolicy, QSlider
+    QComboBox, QSplitter, QSizePolicy, QSlider, QSpacerItem
 )
 from PySide6.QtCore import QThread, Signal, Qt, QUrl
-from PySide6.QtGui import QIntValidator, QIcon, QDesktopServices
+from PySide6.QtGui import QIntValidator, QIcon, QDesktopServices, QGuiApplication
 
 
 # ==================== edge-tts SSML情绪标签补丁 ====================
@@ -629,6 +629,10 @@ class CollapsibleBox(QWidget):
         self.toggle_button.setFont(f)
         self.toggle_button.setCheckable(True)
         self.content_area = QWidget()
+        # 关键：作为子折叠栏时，需要可纵向扩展，避免 sizeHint 不更新导致外层不收紧
+        self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 折叠时通过 maxHeight=0 让布局立即“推紧”
+        self.content_area.setMaximumHeight(16777215)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -657,7 +661,26 @@ class CollapsibleBox(QWidget):
 
     def set_expanded(self, expanded: bool):
         self.toggle_button.setChecked(expanded)
+
+        # 先更新可见性/约束，再发信号，让外层读取到最新 sizeHint
         self.content_area.setVisible(expanded)
+        if expanded:
+            self.content_area.setMaximumHeight(16777215)
+        else:
+            self.content_area.setMaximumHeight(0)
+
+        try:
+            if self.content_area.layout() is not None:
+                self.content_area.layout().invalidate()
+        except Exception:
+            pass
+
+        try:
+            self.content_area.updateGeometry()
+            self.updateGeometry()
+        except Exception:
+            pass
+
         arrow = "▼" if expanded else "►"
         self.toggle_button.setText(f"{arrow} {self._base_title}")
         self.toggled.emit(expanded)
@@ -996,6 +1019,9 @@ class TTSWorker(QThread):
         style: str = "general",
         styledegree: str = "1.0",
         role: str = "",
+        ssml_line_break_ms: int = 0,
+        ssml_emphasis_level: str = "",
+        azure_sentence_silence_ms: int = 0,
         subtitle_lines: int = 1,
         selected_txt_files: list[str] | None = None,
     ):
@@ -1020,8 +1046,54 @@ class TTSWorker(QThread):
         self.style = style
         self.styledegree = styledegree
         self.role = role
+        # SSML 扩展（优先面向 Azure；Edge 也可尝试，失败会自动回退纯文本）
+        try:
+            self.ssml_line_break_ms = max(0, int(ssml_line_break_ms or 0))
+        except Exception:
+            self.ssml_line_break_ms = 0
+        self.ssml_emphasis_level = str(ssml_emphasis_level or "").strip().lower()
+        try:
+            self.azure_sentence_silence_ms = max(0, int(azure_sentence_silence_ms or 0))
+        except Exception:
+            self.azure_sentence_silence_ms = 0
         # 仅处理的文本文件（可选）：若为 None 则扫描目录全部 .txt
         self.selected_txt_files = list(selected_txt_files) if selected_txt_files else None
+
+    def _uses_custom_ssml(self) -> bool:
+        # 统一由“启用情绪控制(SSML)”开关控制：
+        # 关闭时不注入任何 SSML 扩展标签，避免旧值残留导致意外行为。
+        if not self.enable_emotion:
+            return False
+
+        if self.style != "general":
+            return True
+        if self.ssml_line_break_ms > 0:
+            return True
+        if bool(self.ssml_emphasis_level):
+            return True
+        if self.azure_sentence_silence_ms > 0:
+            return True
+        return False
+
+    def _build_ssml_text_with_breaks_escaped(self, text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+
+        ms = max(0, int(getattr(self, "ssml_line_break_ms", 0) or 0))
+        if ms <= 0:
+            return escape(raw)
+
+        # 将换行替换为 break；每段单独转义，避免把标签一起 escape。
+        parts = [p.strip() for p in raw.splitlines()]
+        parts = [p for p in parts if p]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return escape(parts[0])
+
+        joiner = f"<break time='{ms}ms'/>"
+        return joiner.join(escape(p) for p in parts)
 
     def _get_azure_endpoint_and_keys(self) -> tuple[str, list[str]]:
         parent = self.parent()
@@ -1070,23 +1142,41 @@ class TTSWorker(QThread):
         return endpoint, keys
 
     def _build_azure_ssml(self, text: str, force_plain: bool = False) -> str:
-        plain = escape(text.strip())
-
-        # 只有在启用情绪控制且情绪不是普通时才添加标签
-        use_emotion = (not force_plain) and self.enable_emotion and self.style != "general"
-        if use_emotion:
-            express_attrs = [f'style="{self.style}"', f'styledegree="{self.styledegree}"']
-            if self.role:
-                express_attrs.append(f'role="{self.role}"')
-            attrs_str = " ".join(express_attrs)
-            inner = f"<mstts:express-as {attrs_str}>{plain}</mstts:express-as>"
+        # 纯文本模式：尽量保持最保守（避免因 SSML 扩展导致被服务端拒绝）
+        if force_plain:
+            inner = escape((text or "").strip())
+            silence_tag = ""
         else:
-            inner = plain
+            # 当未启用“情绪控制(SSML)”时，不注入任何扩展标签
+            if not self.enable_emotion:
+                inner = escape((text or "").strip())
+                silence_tag = ""
+            else:
+                inner = self._build_ssml_text_with_breaks_escaped(text)
+
+                # emphasis（对整段文本生效；无 -> 不加标签）
+                emphasis = str(getattr(self, "ssml_emphasis_level", "") or "").strip().lower()
+                if emphasis in ("reduced", "moderate", "strong"):
+                    inner = f"<emphasis level='{emphasis}'>{inner}</emphasis>"
+
+                # 只有在情绪不是普通时才添加 express-as
+                use_emotion = self.style != "general"
+                if use_emotion:
+                    express_attrs = [f'style="{self.style}"', f'styledegree="{self.styledegree}"']
+                    if self.role:
+                        express_attrs.append(f'role="{self.role}"')
+                    attrs_str = " ".join(express_attrs)
+                    inner = f"<mstts:express-as {attrs_str}>{inner}</mstts:express-as>"
+
+                # Azure 扩展：句间静音（可选；部分语音/策略可能不接受）
+                ss_ms = max(0, int(getattr(self, "azure_sentence_silence_ms", 0) or 0))
+                silence_tag = f"<mstts:silence type='Sentenceboundary' value='{ss_ms}ms'/>" if ss_ms > 0 else ""
 
         return (
             "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
             "xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='zh-CN'>"
             f"<voice name='{self.voice}'>"
+            f"{silence_tag}"
             f"<prosody pitch='{self.pitch}' rate='{self.rate}' volume='{self.volume}'>"
             f"{inner}"
             "</prosody>"
@@ -1172,9 +1262,9 @@ class TTSWorker(QThread):
             self.progress.emit(f"    ✓ [{self.voice}] (Azure) 语音已保存到 {os.path.basename(output)}")
             return
         except Exception as e:
-            # 若启用了情绪，尝试纯文本回退
-            if self.enable_emotion and self.style != "general":
-                self.progress.emit(f"    ⚠ [{self.voice}] (Azure) 情绪 SSML 可能不被接受，改用纯文本回退…")
+            # 若启用了自定义 SSML（情绪/停顿/强调/静音），尝试纯文本回退
+            if self._uses_custom_ssml():
+                self.progress.emit(f"    ⚠ [{self.voice}] (Azure) SSML 可能不被接受，改用纯文本回退…")
                 try:
                     ssml_plain = self._build_azure_ssml(text, force_plain=True)
                     await asyncio.to_thread(self._azure_tts_save_sync, ssml_plain, endpoint, keys, output)
@@ -1202,7 +1292,27 @@ class TTSWorker(QThread):
         通过edge_tts_patch的猴子补丁,可以使用SSML标签
         补丁会在生成最终SSML时正确处理express-as标签
         """
-        text = text.strip()
+        text = (text or "").strip()
+        if not text:
+            return ""
+
+        if self.enable_emotion:
+            # 换行停顿：将换行替换为 break 标签（Edge 侧若不接受，会在失败后自动回退纯文本）
+            try:
+                ms = max(0, int(getattr(self, "ssml_line_break_ms", 0) or 0))
+            except Exception:
+                ms = 0
+            if ms > 0 and "\n" in text:
+                parts = [p.strip() for p in text.splitlines()]
+                parts = [p for p in parts if p]
+                if parts:
+                    joiner = f"<break time='{ms}ms'/>"
+                    text = joiner.join(parts)
+
+            # emphasis（整段）
+            emphasis = str(getattr(self, "ssml_emphasis_level", "") or "").strip().lower()
+            if emphasis in ("reduced", "moderate", "strong"):
+                text = f"<emphasis level='{emphasis}'>{text}</emphasis>"
         
         # 只有在启用情绪控制且情绪不是普通时才添加标签
         if self.enable_emotion and self.style != "general":
@@ -1475,7 +1585,23 @@ class TTSApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("微软 Edge TTS 文本转语音助手")
-        self._default_geometry = (160, 160, 560, 800)  # 增加窗口高度以容纳情绪控制面板
+
+        # 默认窗口高度：屏幕可用高度的 80%（居中）
+        try:
+            screen = QGuiApplication.primaryScreen()
+            geo = screen.availableGeometry() if screen is not None else None
+        except Exception:
+            geo = None
+
+        if geo is not None:
+            w = min(560, max(420, int(geo.width() * 0.9)))
+            h = max(600, int(geo.height() * 0.8))
+            x = geo.x() + max(0, int((geo.width() - w) / 2))
+            y = geo.y() + max(0, int((geo.height() - h) / 2))
+            self._default_geometry = (x, y, w, h)
+        else:
+            self._default_geometry = (160, 160, 560, 800)
+
         self.setGeometry(*self._default_geometry)
         self._settings_geometry_loaded = False
 
@@ -1702,11 +1828,38 @@ class TTSApp(QWidget):
         self.role_combo.setCurrentIndex(0)
         self.role_combo.setToolTip("角色扮演 (部分语音支持)")
 
+        # SSML 扩展（主要面向 Azure）
+        self.ssml_extras_label = QLabel("<b>SSML 扩展:</b>")
+
+        self.ssml_line_break_label = QLabel("换行停顿(ms):")
+        self.ssml_line_break_input = QLineEdit("0")
+        self.ssml_line_break_input.setValidator(QIntValidator(0, 5000, self))
+        self.ssml_line_break_input.setFixedWidth(60)
+        self.ssml_line_break_input.setToolTip("把文本中的换行替换为 <break time='Xms'/>（0 表示不插入）")
+
+        self.ssml_emphasis_label = QLabel("强调:")
+        self.ssml_emphasis_combo = QComboBox()
+        self.ssml_emphasis_combo.addItem("无", "")
+        self.ssml_emphasis_combo.addItem("弱", "reduced")
+        self.ssml_emphasis_combo.addItem("中", "moderate")
+        self.ssml_emphasis_combo.addItem("强", "strong")
+        self.ssml_emphasis_combo.setToolTip("对整段文本应用 <emphasis level=...>（部分语音可能无明显效果）")
+
+        self.azure_sentence_silence_label = QLabel("句间静音(ms):")
+        self.azure_sentence_silence_input = QLineEdit("0")
+        self.azure_sentence_silence_input.setValidator(QIntValidator(0, 2000, self))
+        self.azure_sentence_silence_input.setFixedWidth(60)
+        self.azure_sentence_silence_input.setToolTip("仅 Azure：<mstts:silence type='Sentenceboundary' value='Xms'/>（0 关闭）")
+
         # 保存情绪控制的控件引用,便于启用/禁用
         self.emotion_widgets = [
             self.style_label, self.style_combo,
             self.styledegree_label, self.styledegree_slider,
-            self.role_label, self.role_combo
+            self.role_label, self.role_combo,
+            self.ssml_extras_label,
+            self.ssml_line_break_label, self.ssml_line_break_input,
+            self.ssml_emphasis_label, self.ssml_emphasis_combo,
+            self.azure_sentence_silence_label, self.azure_sentence_silence_input,
         ]
         # 初始状态设为禁用（使用整数0表示未选中）
         self._toggle_emotion_controls(0)
@@ -1729,6 +1882,16 @@ class TTSApp(QWidget):
         # 添加语音参数控制
         settings_inner.addWidget(QLabel("<b>基础参数:</b>"))
         settings_inner.addLayout(self.voice_params_layout)
+
+        # 开始按钮：放在语速栏（基础参数）下方
+        try:
+            self.start_button.setFont(self.settings_box.toggle_button.font())
+            self.start_button.setStyleSheet(self.settings_box.toggle_button.styleSheet())
+            self.start_button.setPalette(self.settings_box.toggle_button.palette())
+        except Exception:
+            pass
+        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        settings_inner.addWidget(self.start_button)
         
         # --- 子折叠栏：文本选择 ---
         self.text_box = CollapsibleBox("文本选择", expanded=True)
@@ -1746,8 +1909,6 @@ class TTSApp(QWidget):
         text_inner.addWidget(self.selected_texts_label)
         text_inner.addWidget(self.text_tree)
         self.text_box.setContentLayout(text_inner)
-        settings_inner.addWidget(self.text_box)
-
         # --- 子折叠栏：情绪控制 ---
         self.emotion_box = CollapsibleBox("情绪控制", expanded=False)
         emotion_inner = QVBoxLayout(); emotion_inner.setContentsMargins(8,8,8,8); emotion_inner.setSpacing(6)
@@ -1767,45 +1928,79 @@ class TTSApp(QWidget):
         role_layout.addWidget(self.role_combo)
         role_layout.addStretch()
         emotion_inner.addLayout(role_layout)
+
+        emotion_inner.addWidget(self.ssml_extras_label)
+
+        ssml_break_layout = QHBoxLayout()
+        ssml_break_layout.addWidget(self.ssml_line_break_label)
+        ssml_break_layout.addWidget(self.ssml_line_break_input)
+        ssml_break_layout.addStretch()
+        emotion_inner.addLayout(ssml_break_layout)
+
+        ssml_emphasis_layout = QHBoxLayout()
+        ssml_emphasis_layout.addWidget(self.ssml_emphasis_label)
+        ssml_emphasis_layout.addWidget(self.ssml_emphasis_combo, 1)
+        emotion_inner.addLayout(ssml_emphasis_layout)
+
+        azure_silence_layout = QHBoxLayout()
+        azure_silence_layout.addWidget(self.azure_sentence_silence_label)
+        azure_silence_layout.addWidget(self.azure_sentence_silence_input)
+        azure_silence_layout.addStretch()
+        emotion_inner.addLayout(azure_silence_layout)
         self.emotion_box.setContentLayout(emotion_inner)
         settings_inner.addWidget(self.emotion_box)
 
+        # 情绪控制在文本选择上方
+        settings_inner.addWidget(self.text_box)
+
         # --- 子折叠栏：语音模型 ---
         self.voice_box = CollapsibleBox("语音模型", expanded=True)
+        # 让语音模型子折叠栏更愿意吃掉多余空间（贴底）
+        try:
+            self.voice_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
         voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
         voice_inner.addWidget(self.label_voice)
         voice_inner.addWidget(self.selected_voices_label)
+        # 语音模型列表默认给一个最小高度，避免展开后空间不足
+        try:
+            self.voice_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.voice_tree.setMinimumHeight(260)
+        except Exception:
+            pass
         voice_inner.addWidget(self.voice_tree)
         self.voice_box.setContentLayout(voice_inner)
         settings_inner.addWidget(self.voice_box)
 
-        # 开始按钮：全宽、3倍高度、背景跟折叠按钮一致
-        try:
-            self.start_button.setFont(self.settings_box.toggle_button.font())
-            self.start_button.setStyleSheet(self.settings_box.toggle_button.styleSheet())
-            self.start_button.setPalette(self.settings_box.toggle_button.palette())
-        except Exception:
-            pass
-        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        settings_inner.addWidget(self.start_button)
+        # 底部弹簧（可切换）：
+        # - 语音模型展开时：把额外高度优先给语音模型，让其“贴底”
+        # - 语音模型收起时：由弹簧吃掉空白，推紧内容
+        self._settings_bottom_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        settings_inner.addItem(self._settings_bottom_spacer)
+        self._settings_bottom_spacer_index = settings_inner.count() - 1
         self.settings_box.setContentLayout(settings_inner)
         self.splitter.addWidget(self.settings_box)
 
-        # 日志面板
+        # 填充占位：放在日志之前，使“日志折叠栏收起时贴底部”
+        self.bottom_filler = QWidget(); self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.splitter.addWidget(self.bottom_filler)
+
+        # 日志面板（底部）
         self.log_box = CollapsibleBox("日志", expanded=True)
         log_inner = QVBoxLayout(); log_inner.setContentsMargins(8,8,8,8); log_inner.setSpacing(6)
         log_inner.addWidget(self.log_view)
         self.log_box.setContentLayout(log_inner)
         self.splitter.addWidget(self.log_box)
 
-        # 填充占位，保证折叠后贴顶
-        self.bottom_filler = QWidget(); self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.splitter.addWidget(self.bottom_filler)
-
         # 保存展开尺寸
-        self._panel_saved_sizes = {"log": None}
+        # 主 splitter：在“设置+日志均展开”时记录用户拖动比例
+        self._split_ratio_settings = 0.72
         for b in (self.settings_box, self.text_box, self.emotion_box, self.voice_box, self.log_box):
             b.toggled.connect(self.update_splitter_sizes)
+        # 子折叠栏伸缩策略：语音模型展开时优先吃掉多余高度
+        for b in (self.text_box, self.emotion_box, self.voice_box):
+            b.toggled.connect(self._update_settings_subpanel_stretch)
         self.splitter.splitterMoved.connect(lambda *_: self._store_expanded_sizes())
         # 附加：拖动后进行约束修正，避免覆盖折叠标题或挤压内容
         self.splitter.splitterMoved.connect(lambda *_: self._enforce_splitter_constraints())
@@ -1820,6 +2015,12 @@ class TTSApp(QWidget):
                 pass
             self.update_splitter_sizes()
         _QT.singleShot(0, _post_layout_adjust)
+
+        # 初始伸缩策略
+        try:
+            self._update_settings_subpanel_stretch()
+        except Exception:
+            pass
 
         # 信号连接（原有逻辑）
         self.punctuation_combo.currentIndexChanged.connect(self.execute_punctuation_conversion)
@@ -1931,9 +2132,62 @@ class TTSApp(QWidget):
         sizes = self.splitter.sizes()
         if len(sizes) < 3:
             return
-        # sizes: [settings, log, filler]
-        if self.log_box.is_expanded():
-            self._panel_saved_sizes['log'] = max(0, sizes[1])
+        # sizes: [settings, filler, log]
+        if self.settings_box.is_expanded() and self.log_box.is_expanded():
+            set_h = max(1, int(sizes[0]))
+            log_h = max(1, int(sizes[2]))
+            denom = set_h + log_h
+            if denom > 0:
+                self._split_ratio_settings = float(set_h) / float(denom)
+
+    def _update_settings_subpanel_stretch(self, *_):
+        """控制设置栏内部的垂直伸缩：语音模型展开时让其贴底；否则用底部弹簧推紧内容。"""
+        try:
+            layout = self.settings_box.content_area.layout()
+            if layout is None:
+                return
+
+            voice_expanded = False
+            try:
+                voice_expanded = bool(self.voice_box.is_expanded())
+            except Exception:
+                voice_expanded = False
+
+            # 语音模型展开：给 voice_box 伸缩，底部弹簧不吃空间
+            if voice_expanded:
+                try:
+                    layout.setStretchFactor(self.voice_box, 1)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, "_settings_bottom_spacer_index"):
+                        layout.setStretch(int(self._settings_bottom_spacer_index), 0)
+                except Exception:
+                    pass
+            else:
+                # 语音模型收起：底部弹簧吃空间，内容推紧
+                try:
+                    layout.setStretchFactor(self.voice_box, 0)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, "_settings_bottom_spacer_index"):
+                        layout.setStretch(int(self._settings_bottom_spacer_index), 1)
+                except Exception:
+                    pass
+
+            # 触发布局刷新（避免必须拖动窗口才生效）
+            try:
+                layout.invalidate()
+            except Exception:
+                pass
+            try:
+                self.settings_box.content_area.updateGeometry()
+                self.settings_box.updateGeometry()
+            except Exception:
+                pass
+        except Exception:
+            return
 
     def update_splitter_sizes(self):
         splitter = self.splitter
@@ -1942,28 +2196,56 @@ class TTSApp(QWidget):
         header_l = self.log_box.header_height()
         MIN_CONTENT = 80
 
-        # 设置面板高度：尽量给内容留空间，同时给日志至少留出一个最小高度
-        if self.settings_box.is_expanded():
-            content_h = self.settings_box.content_area.sizeHint().height()
-            min_log_h = header_l + (MIN_CONTENT if self.log_box.is_expanded() else 0)
-            max_set_h = max(header_s, total_h - min_log_h)
-            set_h = min(max_set_h, content_h + header_s)
-            set_h = max(set_h, header_s + 40)
-            self._expanded_settings_height = set_h
-        else:
-            set_h = header_s
+        # 语音模型展开时，允许日志更薄一点，把空间让给设置区
+        log_min_content = MIN_CONTENT
+        try:
+            if getattr(self, "voice_box", None) is not None and self.voice_box.is_expanded():
+                log_min_content = 20
+        except Exception:
+            pass
 
-        # 日志面板高度
-        if self.log_box.is_expanded():
-            log_h = max(MIN_CONTENT, total_h - set_h)
-        else:
+        # 让子折叠栏/树控件的 sizeHint 先结算完，避免必须“拖动/挡一下窗口”才刷新
+        try:
+            if self.settings_box.is_expanded() and self.settings_box.content_area.layout() is not None:
+                self.settings_box.content_area.layout().invalidate()
+            self.settings_box.content_area.updateGeometry()
+            self.settings_box.updateGeometry()
+        except Exception:
+            pass
+
+        # ------- 统一规则（splitter widgets: [settings, filler, log]） -------
+        if not self.log_box.is_expanded():
+            # 日志折叠：日志标题贴底；设置尽量吃满上方空间（filler=0）
             log_h = header_l
+            if self.settings_box.is_expanded():
+                set_h = max(header_s, total_h - log_h)
+                filler_h = 0
+            else:
+                set_h = header_s
+                filler_h = max(0, total_h - set_h - log_h)
+        else:
+            # 日志展开：filler=0，剩余在“设置 vs 日志”之间按比例分配（可拖动记忆）
+            filler_h = 0
+            min_set_h = max(header_s + 40, MIN_CONTENT)
+            min_log_h = max(header_l + log_min_content, MIN_CONTENT)
 
-        used = set_h + log_h
-        filler = max(0, total_h - used)
-        splitter.setSizes([set_h, log_h, filler])
+            if not self.settings_box.is_expanded():
+                set_h = header_s
+                log_h = max(min_log_h, total_h - set_h)
+            else:
+                max_set_h = max(min_set_h, total_h - min_log_h)
+                ratio = float(getattr(self, "_split_ratio_settings", 0.72) or 0.72)
+                ratio = min(0.9, max(0.1, ratio))
+                desired_set = int(total_h * ratio)
+                set_h = min(max_set_h, max(min_set_h, desired_set))
+                log_h = max(min_log_h, total_h - set_h)
+                # 若日志被挤到低于最小，则回收设置高度
+                if set_h + log_h > total_h:
+                    set_h = max(min_set_h, total_h - log_h)
 
-        # 约束顶部/折叠固定高度
+        splitter.setSizes([int(set_h), int(filler_h), int(log_h)])
+
+        # 约束顶部/折叠固定高度（让拖动/折叠表现稳定）
         if self.settings_box.is_expanded():
             self.settings_box.setMinimumHeight(MIN_CONTENT)
             self.settings_box.setMaximumHeight(16777215)
@@ -1993,29 +2275,48 @@ class TTSApp(QWidget):
         header_s = self.settings_box.header_height()
         header_l = self.log_box.header_height()
         MIN_CONTENT = 80
-        set_h, log_h, filler = sizes
-        if not self.settings_box.is_expanded():
-            set_h = header_s
-        else:
-            fixed = getattr(self, '_expanded_settings_height', None)
-            if fixed is not None:
-                set_h = fixed
-            else:
-                set_h = max(set_h, header_s + 40)
-        if not self.log_box.is_expanded():
-            log_h = header_l
-        else:
-            log_h = max(log_h, MIN_CONTENT)
+
         total = sum(sizes)
-        used = set_h + log_h
-        filler = max(0, total - used)
-        if used > total:
-            scale = total / used if used > 0 else 1
-            set_h = int(set_h * scale)
-            log_h = int(log_h * scale)
-            used = set_h + log_h
-            filler = max(0, total - used)
-        self.splitter.setSizes([set_h, log_h, filler])
+        set_h, filler_h, log_h = [int(x) for x in sizes]
+
+        # 语音模型展开时，允许日志更薄一点
+        log_min_content = MIN_CONTENT
+        try:
+            if getattr(self, "voice_box", None) is not None and self.voice_box.is_expanded():
+                log_min_content = 20
+        except Exception:
+            pass
+
+        if not self.log_box.is_expanded():
+            # 日志折叠：标题贴底
+            log_h = header_l
+            if self.settings_box.is_expanded():
+                set_h = max(header_s, total - log_h)
+                filler_h = 0
+            else:
+                set_h = header_s
+                filler_h = max(0, total - set_h - log_h)
+        else:
+            # 日志展开：filler=0，仅允许拖动“设置 vs 日志”分界
+            filler_h = 0
+            min_set_h = max(header_s + 40, MIN_CONTENT)
+            min_log_h = max(header_l + log_min_content, MIN_CONTENT)
+
+            if not self.settings_box.is_expanded():
+                set_h = header_s
+                log_h = max(min_log_h, total - set_h)
+            else:
+                set_h = max(min_set_h, set_h)
+                set_h = min(set_h, max(min_set_h, total - min_log_h))
+                log_h = max(min_log_h, total - set_h)
+                if set_h + log_h > total:
+                    set_h = max(min_set_h, total - log_h)
+
+            # 记录拖动比例
+            denom = max(1, set_h + log_h)
+            self._split_ratio_settings = float(set_h) / float(denom)
+
+        self.splitter.setSizes([int(set_h), int(filler_h), int(log_h)])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2462,6 +2763,22 @@ class TTSApp(QWidget):
             role_index = self.role_combo.findData(role_value)
             if role_index != -1:
                 self.role_combo.setCurrentIndex(role_index)
+
+            # 恢复 SSML 扩展参数
+            try:
+                self.ssml_line_break_input.setText(str(int(data.get("ssml_line_break_ms", 0) or 0)))
+            except Exception:
+                self.ssml_line_break_input.setText("0")
+
+            emphasis_value = str(data.get("ssml_emphasis_level", "") or "").strip().lower()
+            emphasis_index = self.ssml_emphasis_combo.findData(emphasis_value)
+            if emphasis_index != -1:
+                self.ssml_emphasis_combo.setCurrentIndex(emphasis_index)
+
+            try:
+                self.azure_sentence_silence_input.setText(str(int(data.get("azure_sentence_silence_ms", 0) or 0)))
+            except Exception:
+                self.azure_sentence_silence_input.setText("0")
             
             # 恢复窗口大小与位置
             geo = data.get("window_geometry")
@@ -2469,7 +2786,22 @@ class TTSApp(QWidget):
                 try:
                     x, y, w, h = geo
                     if w > 200 and h > 300:
-                        self.setGeometry(int(x), int(y), int(w), int(h))
+                        # 启动默认高度：屏幕可用高度的 80%（即便存在旧的保存尺寸，也让高度跟随新默认）
+                        try:
+                            screen = QGuiApplication.primaryScreen()
+                            av = screen.availableGeometry() if screen is not None else None
+                        except Exception:
+                            av = None
+
+                        if av is not None:
+                            desired_h = max(300, int(av.height() * 0.8))
+                            ww = max(240, min(int(w), int(av.width() * 0.95)))
+                            hh = desired_h
+                            xx = av.x() + max(0, int((av.width() - ww) / 2))
+                            yy = av.y() + max(0, int((av.height() - hh) / 2))
+                            self.setGeometry(int(xx), int(yy), int(ww), int(hh))
+                        else:
+                            self.setGeometry(int(x), int(y), int(w), int(h))
                         self._settings_geometry_loaded = True
                 except Exception:
                     pass
@@ -2534,6 +2866,9 @@ class TTSApp(QWidget):
             "voice_style": self.style_combo.currentData() or "general",
             "voice_styledegree": str(self.styledegree_slider.value() / 100.0),
             "voice_role": self.role_combo.currentData() or "",
+            "ssml_line_break_ms": int(self.ssml_line_break_input.text() or 0),
+            "ssml_emphasis_level": self.ssml_emphasis_combo.currentData() or "",
+            "azure_sentence_silence_ms": int(self.azure_sentence_silence_input.text() or 0),
             "panel_states": {
                 "settings": self.settings_box.is_expanded(),
                 "text": self.text_box.is_expanded(),
@@ -2651,6 +2986,9 @@ class TTSApp(QWidget):
                 style=self.style_combo.currentData() or "general",
                 styledegree=str(self.styledegree_slider.value() / 100.0),
                 role=self.role_combo.currentData() or "",
+                ssml_line_break_ms=int(self.ssml_line_break_input.text() or 0),
+                ssml_emphasis_level=str(self.ssml_emphasis_combo.currentData() or ""),
+                azure_sentence_silence_ms=int(self.azure_sentence_silence_input.text() or 0),
                 subtitle_lines=subtitle_lines_value,
                 selected_txt_files=selected_texts,
             )
