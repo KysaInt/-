@@ -1908,6 +1908,8 @@ class TTSApp(QWidget):
         # 设置面板（顶部）
         self.settings_box = CollapsibleBox("设置", expanded=True)
         settings_inner = QVBoxLayout(); settings_inner.setContentsMargins(8,8,8,8); settings_inner.setSpacing(6)
+        # 保存布局引用：用于统一计算“设置区当前内容最小高度”，从而驱动 splitter 自动推挤日志
+        self._settings_inner_layout = settings_inner
         
         # --- 子折叠栏：文本选择 ---
         self.text_box = CollapsibleBox("文本选择", expanded=True)
@@ -2070,7 +2072,7 @@ class TTSApp(QWidget):
         # 主 splitter：在“设置+日志均展开”时记录用户拖动比例
         self._split_ratio_settings = 0.72
         for b in (self.settings_box, self.text_box, self.emotion_box, self.voice_box, self.output_box):
-            b.toggled.connect(self.update_splitter_sizes)
+            b.toggled.connect(self._schedule_update_splitter_sizes)
         # 子折叠栏伸缩策略：语音模型展开时优先吃掉多余高度
         for b in (self.text_box, self.emotion_box, self.voice_box):
             b.toggled.connect(self._update_settings_subpanel_stretch)
@@ -2285,27 +2287,91 @@ class TTSApp(QWidget):
             except Exception:
                 pass
 
-    def _settings_min_height_hint(self) -> int:
-        """设置主栏在当前子栏展开状态下的最小高度（用于推动日志下移）。"""
+    def _settings_required_height(self) -> int:
+        """计算设置主栏在当前子栏展开状态下的“内容所需最小高度”。
+
+        这是 splitter 自动分配高度的唯一权威来源：
+        - 子栏展开时必须能把日志下推
+        - 子栏收起时允许设置区收缩
+        """
         try:
             header_h = int(self.settings_box.header_height())
         except Exception:
             header_h = 0
 
-        content_h = 0
-        try:
-            lay = self.settings_box.content_area.layout() if self.settings_box is not None else None
-            if lay is not None:
-                try:
-                    content_h = int(lay.minimumSize().height())
-                except Exception:
-                    content_h = 0
-                if content_h <= 0:
-                    content_h = int(lay.sizeHint().height())
-        except Exception:
-            content_h = 0
+        lay = getattr(self, "_settings_inner_layout", None)
+        if lay is None:
+            try:
+                lay = self.settings_box.content_area.layout()
+            except Exception:
+                lay = None
 
+        if lay is None:
+            return max(header_h + 40, header_h)
+
+        try:
+            l, t, r, b = lay.getContentsMargins()
+        except Exception:
+            l, t, r, b = (0, 0, 0, 0)
+        try:
+            spacing = int(lay.spacing())
+        except Exception:
+            spacing = 0
+
+        widget_heights = []
+        try:
+            for i in range(lay.count()):
+                item = lay.itemAt(i)
+                if item is None:
+                    continue
+                w = item.widget()
+                if w is None:
+                    # spacer 不计入“最小需要高度”
+                    continue
+
+                try:
+                    h1 = int(w.minimumHeight())
+                except Exception:
+                    h1 = 0
+                try:
+                    h2 = int(w.minimumSizeHint().height())
+                except Exception:
+                    h2 = 0
+                try:
+                    h3 = int(w.sizeHint().height())
+                except Exception:
+                    h3 = 0
+                widget_heights.append(max(h1, h2, h3, 0))
+        except Exception:
+            widget_heights = []
+
+        content_h = (t + b) + sum(widget_heights)
+        if widget_heights:
+            content_h += spacing * (len(widget_heights) - 1)
+
+        # 额外余量：避免“刚好压线”导致抖动/重算
         return max(header_h + 40, header_h + max(0, content_h) + 8)
+
+    def _schedule_update_splitter_sizes(self, *_):
+        """延迟一次刷新 splitter 尺寸，让 sizeHint 先稳定。"""
+        if getattr(self, "_splitter_update_scheduled", False):
+            return
+        self._splitter_update_scheduled = True
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._run_scheduled_splitter_update)
+        except Exception:
+            self._splitter_update_scheduled = False
+            self.update_splitter_sizes()
+
+    def _run_scheduled_splitter_update(self):
+        self._splitter_update_scheduled = False
+        self.update_splitter_sizes()
+
+    def _settings_min_height_hint(self) -> int:
+        """设置主栏在当前子栏展开状态下的最小高度（用于推动日志下移）。"""
+        return int(self._settings_required_height())
 
     def _store_expanded_sizes(self):
         # 初始化选择提示（如果还未调用）
@@ -2407,24 +2473,33 @@ class TTSApp(QWidget):
 
         # ------- 统一规则（splitter widgets: [settings, log]） -------
         try:
-            dynamic_min = int(self._settings_min_height_hint())
+            dynamic_min = int(self._settings_required_height())
         except Exception:
             dynamic_min = 0
         min_set_h = max(header_s + 40, MIN_CONTENT, dynamic_min)
-        min_log_h = MIN_CONTENT
+        try:
+            min_log_h = max(MIN_CONTENT, int(self.log_view.minimumSizeHint().height()))
+        except Exception:
+            min_log_h = MIN_CONTENT
 
         if not self.settings_box.is_expanded():
             set_h = header_s
             log_h = max(min_log_h, total_h - set_h)
         else:
+            # 内容优先：先满足设置区最小需要高度，其次才考虑用户保存的比例。
             max_set_h = max(min_set_h, total_h - min_log_h)
-            ratio = float(getattr(self, "_split_ratio_settings", 0.72) or 0.72)
-            ratio = min(0.9, max(0.1, ratio))
-            desired_set = int(total_h * ratio)
-            set_h = min(max_set_h, max(min_set_h, desired_set))
+            set_h = min(max_set_h, min_set_h)
             log_h = max(min_log_h, total_h - set_h)
-            if set_h + log_h > total_h:
-                set_h = max(min_set_h, total_h - log_h)
+
+            # 若还有空间，再按用户拖动比例分配（但不能低于内容最小高度）
+            try:
+                ratio = float(getattr(self, "_split_ratio_settings", 0.72) or 0.72)
+                ratio = min(0.9, max(0.1, ratio))
+                desired_set = int(total_h * ratio)
+                set_h = min(max_set_h, max(set_h, desired_set))
+                log_h = max(min_log_h, total_h - set_h)
+            except Exception:
+                pass
 
             # 子栏全部收起：设置主栏应收缩到最小内容高度，把空间让给日志
             try:
@@ -2469,11 +2544,14 @@ class TTSApp(QWidget):
         set_h, log_h = [int(x) for x in sizes[:2]]
 
         try:
-            dynamic_min = int(self._settings_min_height_hint())
+            dynamic_min = int(self._settings_required_height())
         except Exception:
             dynamic_min = 0
         min_set_h = max(header_s + 40, MIN_CONTENT, dynamic_min)
-        min_log_h = MIN_CONTENT
+        try:
+            min_log_h = max(MIN_CONTENT, int(self.log_view.minimumSizeHint().height()))
+        except Exception:
+            min_log_h = MIN_CONTENT
 
         if not self.settings_box.is_expanded():
             set_h = header_s
