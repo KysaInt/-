@@ -379,7 +379,7 @@ from PySide6.QtWidgets import (
     QComboBox, QSplitter, QSizePolicy, QSlider, QSpacerItem
 )
 from PySide6.QtCore import QThread, Signal, Qt, QUrl
-from PySide6.QtGui import QIntValidator, QIcon, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QIntValidator, QIcon, QDesktopServices, QGuiApplication, QPalette
 
 
 # ==================== edge-tts SSML情绪标签补丁 ====================
@@ -1652,68 +1652,81 @@ class TTSApp(QWidget):
         self.voice_tree.itemChanged.connect(self._update_selected_voices_label)
 
         # 标点转换控件
-        self.punctuation_layout = QHBoxLayout()
-        # 获取用量：打开 Azure Portal 的 Metrics 页面
-        self.fetch_metrics_button = QPushButton("获取用量")
-        self.fetch_metrics_button.setToolTip("打开 Azure Portal 的 Speech 资源 Metrics 页面。")
-        self.fetch_metrics_button.clicked.connect(self._on_fetch_remote_metrics)
-
-        self.punctuation_label = QLabel("标点转换:")
         self.punctuation_combo = QComboBox()
         self.punctuation_combo.addItem("不转换", "none")
         self.punctuation_combo.addItem("中文标点 → 英文标点", "to_halfwidth")
         self.punctuation_combo.addItem("英文标点 → 中文标点", "to_fullwidth")
         self.punctuation_combo.addItem("删除标点符号", "remove_punctuation")
-        self.punctuation_combo.setToolTip("选择后立即对 txt 子目录内所有 txt 文件执行转换")
-        self.punctuation_layout.addWidget(self.fetch_metrics_button)
-        self.punctuation_layout.addWidget(self.punctuation_label)
-        self.punctuation_layout.addWidget(self.punctuation_combo)
+        self.punctuation_combo.setToolTip("启用“标点转换”后，选择规则会立即对 ./txt 内已勾选的 txt 执行转换")
 
 
 
-        # 选项区
-        self.options_layout = QHBoxLayout()
+        # 选项区（按需求拆成三行）
+        self.options_layout = QVBoxLayout()
+        self.options_layout.setContentsMargins(0, 0, 0, 0)
+        self.options_layout.setSpacing(4)
+
+        # 第一行：完整输出
+        self.options_row1 = QHBoxLayout()
         self.default_output_checkbox = QCheckBox("完整输出")
         self.default_output_checkbox.setChecked(True)
+        self.options_row1.addWidget(self.default_output_checkbox)
+        self.options_row1.addStretch()
+
+        # 第二行：生成字幕 + 标点转换（启用后右侧规则解锁）
+        self.options_row2 = QHBoxLayout()
         self.srt_checkbox = QCheckBox("生成字幕")
         self.srt_checkbox.setChecked(True)
+        self.punctuation_checkbox = QCheckBox("标点转换")
+        self.punctuation_checkbox.setChecked(False)
+        self.options_row2.addWidget(self.srt_checkbox)
+        self.options_row2.addWidget(self.punctuation_checkbox)
+        self.options_row2.addWidget(self.punctuation_combo)
+        self.options_row2.addStretch()
+
+        # 第三行：分行输出（勾上后“块行数/分行规则/行字数”等解锁）
+        self.options_row3 = QHBoxLayout()
         self.extra_line_checkbox = QCheckBox("分行输出")
         self.rule_label = QLabel("分行规则:")
         self.subtitle_rule_combo = QComboBox()
         self.subtitle_rule_combo.addItem("规则1：按换行切分 (默认)", SubtitleGenerator.RULE_NEWLINE)
         self.subtitle_rule_combo.addItem("规则2：智能分句", SubtitleGenerator.RULE_SMART)
         self.subtitle_rule_combo.addItem("规则3：hanlp分句", SubtitleGenerator.RULE_HANLP)
-        self.subtitle_rule_combo.setToolTip("选择字幕切分方式")
+        self.subtitle_rule_combo.setToolTip("选择分行/字幕切分方式")
         self.line_length_label = QLabel("行字数(约):")
         self.line_length_input = QLineEdit("28")
         self.line_length_input.setValidator(QIntValidator(5, 120, self))
         self.line_length_input.setFixedWidth(40)
-        # 新增：字幕块行数设置
+        # 块行数
         self.subtitle_lines_label = QLabel("块行数:")
         self.subtitle_lines_input = QLineEdit("1")
         self.subtitle_lines_input.setValidator(QIntValidator(1, 10, self))
         self.subtitle_lines_input.setFixedWidth(40)
         self.subtitle_lines_input.setToolTip("每个字幕块包含的行数 (1-10)")
-        self.options_layout.addWidget(self.default_output_checkbox)
-        self.options_layout.addWidget(self.extra_line_checkbox)
-        self.options_layout.addWidget(self.srt_checkbox)
-        self.options_layout.addWidget(self.subtitle_lines_label)
-        self.options_layout.addWidget(self.subtitle_lines_input)
-        self.options_layout.addWidget(self.rule_label)
-        self.options_layout.addWidget(self.subtitle_rule_combo)
-        self.options_layout.addWidget(self.line_length_label)
-        self.options_layout.addWidget(self.line_length_input)
-        self.options_layout.addStretch()
+
+        self.options_row3.addWidget(self.extra_line_checkbox)
+        self.options_row3.addWidget(self.subtitle_lines_label)
+        self.options_row3.addWidget(self.subtitle_lines_input)
+        self.options_row3.addWidget(self.rule_label)
+        self.options_row3.addWidget(self.subtitle_rule_combo)
+        self.options_row3.addWidget(self.line_length_label)
+        self.options_row3.addWidget(self.line_length_input)
+        self.options_row3.addStretch()
+
+        self.options_layout.addLayout(self.options_row1)
+        self.options_layout.addLayout(self.options_row2)
+        self.options_layout.addLayout(self.options_row3)
 
         # ========== 语音参数控制 ==========
         self.voice_params_layout = QHBoxLayout()
         
         # 语速控制
         self.rate_label = QLabel("语速:")
-        self.rate_combo = QComboBox()
-        rate_options = ["-50%", "-25%", "+0%", "+25%", "+50%"]
-        self.rate_combo.addItems(rate_options)
-        self.rate_combo.setCurrentText("+0%")
+        self.rate_input = QLineEdit("0")
+        self.rate_input.setValidator(QIntValidator(-100, 100, self))
+        self.rate_input.setFixedWidth(48)
+        self.rate_suffix_label = QLabel("%")
+        self.rate_input.setToolTip("手动输入语速百分比：-100 ~ 100，对应 SSML rate=\"-10%\" / \"+10%\"")
         
         # 音调控制
         self.pitch_label = QLabel("音调:")
@@ -1730,7 +1743,8 @@ class TTSApp(QWidget):
         self.volume_combo.setCurrentText("+0%")
         
         self.voice_params_layout.addWidget(self.rate_label)
-        self.voice_params_layout.addWidget(self.rate_combo)
+        self.voice_params_layout.addWidget(self.rate_input)
+        self.voice_params_layout.addWidget(self.rate_suffix_label)
         self.voice_params_layout.addWidget(self.pitch_label)
         self.voice_params_layout.addWidget(self.pitch_combo)
         self.voice_params_layout.addWidget(self.volume_label)
@@ -1868,6 +1882,25 @@ class TTSApp(QWidget):
         self.start_button = QPushButton("开始转换")
         self.start_button.clicked.connect(self.start_tts)
 
+        # 右下角水印（显示在按钮区域内）
+        self.created_by_label = QLabel("Created by AYE")
+        self.created_by_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        try:
+            f = self.created_by_label.font()
+            f.setPointSize(max(6, int(f.pointSize() * 0.75)))
+            self.created_by_label.setFont(f)
+        except Exception:
+            pass
+        # 水印文字使用系统深灰（Dark），避免与按钮高亮底色冲突
+        try:
+            pal = QApplication.palette()
+            dark = pal.color(QPalette.Dark)
+            self.created_by_label.setStyleSheet(
+                "QLabel { color: rgb(%d,%d,%d); }" % (dark.red(), dark.green(), dark.blue())
+            )
+        except Exception:
+            pass
+
         # ========== 折叠面板结构 ==========
         self.splitter = QSplitter(Qt.Vertical)
         self.root_layout.addWidget(self.splitter)
@@ -1875,23 +1908,6 @@ class TTSApp(QWidget):
         # 设置面板（顶部）
         self.settings_box = CollapsibleBox("设置", expanded=True)
         settings_inner = QVBoxLayout(); settings_inner.setContentsMargins(8,8,8,8); settings_inner.setSpacing(6)
-        settings_inner.addWidget(self.mode_combo)
-        settings_inner.addLayout(self.punctuation_layout)
-        settings_inner.addLayout(self.options_layout)
-        
-        # 添加语音参数控制
-        settings_inner.addWidget(QLabel("<b>基础参数:</b>"))
-        settings_inner.addLayout(self.voice_params_layout)
-
-        # 开始按钮：放在语速栏（基础参数）下方
-        try:
-            self.start_button.setFont(self.settings_box.toggle_button.font())
-            self.start_button.setStyleSheet(self.settings_box.toggle_button.styleSheet())
-            self.start_button.setPalette(self.settings_box.toggle_button.palette())
-        except Exception:
-            pass
-        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        settings_inner.addWidget(self.start_button)
         
         # --- 子折叠栏：文本选择 ---
         self.text_box = CollapsibleBox("文本选择", expanded=True)
@@ -1909,6 +1925,26 @@ class TTSApp(QWidget):
         text_inner.addWidget(self.selected_texts_label)
         text_inner.addWidget(self.text_tree)
         self.text_box.setContentLayout(text_inner)
+
+        # --- 子折叠栏：语音模型 ---
+        self.voice_box = CollapsibleBox("语音模型", expanded=True)
+        # 让语音模型子折叠栏更愿意吃掉多余空间（贴底）
+        try:
+            self.voice_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
+        voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
+        voice_inner.addWidget(self.label_voice)
+        voice_inner.addWidget(self.selected_voices_label)
+        # 语音模型列表默认给一个最小高度，避免展开后空间不足
+        try:
+            self.voice_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.voice_tree.setMinimumHeight(260)
+        except Exception:
+            pass
+        voice_inner.addWidget(self.voice_tree)
+        self.voice_box.setContentLayout(voice_inner)
+
         # --- 子折叠栏：情绪控制 ---
         self.emotion_box = CollapsibleBox("情绪控制", expanded=False)
         emotion_inner = QVBoxLayout(); emotion_inner.setContentsMargins(8,8,8,8); emotion_inner.setSpacing(6)
@@ -1948,55 +1984,92 @@ class TTSApp(QWidget):
         azure_silence_layout.addStretch()
         emotion_inner.addLayout(azure_silence_layout)
         self.emotion_box.setContentLayout(emotion_inner)
-        settings_inner.addWidget(self.emotion_box)
 
-        # 情绪控制在文本选择上方
+        # --- 子折叠栏：输出设置（原“设置主栏里非子栏”的项目归入这里） ---
+        self.output_box = CollapsibleBox("输出设置", expanded=True)
+        output_inner = QVBoxLayout(); output_inner.setContentsMargins(8,8,8,8); output_inner.setSpacing(6)
+        output_inner.addWidget(self.mode_combo)
+        output_inner.addLayout(self.options_layout)
+        output_inner.addWidget(QLabel("<b>基础参数:</b>"))
+        output_inner.addLayout(self.voice_params_layout)
+        self.output_box.setContentLayout(output_inner)
+
+        # 子折叠栏布局顺序：文本选择 → 模型选择 → 情绪控制 → 输出设置 → 开始转换按钮
         settings_inner.addWidget(self.text_box)
-
-        # --- 子折叠栏：语音模型 ---
-        self.voice_box = CollapsibleBox("语音模型", expanded=True)
-        # 让语音模型子折叠栏更愿意吃掉多余空间（贴底）
-        try:
-            self.voice_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        except Exception:
-            pass
-        voice_inner = QVBoxLayout(); voice_inner.setContentsMargins(8,8,8,8); voice_inner.setSpacing(6)
-        voice_inner.addWidget(self.label_voice)
-        voice_inner.addWidget(self.selected_voices_label)
-        # 语音模型列表默认给一个最小高度，避免展开后空间不足
-        try:
-            self.voice_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.voice_tree.setMinimumHeight(260)
-        except Exception:
-            pass
-        voice_inner.addWidget(self.voice_tree)
-        self.voice_box.setContentLayout(voice_inner)
         settings_inner.addWidget(self.voice_box)
+        settings_inner.addWidget(self.emotion_box)
+        settings_inner.addWidget(self.output_box)
 
-        # 底部弹簧（可切换）：
-        # - 语音模型展开时：把额外高度优先给语音模型，让其“贴底”
-        # - 语音模型收起时：由弹簧吃掉空白，推紧内容
+        # 底部弹簧（用于把“开始转换”按钮始终顶到最底部）：
+        # - 语音模型展开时：把额外高度优先给语音模型
+        # - 语音模型收起时：由弹簧吃掉空白，避免按钮上方出现大段留白
         self._settings_bottom_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
         settings_inner.addItem(self._settings_bottom_spacer)
         self._settings_bottom_spacer_index = settings_inner.count() - 1
+
+        # 开始按钮容器：右下角显示 Created by AYE
+        self.start_button_container = QWidget()
+        start_grid = QHBoxLayout(self.start_button_container)
+        start_grid.setContentsMargins(0, 0, 0, 0)
+        start_grid.setSpacing(0)
+        # 用一个包裹层实现“右下角贴边”效果
+        start_wrap = QWidget()
+        start_wrap.setContentsMargins(0, 0, 0, 0)
+        from PySide6.QtWidgets import QGridLayout
+        g = QGridLayout(start_wrap)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setSpacing(0)
+
+        try:
+            # 字体仍跟随折叠栏标题按钮，颜色由下面的 palette 取值控制
+            self.start_button.setFont(self.settings_box.toggle_button.font())
+
+            pal = QApplication.palette()
+            accent = pal.color(QPalette.Highlight)
+            dark = pal.color(QPalette.Dark)
+            disabled_bg = pal.color(QPalette.Button)
+            try:
+                disabled_fg = pal.color(QPalette.Disabled, QPalette.ButtonText)
+            except Exception:
+                disabled_fg = pal.color(QPalette.ButtonText)
+
+            self.start_button.setStyleSheet(
+                "QPushButton {"
+                "  background-color: rgb(%d,%d,%d);"
+                "  color: rgb(%d,%d,%d);"
+                "}"
+                "QPushButton:disabled {"
+                "  background-color: rgb(%d,%d,%d);"
+                "  color: rgb(%d,%d,%d);"
+                "}"
+                % (
+                    accent.red(), accent.green(), accent.blue(),
+                    dark.red(), dark.green(), dark.blue(),
+                    disabled_bg.red(), disabled_bg.green(), disabled_bg.blue(),
+                    disabled_fg.red(), disabled_fg.green(), disabled_fg.blue(),
+                )
+            )
+        except Exception:
+            pass
+        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        g.addWidget(self.start_button, 0, 0)
+        g.addWidget(self.created_by_label, 0, 0, alignment=Qt.AlignRight | Qt.AlignBottom)
+        start_grid.addWidget(start_wrap)
+        settings_inner.addWidget(self.start_button_container)
         self.settings_box.setContentLayout(settings_inner)
         self.splitter.addWidget(self.settings_box)
 
-        # 填充占位：放在日志之前，使“日志折叠栏收起时贴底部”
-        self.bottom_filler = QWidget(); self.bottom_filler.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.splitter.addWidget(self.bottom_filler)
-
-        # 日志面板（底部）
-        self.log_box = CollapsibleBox("日志", expanded=True)
-        log_inner = QVBoxLayout(); log_inner.setContentsMargins(8,8,8,8); log_inner.setSpacing(6)
-        log_inner.addWidget(self.log_view)
-        self.log_box.setContentLayout(log_inner)
-        self.splitter.addWidget(self.log_box)
+        # 日志：固定文本栏（非折叠），通过 splitter 可上下拖动高度
+        try:
+            self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
+        self.splitter.addWidget(self.log_view)
 
         # 保存展开尺寸
         # 主 splitter：在“设置+日志均展开”时记录用户拖动比例
         self._split_ratio_settings = 0.72
-        for b in (self.settings_box, self.text_box, self.emotion_box, self.voice_box, self.log_box):
+        for b in (self.settings_box, self.text_box, self.emotion_box, self.voice_box, self.output_box):
             b.toggled.connect(self.update_splitter_sizes)
         # 子折叠栏伸缩策略：语音模型展开时优先吃掉多余高度
         for b in (self.text_box, self.emotion_box, self.voice_box):
@@ -2022,12 +2095,19 @@ class TTSApp(QWidget):
         except Exception:
             pass
 
-        # 信号连接（原有逻辑）
+        # 信号连接
         self.punctuation_combo.currentIndexChanged.connect(self.execute_punctuation_conversion)
         self.default_output_checkbox.toggled.connect(self.update_option_states)
         self.srt_checkbox.toggled.connect(self.update_option_states)
+        self.punctuation_checkbox.toggled.connect(self.update_option_states)
         self.subtitle_rule_combo.currentIndexChanged.connect(self.update_option_states)
         self.extra_line_checkbox.toggled.connect(self.update_option_states)
+
+        # 语速手动输入：变化时也刷新一次状态/保存（避免忘记保存）
+        try:
+            self.rate_input.textChanged.connect(self.save_settings)
+        except Exception:
+            pass
         self.update_option_states()
 
         self.workers = {}
@@ -2121,6 +2201,112 @@ class TTSApp(QWidget):
             self.log_view.append(f"⚠ 打开 Azure Portal 失败: {e}")
 
     # ---------- Splitter 尺寸控制 ----------
+    def _settings_all_subpanels_collapsed(self) -> bool:
+        """当设置区内的子折叠栏全部收起时，设置主栏应自动变“紧凑”，给日志让出空间。"""
+        boxes = [
+            getattr(self, "text_box", None),
+            getattr(self, "output_box", None),
+            getattr(self, "emotion_box", None),
+            getattr(self, "voice_box", None),
+        ]
+        any_expanded = False
+        for b in boxes:
+            if b is None:
+                continue
+            try:
+                any_expanded = any_expanded or bool(b.is_expanded())
+            except Exception:
+                continue
+        return not any_expanded
+
+    def _settings_compact_height_hint(self) -> int:
+        """估算设置主栏在“紧凑模式”下需要的高度（header + content sizeHint）。"""
+        try:
+            header_h = int(self.settings_box.header_height())
+        except Exception:
+            header_h = 0
+        content_h = 0
+        try:
+            lay = self.settings_box.content_area.layout() if self.settings_box is not None else None
+            if lay is not None:
+                content_h = int(lay.sizeHint().height())
+        except Exception:
+            content_h = 0
+        # 加一点余量，避免出现“刚好压到一行控件”导致抖动
+        return max(header_h, header_h + max(0, content_h) + 8)
+
+    def _apply_settings_min_heights(self):
+        """根据当前内容，为子折叠栏设置合理的最小高度，避免展开后被挤压变形。"""
+        boxes = [
+            getattr(self, "text_box", None),
+            getattr(self, "voice_box", None),
+            getattr(self, "emotion_box", None),
+            getattr(self, "output_box", None),
+        ]
+
+        for b in boxes:
+            if b is None:
+                continue
+            try:
+                header_h = int(b.header_height())
+            except Exception:
+                header_h = 0
+
+            expanded = False
+            try:
+                expanded = bool(b.is_expanded())
+            except Exception:
+                expanded = False
+
+            if not expanded:
+                try:
+                    b.setMinimumHeight(max(0, header_h))
+                except Exception:
+                    pass
+                continue
+
+            content_h = 0
+            try:
+                lay = b.content_area.layout() if getattr(b, "content_area", None) is not None else None
+                if lay is not None:
+                    try:
+                        content_h = int(lay.minimumSize().height())
+                    except Exception:
+                        content_h = 0
+                    if content_h <= 0:
+                        content_h = int(lay.sizeHint().height())
+            except Exception:
+                content_h = 0
+
+            # 预留一点余量，避免刚好压线
+            desired = max(header_h, header_h + max(0, content_h) + 8)
+            try:
+                b.setMinimumHeight(int(desired))
+            except Exception:
+                pass
+
+    def _settings_min_height_hint(self) -> int:
+        """设置主栏在当前子栏展开状态下的最小高度（用于推动日志下移）。"""
+        try:
+            header_h = int(self.settings_box.header_height())
+        except Exception:
+            header_h = 0
+
+        content_h = 0
+        try:
+            lay = self.settings_box.content_area.layout() if self.settings_box is not None else None
+            if lay is not None:
+                try:
+                    content_h = int(lay.minimumSize().height())
+                except Exception:
+                    content_h = 0
+                if content_h <= 0:
+                    content_h = int(lay.sizeHint().height())
+        except Exception:
+            content_h = 0
+
+        return max(header_h + 40, header_h + max(0, content_h) + 8)
+
     def _store_expanded_sizes(self):
         # 初始化选择提示（如果还未调用）
         if hasattr(self, 'selected_voices_label') and hasattr(self, '_update_selected_voices_label'):
@@ -2130,12 +2316,21 @@ class TTSApp(QWidget):
                 pass
         
         sizes = self.splitter.sizes()
-        if len(sizes) < 3:
+        if len(sizes) < 2:
             return
-        # sizes: [settings, filler, log]
-        if self.settings_box.is_expanded() and self.log_box.is_expanded():
+        # sizes: [settings, log]
+        if self.settings_box.is_expanded():
+            # 关键：当子折叠栏全部收起时我们会强制进入“紧凑模式”把空间让给日志。
+            # 此时不应把这个临时布局写回 _split_ratio_settings，否则一旦再展开子栏，
+            # ratio 会过小，导致设置区无法自动回弹到合适高度。
+            try:
+                if self._settings_all_subpanels_collapsed():
+                    return
+            except Exception:
+                pass
+
             set_h = max(1, int(sizes[0]))
-            log_h = max(1, int(sizes[2]))
+            log_h = max(1, int(sizes[1]))
             denom = set_h + log_h
             if denom > 0:
                 self._split_ratio_settings = float(set_h) / float(denom)
@@ -2193,14 +2388,11 @@ class TTSApp(QWidget):
         splitter = self.splitter
         total_h = max(1, splitter.height())
         header_s = self.settings_box.header_height()
-        header_l = self.log_box.header_height()
         MIN_CONTENT = 80
 
-        # 语音模型展开时，允许日志更薄一点，把空间让给设置区
-        log_min_content = MIN_CONTENT
+        # 子折叠栏动态最小高度（防变形）
         try:
-            if getattr(self, "voice_box", None) is not None and self.voice_box.is_expanded():
-                log_min_content = 20
+            self._apply_settings_min_heights()
         except Exception:
             pass
 
@@ -2213,56 +2405,54 @@ class TTSApp(QWidget):
         except Exception:
             pass
 
-        # ------- 统一规则（splitter widgets: [settings, filler, log]） -------
-        if not self.log_box.is_expanded():
-            # 日志折叠：日志标题贴底；设置尽量吃满上方空间（filler=0）
-            log_h = header_l
-            if self.settings_box.is_expanded():
-                set_h = max(header_s, total_h - log_h)
-                filler_h = 0
-            else:
-                set_h = header_s
-                filler_h = max(0, total_h - set_h - log_h)
+        # ------- 统一规则（splitter widgets: [settings, log]） -------
+        try:
+            dynamic_min = int(self._settings_min_height_hint())
+        except Exception:
+            dynamic_min = 0
+        min_set_h = max(header_s + 40, MIN_CONTENT, dynamic_min)
+        min_log_h = MIN_CONTENT
+
+        if not self.settings_box.is_expanded():
+            set_h = header_s
+            log_h = max(min_log_h, total_h - set_h)
         else:
-            # 日志展开：filler=0，剩余在“设置 vs 日志”之间按比例分配（可拖动记忆）
-            filler_h = 0
-            min_set_h = max(header_s + 40, MIN_CONTENT)
-            min_log_h = max(header_l + log_min_content, MIN_CONTENT)
+            max_set_h = max(min_set_h, total_h - min_log_h)
+            ratio = float(getattr(self, "_split_ratio_settings", 0.72) or 0.72)
+            ratio = min(0.9, max(0.1, ratio))
+            desired_set = int(total_h * ratio)
+            set_h = min(max_set_h, max(min_set_h, desired_set))
+            log_h = max(min_log_h, total_h - set_h)
+            if set_h + log_h > total_h:
+                set_h = max(min_set_h, total_h - log_h)
 
-            if not self.settings_box.is_expanded():
-                set_h = header_s
-                log_h = max(min_log_h, total_h - set_h)
-            else:
-                max_set_h = max(min_set_h, total_h - min_log_h)
-                ratio = float(getattr(self, "_split_ratio_settings", 0.72) or 0.72)
-                ratio = min(0.9, max(0.1, ratio))
-                desired_set = int(total_h * ratio)
-                set_h = min(max_set_h, max(min_set_h, desired_set))
-                log_h = max(min_log_h, total_h - set_h)
-                # 若日志被挤到低于最小，则回收设置高度
-                if set_h + log_h > total_h:
-                    set_h = max(min_set_h, total_h - log_h)
+            # 子栏全部收起：设置主栏应收缩到最小内容高度，把空间让给日志
+            try:
+                if self._settings_all_subpanels_collapsed():
+                    compact = max(min_set_h, min(self._settings_compact_height_hint(), max_set_h))
+                    if total_h - compact < min_log_h:
+                        compact = max(min_set_h, total_h - min_log_h)
+                    set_h = min(set_h, compact)
+                    log_h = max(min_log_h, total_h - set_h)
+            except Exception:
+                pass
 
-        splitter.setSizes([int(set_h), int(filler_h), int(log_h)])
+        splitter.setSizes([int(set_h), int(log_h)])
 
-        # 约束顶部/折叠固定高度（让拖动/折叠表现稳定）
+        # 约束顶部折叠固定高度（让拖动/折叠表现稳定）
         if self.settings_box.is_expanded():
             self.settings_box.setMinimumHeight(MIN_CONTENT)
             self.settings_box.setMaximumHeight(16777215)
         else:
             self.settings_box.setMinimumHeight(header_s)
             self.settings_box.setMaximumHeight(header_s)
-
-        if self.log_box.is_expanded():
-            self.log_box.setMinimumHeight(MIN_CONTENT)
-            self.log_box.setMaximumHeight(16777215)
-        else:
-            self.log_box.setMinimumHeight(header_l)
-            self.log_box.setMaximumHeight(header_l)
-
-        self.bottom_filler.setMinimumHeight(0)
-        self.bottom_filler.setMaximumHeight(16777215)
-        self._store_expanded_sizes()
+        # 紧凑模式下不记录 ratio（否则会覆盖用户拖动时的比例）
+        try:
+            is_compact_mode = bool(self.settings_box.is_expanded() and self._settings_all_subpanels_collapsed())
+        except Exception:
+            is_compact_mode = False
+        if not is_compact_mode:
+            self._store_expanded_sizes()
 
     def _enforce_splitter_constraints(self):
         """防止拖动超出合理范围：
@@ -2270,61 +2460,82 @@ class TTSApp(QWidget):
         - 展开面板 >= MIN_CONTENT
         """
         sizes = self.splitter.sizes()
-        if len(sizes) < 3:
+        if len(sizes) < 2:
             return
         header_s = self.settings_box.header_height()
-        header_l = self.log_box.header_height()
         MIN_CONTENT = 80
 
         total = sum(sizes)
-        set_h, filler_h, log_h = [int(x) for x in sizes]
+        set_h, log_h = [int(x) for x in sizes[:2]]
 
-        # 语音模型展开时，允许日志更薄一点
-        log_min_content = MIN_CONTENT
         try:
-            if getattr(self, "voice_box", None) is not None and self.voice_box.is_expanded():
-                log_min_content = 20
+            dynamic_min = int(self._settings_min_height_hint())
         except Exception:
-            pass
+            dynamic_min = 0
+        min_set_h = max(header_s + 40, MIN_CONTENT, dynamic_min)
+        min_log_h = MIN_CONTENT
 
-        if not self.log_box.is_expanded():
-            # 日志折叠：标题贴底
-            log_h = header_l
-            if self.settings_box.is_expanded():
-                set_h = max(header_s, total - log_h)
-                filler_h = 0
-            else:
-                set_h = header_s
-                filler_h = max(0, total - set_h - log_h)
+        if not self.settings_box.is_expanded():
+            set_h = header_s
+            log_h = max(min_log_h, total - set_h)
         else:
-            # 日志展开：filler=0，仅允许拖动“设置 vs 日志”分界
-            filler_h = 0
-            min_set_h = max(header_s + 40, MIN_CONTENT)
-            min_log_h = max(header_l + log_min_content, MIN_CONTENT)
+            set_h = max(min_set_h, set_h)
+            set_h = min(set_h, max(min_set_h, total - min_log_h))
+            log_h = max(min_log_h, total - set_h)
+            if set_h + log_h > total:
+                set_h = max(min_set_h, total - log_h)
 
-            if not self.settings_box.is_expanded():
-                set_h = header_s
-                log_h = max(min_log_h, total - set_h)
-            else:
-                set_h = max(min_set_h, set_h)
-                set_h = min(set_h, max(min_set_h, total - min_log_h))
-                log_h = max(min_log_h, total - set_h)
-                if set_h + log_h > total:
-                    set_h = max(min_set_h, total - log_h)
+            # 子栏全部收起：强制紧凑，允许日志占到最大
+            try:
+                if self._settings_all_subpanels_collapsed():
+                    max_set_h = max(min_set_h, total - min_log_h)
+                    compact = max(min_set_h, min(self._settings_compact_height_hint(), max_set_h))
+                    if total - compact < min_log_h:
+                        compact = max(min_set_h, total - min_log_h)
+                    set_h = min(set_h, compact)
+                    log_h = max(min_log_h, total - set_h)
+            except Exception:
+                pass
 
-            # 记录拖动比例
-            denom = max(1, set_h + log_h)
-            self._split_ratio_settings = float(set_h) / float(denom)
+            # 同上：紧凑模式下不要覆盖用户保存的 ratio
+            try:
+                is_compact_mode = bool(self._settings_all_subpanels_collapsed())
+            except Exception:
+                is_compact_mode = False
+            if not is_compact_mode:
+                denom = max(1, set_h + log_h)
+                self._split_ratio_settings = float(set_h) / float(denom)
 
-        self.splitter.setSizes([int(set_h), int(filler_h), int(log_h)])
+        self.splitter.setSizes([int(set_h), int(log_h)])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_splitter_sizes()
 
+    def _get_rate_text(self) -> str:
+        """将手动输入的语速百分比转为 SSML/内部统一格式，例如 +0%、-10%。"""
+        try:
+            raw = (self.rate_input.text() or "").strip()
+            v = int(float(raw)) if raw != "" else 0
+        except Exception:
+            v = 0
+        v = max(-100, min(100, v))
+        if str(v) != (self.rate_input.text() or "").strip():
+            try:
+                self.rate_input.setText(str(v))
+            except Exception:
+                pass
+        sign = "+" if v >= 0 else ""
+        return f"{sign}{v}%"
+
     def update_option_states(self, *_):
         default_output_enabled = self.default_output_checkbox.isChecked()
         extra_output_enabled = self.extra_line_checkbox.isChecked()
+        punctuation_enabled = False
+        try:
+            punctuation_enabled = bool(self.punctuation_checkbox.isChecked())
+        except Exception:
+            punctuation_enabled = False
 
         if not default_output_enabled and self.srt_checkbox.isChecked():
             self.srt_checkbox.blockSignals(True)
@@ -2332,20 +2543,34 @@ class TTSApp(QWidget):
             self.srt_checkbox.blockSignals(False)
 
         self.srt_checkbox.setEnabled(default_output_enabled)
-        srt_active = self.srt_checkbox.isChecked() and default_output_enabled
+        # 第二行：标点转换规则
+        try:
+            self.punctuation_combo.setEnabled(punctuation_enabled)
+        except Exception:
+            pass
+        if not punctuation_enabled:
+            # 关闭标点转换时，把规则复位为“不转换”，避免误触发
+            try:
+                self.punctuation_combo.blockSignals(True)
+                self.punctuation_combo.setCurrentIndex(0)
+            finally:
+                try:
+                    self.punctuation_combo.blockSignals(False)
+                except Exception:
+                    pass
 
-        # 字幕块行数输入框仅在生成字幕时启用
-        self.subtitle_lines_label.setEnabled(srt_active)
-        self.subtitle_lines_input.setEnabled(srt_active)
-
-        allow_rule_selection = default_output_enabled or extra_output_enabled
-        self.subtitle_rule_combo.setEnabled(allow_rule_selection)
+        # 第三行：分行输出勾选后解锁相关参数
+        line_controls_enabled = bool(extra_output_enabled)
+        self.subtitle_lines_label.setEnabled(line_controls_enabled)
+        self.subtitle_lines_input.setEnabled(line_controls_enabled)
+        self.rule_label.setEnabled(line_controls_enabled)
+        self.subtitle_rule_combo.setEnabled(line_controls_enabled)
 
         rule_supports_line_length = (
             self.subtitle_rule_combo.currentData() == SubtitleGenerator.RULE_SMART or
             self.subtitle_rule_combo.currentData() == SubtitleGenerator.RULE_HANLP
         )
-        allow_line_length = rule_supports_line_length and (srt_active or extra_output_enabled)
+        allow_line_length = bool(line_controls_enabled) and bool(rule_supports_line_length)
         self.line_length_label.setEnabled(allow_line_length)
         self.line_length_input.setEnabled(allow_line_length)
 
@@ -2716,6 +2941,12 @@ class TTSApp(QWidget):
             self.srt_checkbox.setChecked(data.get("srt_enabled", True))
             self.extra_line_checkbox.setChecked(data.get("extra_line_output", False))
 
+            # 恢复标点转换启用状态（默认关闭）
+            try:
+                self.punctuation_checkbox.setChecked(bool(data.get("punctuation_enabled", False)))
+            except Exception:
+                pass
+
             line_length = int(data.get("line_length", 28))
             self.line_length_input.setText(str(max(5, min(120, line_length))))
 
@@ -2744,7 +2975,22 @@ class TTSApp(QWidget):
                 pass
             
             # 恢复语音参数
-            self.rate_combo.setCurrentText(data.get("voice_rate", "+0%"))
+            # 兼容旧版：voice_rate 是形如 +10% 的字符串
+            try:
+                vr = str(data.get("voice_rate", "+0%") or "+0%").strip()
+                # 允许保存为纯数字/带%号
+                if vr.endswith("%"):
+                    vr = vr[:-1]
+                vr = vr.strip()
+                if vr.startswith("+"):
+                    vr = vr[1:]
+                v = int(float(vr)) if vr else 0
+            except Exception:
+                v = 0
+            try:
+                self.rate_input.setText(str(max(-100, min(100, int(v)))))
+            except Exception:
+                pass
             self.pitch_combo.setCurrentText(data.get("voice_pitch", "+0Hz"))
             self.volume_combo.setCurrentText(data.get("voice_volume", "+0%"))
             
@@ -2812,10 +3058,10 @@ class TTSApp(QWidget):
                     self.settings_box.set_expanded(bool(panel_states.get("settings", True)))
                 if "text" in panel_states and hasattr(self, 'text_box'):
                     self.text_box.set_expanded(bool(panel_states.get("text", True)))
+                if "output" in panel_states and hasattr(self, 'output_box'):
+                    self.output_box.set_expanded(bool(panel_states.get("output", True)))
                 if "voice" in panel_states:
                     self.voice_box.set_expanded(bool(panel_states.get("voice", True)))
-                if "log" in panel_states:
-                    self.log_box.set_expanded(bool(panel_states.get("log", True)))
                 # 延迟一次尺寸更新
                 from PySide6.QtCore import QTimer as _QT
                 _QT.singleShot(0, self.update_splitter_sizes)
@@ -2854,12 +3100,13 @@ class TTSApp(QWidget):
             "default_output": self.default_output_checkbox.isChecked(),
             "srt_enabled": self.srt_checkbox.isChecked(),
             "extra_line_output": self.extra_line_checkbox.isChecked(),
+            "punctuation_enabled": self.punctuation_checkbox.isChecked(),
             "line_length": max(5, min(120, line_length)),
             "subtitle_lines": max(1, min(10, subtitle_lines)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
             "tts_mode": self.mode_combo.currentData() or "azure",
-            "voice_rate": self.rate_combo.currentText(),
+            "voice_rate": self._get_rate_text(),
             "voice_pitch": self.pitch_combo.currentText(),
             "voice_volume": self.volume_combo.currentText(),
             "enable_emotion": self.enable_emotion_checkbox.isChecked(),
@@ -2872,8 +3119,8 @@ class TTSApp(QWidget):
             "panel_states": {
                 "settings": self.settings_box.is_expanded(),
                 "text": self.text_box.is_expanded(),
+                "output": self.output_box.is_expanded(),
                 "voice": self.voice_box.is_expanded(),
-                "log": self.log_box.is_expanded(),
             },
             "window_geometry": [self.x(), self.y(), self.width(), self.height()],
         })
@@ -2979,7 +3226,7 @@ class TTSApp(QWidget):
                 output_root=output_root,
                 extra_line_output=extra_line_output,
                 default_output=default_output_enabled,
-                rate=self.rate_combo.currentText(),
+                rate=self._get_rate_text(),
                 pitch=self.pitch_combo.currentText(),
                 volume=self.volume_combo.currentText(),
                 enable_emotion=self.enable_emotion_checkbox.isChecked(),
@@ -3003,10 +3250,22 @@ class TTSApp(QWidget):
             del self.workers[voice]
         
         if not self.workers:
-            self.log_view.append("\n✓ 所有任务均已完成！")
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                ts = ""
+            if ts:
+                self.log_view.append(f"\n✓ 所有任务均已完成！[{ts}]")
+            else:
+                self.log_view.append("\n✓ 所有任务均已完成！")
             self.start_button.setEnabled(True)
 
     def execute_punctuation_conversion(self):
+        try:
+            if not self.punctuation_checkbox.isChecked():
+                return
+        except Exception:
+            return
         conversion_type = self.punctuation_combo.currentData()
         
         if conversion_type == "none":
