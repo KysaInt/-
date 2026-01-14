@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Widget</class>
+ <widget class="QWidget" name="Widget">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>820</width>
+    <height>520</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Vision 工具集</string>
+  </property>
+  <property name="font">
+   <font>
+    <family>黑体</family>
+    <pointsize>10</pointsize>
+   </font>
+  </property>
+  <layout class="QHBoxLayout" name="horizontalLayout">
+   <item>
+    <widget class="QListWidget" name="navigationList">
+     <property name="maximumSize">
+      <size>
+       <width>110</width>
+       <height>16777215</height>
+      </size>
+     </property>
+     <property name="font">
+      <font>
+       <family>微软雅黑</family>
+       <pointsize>9</pointsize>
+       <bold>false</bold>
+       <italic>false</italic>
+       <underline>false</underline>
+      </font>
+     </property>
+     <item>
+      <property name="text">
+       <string>图像分析</string>
+      </property>
+     </item>
+     <item>
+      <property name="text">
+       <string>文字识别</string>
+      </property>
+     </item>
+    </widget>
+   </item>
+   <item>
+    <widget class="QStackedWidget" name="stackedWidget">
+     <property name="font">
+      <font>
+       <family>微软雅黑</family>
+       <pointsize>9</pointsize>
+      </font>
+     </property>
+    <widget class="QWidget" name="page_1">
+      <layout class="QVBoxLayout" name="verticalLayout">
+       <item>
+        <widget class="QLabel" name="label_1">
+         <property name="alignment">
+          <set>Qt::AlignCenter</set>
+         </property>
+         <property name="text">
+        <string>这里是图像分析页</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    <widget class="QWidget" name="page_2">
+      <layout class="QVBoxLayout" name="verticalLayout_2">
+       <item>
+        <widget class="QLabel" name="label_2">
+         <property name="alignment">
+          <set>Qt::AlignCenter</set>
+         </property>
+         <property name="text">
+        <string>这里是文字识别页</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>navigationList</sender>
+   <signal>currentRowChanged(int)</signal>
+   <receiver>stackedWidget</receiver>
+   <slot>setCurrentIndex(int)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>64</x>
+     <y>245</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>216</x>
+     <y>245</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>
