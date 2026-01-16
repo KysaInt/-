@@ -211,13 +211,68 @@
 
 		const header = doc.createElement("div");
 		header.className = "header";
-		header.innerHTML = `<strong>编辑器</strong><span class="sub">(实时)</span>`;
+		const headerLeft = doc.createElement("div");
+		headerLeft.innerHTML = `<strong>编辑器</strong><span class="sub">(实时)</span>`;
+		const headerRight = doc.createElement("div");
+		headerRight.style.display = "flex";
+		headerRight.style.alignItems = "center";
+		headerRight.style.gap = "8px";
+		header.appendChild(headerLeft);
+		header.appendChild(headerRight);
 		rootEl.appendChild(header);
 
 		// 确保折叠状态容器存在
 		config.ui = config.ui || {};
 		config.ui.editor = config.ui.editor || {};
 		config.ui.editor.open = config.ui.editor.open || {};
+		if (typeof config.ui.editor.collapsed !== "boolean") config.ui.editor.collapsed = false;
+
+		function setCollapsed(isCollapsed) {
+			config.ui.editor.collapsed = !!isCollapsed;
+			try {
+				doc.body.classList.toggle("editorCollapsed", !!config.ui.editor.collapsed);
+			} catch {
+				// ignore
+			}
+			try {
+				window.AYE48 && window.AYE48.ConfigStore && window.AYE48.ConfigStore.markDirty("editorCollapsed");
+			} catch {
+				// ignore
+			}
+			if (collapseBtn) {
+				collapseBtn.textContent = config.ui.editor.collapsed ? "⮜" : "⮞";
+				collapseBtn.title = config.ui.editor.collapsed ? "展开右侧面板" : "折叠隐藏右侧面板";
+			}
+			if (dockBtn) {
+				dockBtn.textContent = config.ui.editor.collapsed ? "⮜" : "⮞";
+				dockBtn.title = config.ui.editor.collapsed ? "展开右侧面板" : "折叠隐藏右侧面板";
+			}
+		}
+
+		let dockBtn = doc.getElementById("editorDock");
+		if (!dockBtn) {
+			dockBtn = doc.createElement("button");
+			dockBtn.id = "editorDock";
+			dockBtn.type = "button";
+			doc.body.appendChild(dockBtn);
+		}
+		dockBtn.addEventListener("click", (ev) => {
+			ev.preventDefault();
+			setCollapsed(!config.ui.editor.collapsed);
+		});
+
+		const collapseBtn = doc.createElement("button");
+		collapseBtn.type = "button";
+		collapseBtn.className = "reset";
+		headerRight.appendChild(collapseBtn);
+		collapseBtn.addEventListener("click", (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			setCollapsed(!config.ui.editor.collapsed);
+		});
+
+		// 初始化折叠状态
+		setCollapsed(!!config.ui.editor.collapsed);
 
 		function getOpen(key) {
 			if (!key) return false;
@@ -270,7 +325,18 @@
 		function resetToDefault(paths) {
 			const defaults = (window.AYE48 && window.AYE48.DefaultConfig) || null;
 			if (!defaults) return;
-			const list = Array.isArray(paths) ? paths : [paths];
+
+			function normalizePaths(p) {
+				// 支持两种写法：
+				// 1) 单路径：['render','engine']
+				// 2) 多路径：[[...],[...]]
+				if (!p) return [];
+				if (!Array.isArray(p)) return [p];
+				if (p.length === 0) return [];
+				return Array.isArray(p[0]) ? p : [p];
+			}
+
+			const list = normalizePaths(paths);
 			for (const p of list) {
 				const defVal = _getByPath(defaults, p);
 				if (defVal === undefined) continue;
@@ -621,14 +687,34 @@
 		bindToggle(dp, "启用", ["render", "defaultPipeline", "enabled"]);
 		bindToggle(dp, "FXAA", ["render", "defaultPipeline", "fxaaEnabled"]);
 
-		const bloom = subtree(dp, "Bloom", ["render", "defaultPipeline", "bloomEnabled"], "render.defaultPipeline.bloom");
+		const bloom = subtree(
+			dp,
+			"Bloom",
+			[
+				["render", "defaultPipeline", "bloomEnabled"],
+				["render", "defaultPipeline", "bloomThreshold"],
+				["render", "defaultPipeline", "bloomWeight"],
+				["render", "defaultPipeline", "bloomKernel"],
+				["render", "defaultPipeline", "bloomScale"],
+			],
+			"render.defaultPipeline.bloom"
+		);
 		bindToggle(bloom, "启用", ["render", "defaultPipeline", "bloomEnabled"]);
 		bindSlider(bloom, "阈值(threshold)", ["render", "defaultPipeline", "bloomThreshold"], 0, 2, 0.01, 2);
 		bindSlider(bloom, "权重(weight)", ["render", "defaultPipeline", "bloomWeight"], 0, 1, 0.01, 2);
 		bindSlider(bloom, "核(kernel)", ["render", "defaultPipeline", "bloomKernel"], 1, 256, 1, 0);
 		bindSlider(bloom, "缩放(scale)", ["render", "defaultPipeline", "bloomScale"], 0.1, 1.0, 0.05, 2);
 
-		const sharpen = subtree(dp, "Sharpen", ["render", "defaultPipeline", "sharpenEnabled"], "render.defaultPipeline.sharpen");
+		const sharpen = subtree(
+			dp,
+			"Sharpen",
+			[
+				["render", "defaultPipeline", "sharpenEnabled"],
+				["render", "defaultPipeline", "sharpenEdgeAmount"],
+				["render", "defaultPipeline", "sharpenColorAmount"],
+			],
+			"render.defaultPipeline.sharpen"
+		);
 		bindToggle(sharpen, "启用", ["render", "defaultPipeline", "sharpenEnabled"]);
 		bindSlider(sharpen, "边缘(edgeAmount)", ["render", "defaultPipeline", "sharpenEdgeAmount"], 0, 2, 0.01, 2);
 		bindSlider(sharpen, "颜色(colorAmount)", ["render", "defaultPipeline", "sharpenColorAmount"], 0, 2, 0.01, 2);
@@ -636,17 +722,36 @@
 		const ca = subtree(
 			dp,
 			"Chromatic Aberration",
-			["render", "defaultPipeline", "chromaticAberrationEnabled"],
+			[
+				["render", "defaultPipeline", "chromaticAberrationEnabled"],
+				["render", "defaultPipeline", "chromaticAberrationAmount"],
+			],
 			"render.defaultPipeline.chromaticAberration"
 		);
 		bindToggle(ca, "启用", ["render", "defaultPipeline", "chromaticAberrationEnabled"]);
 		bindSlider(ca, "强度(amount)", ["render", "defaultPipeline", "chromaticAberrationAmount"], 0, 200, 1, 0);
 
-		const grain = subtree(dp, "Grain", ["render", "defaultPipeline", "grainEnabled"], "render.defaultPipeline.grain");
+		const grain = subtree(
+			dp,
+			"Grain",
+			[["render", "defaultPipeline", "grainEnabled"], ["render", "defaultPipeline", "grainIntensity"]],
+			"render.defaultPipeline.grain"
+		);
 		bindToggle(grain, "启用", ["render", "defaultPipeline", "grainEnabled"]);
 		bindSlider(grain, "强度(intensity)", ["render", "defaultPipeline", "grainIntensity"], 0, 200, 1, 0);
 
-		const dof = subtree(dp, "Depth Of Field", ["render", "defaultPipeline", "depthOfFieldEnabled"], "render.defaultPipeline.dof");
+		const dof = subtree(
+			dp,
+			"Depth Of Field",
+			[
+				["render", "defaultPipeline", "depthOfFieldEnabled"],
+				["render", "defaultPipeline", "dofFocusDistance"],
+				["render", "defaultPipeline", "dofFStop"],
+				["render", "defaultPipeline", "dofFocalLength"],
+				["render", "defaultPipeline", "dofLensSize"],
+			],
+			"render.defaultPipeline.dof"
+		);
 		bindToggle(dof, "启用", ["render", "defaultPipeline", "depthOfFieldEnabled"]);
 		bindSlider(dof, "对焦距离(focusDistance)", ["render", "defaultPipeline", "dofFocusDistance"], 1, 2000, 1, 0);
 		bindSlider(dof, "光圈(fStop)", ["render", "defaultPipeline", "dofFStop"], 0.5, 32, 0.1, 1);

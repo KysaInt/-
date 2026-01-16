@@ -33,6 +33,8 @@
 			editor: {
 				// 右侧编辑器折叠/展开状态：默认全收起
 				open: {},
+				// 右侧编辑器整体折叠（隐藏）
+				collapsed: false,
 			},
 		},
 		camera: {
