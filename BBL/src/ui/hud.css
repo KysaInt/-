@@ -76,3 +76,227 @@ body {
 	opacity: 0.7;
 	margin-top: 6px;
 }
+
+/* 主要编辑窗口（右侧） */
+#editor {
+	position: fixed;
+	top: 12px;
+	right: 12px;
+	bottom: 12px;
+	width: 360px;
+	overflow: auto;
+	z-index: 10;
+	color: #e8eefc;
+	font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+		"Helvetica Neue", Arial;
+	background: rgba(10, 12, 18, 0.72);
+	backdrop-filter: blur(6px);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 10px;
+	padding: 10px 12px;
+}
+
+#editor .header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	margin-bottom: 6px;
+}
+
+#editor .sub {
+	opacity: 0.7;
+}
+
+#editor details {
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 8px;
+	padding: 6px 8px;
+	margin: 8px 0;
+	background: rgba(255, 255, 255, 0.03);
+}
+
+#editor summary {
+	cursor: pointer;
+	user-select: none;
+	font-weight: 600;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+/* 自定义折叠/展开箭头（更显眼） */
+#editor details > summary {
+	position: relative;
+	padding-left: 16px;
+}
+
+#editor details > summary::before {
+	content: "▸";
+	position: absolute;
+	left: 0;
+	opacity: 0.85;
+}
+
+#editor details[open] > summary::before {
+	content: "▾";
+}
+
+#editor summary .reset,
+#editor button.reset {
+	appearance: none;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: rgba(255, 255, 255, 0.06);
+	color: #e8eefc;
+	border-radius: 8px;
+	padding: 2px 6px;
+	font: inherit;
+	cursor: pointer;
+}
+
+#editor button.reset {
+	min-width: 28px;
+	text-align: center;
+}
+
+#editor button.swatch {
+	appearance: none;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 8px;
+	width: 44px;
+	height: 22px;
+	padding: 0;
+	background: rgba(255, 255, 255, 0.06);
+	cursor: pointer;
+}
+
+#editor button.swatch:hover {
+	filter: brightness(1.1);
+}
+
+/* 拾色器弹窗 */
+.colorPickerOverlay {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	background: rgba(0, 0, 0, 0.25);
+}
+
+.colorPicker {
+	position: absolute;
+	width: 520px;
+	background: rgba(10, 12, 18, 0.92);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 12px;
+	padding: 10px 12px;
+	color: #e8eefc;
+	backdrop-filter: blur(8px);
+}
+
+.cpHeader {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+}
+
+.cpClose {
+	appearance: none;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: rgba(255, 255, 255, 0.06);
+	color: #e8eefc;
+	border-radius: 8px;
+	padding: 2px 8px;
+	font: inherit;
+	cursor: pointer;
+}
+
+.cpBody {
+	display: grid;
+	grid-template-columns: 220px 1fr;
+	gap: 12px;
+	align-items: start;
+}
+
+.cpCanvas {
+	width: 220px;
+	height: 140px;
+	border-radius: 8px;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	cursor: crosshair;
+}
+
+.cpRight .row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin: 8px 0;
+}
+
+.cpPreview {
+	width: 100%;
+	height: 34px;
+	border-radius: 8px;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.cpHex {
+	width: 140px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	color: #e8eefc;
+	border-radius: 8px;
+	padding: 3px 6px;
+	font: inherit;
+}
+
+#editor summary .reset:hover,
+#editor button.reset:hover {
+	background: rgba(255, 255, 255, 0.1);
+}
+
+#editor details details {
+	margin: 6px 0;
+	background: rgba(255, 255, 255, 0.02);
+}
+
+#editor .row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin: 6px 0;
+}
+
+#editor label {
+	opacity: 0.9;
+	white-space: nowrap;
+}
+
+#editor label .val {
+	opacity: 0.85;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+		"Liberation Mono", "Courier New", monospace;
+}
+
+#editor input[type="range"] {
+	width: 170px;
+}
+
+#editor select {
+	width: 170px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	color: #e8eefc;
+	border-radius: 8px;
+	padding: 3px 6px;
+	font: inherit;
+}
+
+#editor input[type="checkbox"] {
+	width: 18px;
+	height: 18px;
+	accent-color: #8fb4ff;
+}

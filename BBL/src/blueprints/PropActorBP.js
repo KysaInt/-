@@ -40,6 +40,14 @@
 	};
 
 	PropActorBP.prototype.tick = function (dt) {
+		// 运行时同步配置（编辑器改动可立即生效）
+		const propCfg = (this.config && this.config.prop) || {};
+		if (typeof propCfg.baseHeightFactor === "number") this.baseHeightFactor = propCfg.baseHeightFactor;
+		if (typeof propCfg.rotationSpeed === "number") this.rotationSpeed = propCfg.rotationSpeed;
+		if (typeof propCfg.bobAmplitudeFactor === "number") this.bobAmplitudeFactor = propCfg.bobAmplitudeFactor;
+		if (typeof propCfg.bobFrequency === "number") this.bobFrequency = propCfg.bobFrequency;
+		this.recomputeBaseHeight();
+
 		const t = (performance.now() - this.start) / 1000;
 
 		// 自转

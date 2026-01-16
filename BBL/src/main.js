@@ -1,6 +1,7 @@
 (function () {
 	const canvas = document.getElementById("renderCanvas");
 	const hudRoot = document.getElementById("hud");
+	const editorRoot = document.getElementById("editor");
 	const config = window.AYE48.Config;
 
 	const engine = new BABYLON.Engine(canvas, true, {
@@ -10,6 +11,9 @@
 	});
 
 	const hud = window.AYE48.UI.mountHud(hudRoot, config);
+	if (editorRoot && window.AYE48.UI.mountEditorPanel) {
+		window.AYE48.UI.mountEditorPanel(editorRoot, config, hud);
+	}
 
 	if (window.location.protocol === "file:") {
 		hud.setStatus(

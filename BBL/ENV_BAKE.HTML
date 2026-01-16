@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>EXR → Babylon .env（本地烘焙）</title>
+		<style>
+			:root {
+				color-scheme: dark;
+				--bg: #0b1020;
+				--panel: rgba(255, 255, 255, 0.06);
+				--panel2: rgba(255, 255, 255, 0.09);
+				--text: rgba(255, 255, 255, 0.92);
+				--muted: rgba(255, 255, 255, 0.6);
+				--border: rgba(255, 255, 255, 0.12);
+				--accent: #7dd3fc;
+			}
+			body {
+				margin: 0;
+				font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+				background: radial-gradient(1200px 800px at 20% 10%, rgba(125, 211, 252, 0.18), transparent 55%),
+					radial-gradient(900px 700px at 80% 0%, rgba(167, 139, 250, 0.16), transparent 55%),
+					var(--bg);
+				color: var(--text);
+			}
+			main {
+				max-width: 1100px;
+				margin: 0 auto;
+				padding: 20px;
+				display: grid;
+				grid-template-columns: 420px 1fr;
+				gap: 16px;
+			}
+			@media (max-width: 980px) {
+				main {
+					grid-template-columns: 1fr;
+				}
+			}
+			.card {
+				background: var(--panel);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 16px;
+				backdrop-filter: blur(6px);
+			}
+			h1 {
+				font-size: 18px;
+				margin: 0 0 8px;
+			}
+			p {
+				margin: 0 0 10px;
+				color: var(--muted);
+				line-height: 1.5;
+			}
+			label {
+				display: block;
+				font-size: 12px;
+				color: var(--muted);
+				margin: 10px 0 6px;
+			}
+			input[type="text"],
+			select {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 10px 10px;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: var(--panel2);
+				color: var(--text);
+				outline: none;
+			}
+			.row {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 10px;
+			}
+			button {
+				cursor: pointer;
+				width: 100%;
+				padding: 10px 12px;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: rgba(125, 211, 252, 0.16);
+				color: var(--text);
+				font-weight: 600;
+			}
+			button:hover {
+				background: rgba(125, 211, 252, 0.22);
+			}
+			button.secondary {
+				background: rgba(255, 255, 255, 0.06);
+			}
+			button.secondary:hover {
+				background: rgba(255, 255, 255, 0.1);
+			}
+			.small {
+				font-size: 12px;
+				color: var(--muted);
+			}
+			#log {
+				white-space: pre-wrap;
+				font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+				font-size: 12px;
+				line-height: 1.45;
+				color: rgba(255, 255, 255, 0.82);
+				background: rgba(0, 0, 0, 0.25);
+				border: 1px solid rgba(255, 255, 255, 0.08);
+				border-radius: 10px;
+				padding: 10px;
+				min-height: 160px;
+				max-height: 360px;
+				overflow: auto;
+			}
+			#renderCanvas {
+				width: 100%;
+				height: 520px;
+				border-radius: 12px;
+				border: 1px solid var(--border);
+				background: rgba(0, 0, 0, 0.2);
+			}
+			.badge {
+				display: inline-block;
+				padding: 2px 8px;
+				border-radius: 999px;
+				font-size: 12px;
+				border: 1px solid rgba(125, 211, 252, 0.35);
+				color: rgba(125, 211, 252, 0.9);
+				background: rgba(125, 211, 252, 0.08);
+			}
+			.hr {
+				height: 1px;
+				background: rgba(255, 255, 255, 0.08);
+				margin: 12px 0;
+			}
+		</style>
+		<script src="https://cdn.babylonjs.com/babylon.js"></script>
+		<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+	</head>
+	<body>
+		<main>
+			<section class="card">
+				<h1>EXR → Babylon .env <span class="badge">本地烘焙</span></h1>
+				<p>
+					把 HDR 的 <code>.exr</code> 预过滤并打包成 Babylon 的 <code>.env</code>，运行时加载更快、体积更小。
+				</p>
+				<div class="hr"></div>
+
+				<label>输入（工程内默认 EXR）</label>
+				<div class="row">
+					<button id="btnUseProjectExr" class="secondary">使用工程内 EXR</button>
+					<button id="btnPickFile" class="secondary">选择本地文件…</button>
+				</div>
+				<input id="fileInput" type="file" accept=".exr" style="display:none" />
+				<p class="small" id="inputHint">未选择</p>
+
+				<label>预过滤尺寸（越大越清晰也越大）</label>
+				<select id="sizeSelect">
+					<option value="128">128</option>
+					<option value="256" selected>256（推荐）</option>
+					<option value="512">512</option>
+				</select>
+
+				<div class="row">
+					<div>
+						<label>编码格式（影响体积）</label>
+						<select id="imageType">
+							<option value="image/webp" selected>image/webp（更小）</option>
+							<option value="image/png">image/png（更大更稳）</option>
+						</select>
+					</div>
+					<div>
+						<label>WebP 质量</label>
+						<select id="webpQuality">
+							<option value="0.6">0.6（更小）</option>
+							<option value="0.75" selected>0.75（推荐）</option>
+							<option value="0.85">0.85（更清晰）</option>
+						</select>
+					</div>
+				</div>
+
+				<label>输出文件名</label>
+				<input id="outName" type="text" value="AboveClouds_08_256_webp.env" />
+				<p class="small">下载后请放到 <code>BBL/assets/env/</code>，然后场景会优先加载它。</p>
+
+				<div class="hr"></div>
+				<button id="btnBake">生成并下载 .env</button>
+				<p class="small">注意：需要 WebGL2 + 半浮点/浮点渲染支持；首次生成会占用一点时间。</p>
+				<div class="hr"></div>
+				<div id="log"></div>
+			</section>
+
+			<section class="card">
+				<h1>预览</h1>
+				<p>右侧只是用来预览环境贴图，不影响导出。</p>
+				<canvas id="renderCanvas"></canvas>
+			</section>
+		</main>
+
+		<script>
+			(function () {
+				const PROJECT_EXR_URL = new URL("assets/exr/AboveClouds_08_6K.exr", window.location.href).toString();
+				let currentInput = null; // { type: 'url'|'file', value: string|File }
+
+				const logEl = document.getElementById("log");
+				const inputHintEl = document.getElementById("inputHint");
+				const canvas = document.getElementById("renderCanvas");
+
+				const engine = new BABYLON.Engine(canvas, true, {
+					preserveDrawingBuffer: false,
+					stencil: false,
+				});
+				const scene = new BABYLON.Scene(engine);
+				scene.clearColor = new BABYLON.Color4(0.04, 0.06, 0.1, 1);
+				const cam = new BABYLON.ArcRotateCamera("cam", Math.PI / 2, Math.PI / 2.25, 4, BABYLON.Vector3.Zero(), scene);
+				cam.attachControl(canvas, true);
+				const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
+				hemi.intensity = 0.7;
+				BABYLON.MeshBuilder.CreateSphere("preview", { diameter: 1.2, segments: 48 }, scene);
+
+				engine.runRenderLoop(() => {
+					scene.render();
+				});
+				window.addEventListener("resize", () => engine.resize());
+
+				function log(msg) {
+					logEl.textContent += msg + "\n";
+					logEl.scrollTop = logEl.scrollHeight;
+				}
+
+				function setInput(input) {
+					currentInput = input;
+					if (!input) {
+						inputHintEl.textContent = "未选择";
+						return;
+					}
+					if (input.type === "url") {
+						inputHintEl.textContent = input.value;
+					} else {
+						inputHintEl.textContent = `${input.value.name} (${Math.round(input.value.size / 1024 / 1024)} MB)`;
+					}
+				}
+
+				async function loadExrAsCubeTexture({ url, size }) {
+					return await new Promise((resolve, reject) => {
+						try {
+							const tex = new BABYLON.EXRCubeTexture(url, scene, size, false, true, false, true);
+							tex.onLoadObservable.addOnce(() => resolve(tex));
+							BABYLON.Texture.OnTextureLoadErrorObservable.add((t) => {
+								if (t === tex) {
+									reject(new Error("EXR 加载失败"));
+								}
+							});
+						} catch (e) {
+							reject(e);
+						}
+					});
+				}
+
+				async function bake() {
+					logEl.textContent = "";
+					if (!currentInput) {
+						log("请先选择输入 EXR（工程内或本地文件）。");
+						return;
+					}
+
+					const size = Number(document.getElementById("sizeSelect").value);
+					const imageType = document.getElementById("imageType").value;
+					const webpQuality = Number(document.getElementById("webpQuality").value);
+					const outName = (document.getElementById("outName").value || "environment.env").trim();
+
+					log(`输入: ${currentInput.type === "url" ? currentInput.value : currentInput.value.name}`);
+					log(`尺寸: ${size}`);
+					log(`编码: ${imageType}${imageType === "image/webp" ? ` (q=${webpQuality})` : ""}`);
+
+					let exrUrl = null;
+					if (currentInput.type === "url") {
+						exrUrl = currentInput.value;
+					} else {
+						exrUrl = URL.createObjectURL(currentInput.value);
+					}
+
+					log("加载 EXR…");
+					const exrTex = await loadExrAsCubeTexture({ url: exrUrl, size });
+					scene.environmentTexture = exrTex;
+					scene.createDefaultSkybox(exrTex, true, 1200, 0.25);
+					log("EXR 加载完成，开始生成 .env（会读取每个 mip/face）…");
+
+					const options = {
+						imageType,
+						imageQuality: imageType === "image/webp" ? webpQuality : undefined,
+						// 默认保留 irradiance（漫反射）数据；要更极限小体积可在这里设 true
+						disableIrradianceTexture: false,
+					};
+
+					const buffer = await BABYLON.EnvironmentTextureTools.CreateEnvTextureAsync(exrTex, options);
+					log(`生成完成：${Math.round(buffer.byteLength / 1024 / 1024)} MB`);
+
+					const blob = new Blob([buffer], { type: "octet/stream" });
+					BABYLON.Tools.Download(blob, outName);
+					log("已触发下载。把文件放到 BBL/assets/env/ 后刷新 GAME.HTML 即可。");
+
+					if (currentInput.type === "file") {
+						URL.revokeObjectURL(exrUrl);
+					}
+				}
+
+				document.getElementById("btnUseProjectExr").addEventListener("click", () => {
+					setInput({ type: "url", value: PROJECT_EXR_URL });
+					logEl.textContent = "";
+					log("已选择工程内 EXR。你可以直接点“生成并下载 .env”。");
+				});
+
+				document.getElementById("btnPickFile").addEventListener("click", () => {
+					document.getElementById("fileInput").click();
+				});
+
+				document.getElementById("fileInput").addEventListener("change", (e) => {
+					const file = e.target.files && e.target.files[0];
+					if (!file) return;
+					setInput({ type: "file", value: file });
+					logEl.textContent = "";
+					log("已选择本地 EXR。你可以直接点“生成并下载 .env”。");
+				});
+
+				document.getElementById("btnBake").addEventListener("click", () => {
+					bake().catch((err) => {
+						console.error(err);
+						log(`失败：${err && err.message ? err.message : err}`);
+					});
+				});
+
+				setInput({ type: "url", value: PROJECT_EXR_URL });
+				log("提示：默认已选工程内 EXR。\n流程：生成并下载 → 放到 BBL/assets/env/ → 刷新 GAME.HTML");
+			})();
+		</script>
+	</body>
+</html>

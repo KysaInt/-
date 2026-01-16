@@ -88,6 +88,14 @@
 
 	PlayerControllerBP.prototype.tick = function (dt) {
 		const ca = this.cameraActor;
+		// 运行时同步可调参数（来自编辑器）
+		if (this.config && this.config.camera) {
+			if (typeof this.config.camera.pitchMin === "number") ca.pitchMin = this.config.camera.pitchMin;
+			if (typeof this.config.camera.pitchMax === "number") ca.pitchMax = this.config.camera.pitchMax;
+			ca.clampPitch();
+			ca.applyRotation();
+		}
+
 		const { forward, right } = ca.getForwardRight();
 
 		let move = BABYLON.Vector3.Zero();
