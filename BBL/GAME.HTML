@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>GAME - Babylon.js</title>
+		<link rel="stylesheet" href="src/ui/hud.css" />
+	</head>
+	<body>
+		<div id="hud"></div>
+		<canvas id="renderCanvas"></canvas>
+
+		<!-- Babylon.js CDN（静态网页可直接用） -->
+		<script src="https://cdn.babylonjs.com/babylon.js"></script>
+		<script src="https://cdn.babylonjs.com/materialsLibrary/babylon.gridMaterial.min.js"></script>
+		<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+
+		<!-- 项目拆分：配置 / UI / Actors / 蓝图 / Maps / 主入口 -->
+		<script src="src/config.js"></script>
+		<script src="src/ui/Hud.js"></script>
+		<script src="src/actors/CameraActor.js"></script>
+		<script src="src/actors/GroundActor.js"></script>
+		<script src="src/actors/ModelActor.js"></script>
+		<script src="src/blueprints/PlayerControllerBP.js"></script>
+		<script src="src/blueprints/PropActorBP.js"></script>
+		<script src="src/maps/ShowcaseMap.js"></script>
+		<script src="src/main.js"></script>
+	</body>
+</html>
