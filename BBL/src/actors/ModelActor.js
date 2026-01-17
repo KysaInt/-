@@ -31,6 +31,49 @@
 	}
 
 	async function loadModel(scene, shadowGen, modelUrl, setStatus) {
+		// 一次性配置 glTF 所需解码器（draco/meshopt/ktx2），避免“模型能出但材质/贴图加载失败”
+		if (!window.AYE48._decodersConfigured) {
+			window.AYE48._decodersConfigured = true;
+			try {
+				if (window.BABYLON && BABYLON.DracoCompression) {
+					BABYLON.DracoCompression.Configuration = BABYLON.DracoCompression.Configuration || {};
+					BABYLON.DracoCompression.Configuration.decoder = {
+						wasmUrl: "https://cdn.babylonjs.com/draco_wasm_wrapper_gltf.js",
+						wasmBinaryUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.wasm",
+						fallbackUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.js",
+					};
+				}
+			} catch {
+				// ignore
+			}
+			try {
+				// meshopt_decoder.js 会提供全局 MeshoptDecoder
+				if (window.BABYLON && BABYLON.MeshoptCompression && window.MeshoptDecoder) {
+					BABYLON.MeshoptCompression.Configuration = BABYLON.MeshoptCompression.Configuration || {};
+					BABYLON.MeshoptCompression.Configuration.decoder = window.MeshoptDecoder;
+				}
+			} catch {
+				// ignore
+			}
+		}
+
+		// 贴图加载错误提示（方便定位：通常是 ktx2/basisu 解码器缺失、file://、或资源路径）
+		try {
+			if (!scene.__aye48TextureErrHooked) {
+				scene.__aye48TextureErrHooked = true;
+				scene.onTextureLoadErrorObservable.add((tex) => {
+					try {
+						const name = (tex && (tex.name || tex.url)) || "<unknown>";
+						setStatus && setStatus(`贴图加载失败：${name}`);
+					} catch {
+						// ignore
+					}
+				});
+			}
+		} catch {
+			// ignore
+		}
+
 		const root = new BABYLON.TransformNode("root", scene);
 		setStatus && setStatus("正在加载 48.glb …");
 
