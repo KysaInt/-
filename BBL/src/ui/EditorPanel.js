@@ -673,15 +673,81 @@
 		// ===== 先渲染“引擎设置”（要求在第一行） =====
 		const render = section("渲染引擎 (Babylon)", ["render"], "render");
 		const eng = subtree(render, "Engine", ["render", "engine"], "render.engine");
+		// 允许 HUD/其他入口应用预设后，编辑器 UI 自动同步刷新
+		try {
+			const win = (doc && doc.defaultView) || window;
+			win.addEventListener("AYE48:renderPresetApplied", () => refreshBindings(["render"]));
+		} catch {
+			// ignore
+		}
+
+		bindSelect(
+			eng,
+			"性能模式",
+			["render", "preset"],
+			[
+				{ value: "balanced", text: "平衡" },
+				{ value: "speed", text: "速度优先" },
+				{ value: "quality", text: "质量优先" },
+			],
+			(v) => {
+				try {
+					window.AYE48 && window.AYE48.RenderPresets && window.AYE48.RenderPresets.apply(config, v);
+					window.AYE48 && window.AYE48.ConfigStore && window.AYE48.ConfigStore.markDirty("renderPreset");
+				} catch {
+					// ignore
+				}
+				refreshBindings(["render"]);
+			}
+		);
+
+		const dr = subtree(eng, "动态分辨率", ["render", "dynamicResolution"], "render.dynamicResolution");
+		bindToggle(dr, "启用", ["render", "dynamicResolution", "enabled"]);
+		bindSelect(
+			dr,
+			"目标FPS",
+			["render", "dynamicResolution", "targetFps"],
+			[
+				{ value: 30, text: "30" },
+				{ value: 60, text: "60" },
+				{ value: 90, text: "90" },
+				{ value: 120, text: "120" },
+			]
+		);
+		bindSlider(dr, "最大缩放(maxScaling)", ["render", "dynamicResolution", "maxScaling"], 1.0, 4.0, 0.05, 2);
+
 		bindSlider(
 			eng,
 			"分辨率缩放(hardwareScaling)",
 			["render", "engine", "hardwareScalingLevel"],
 			0.5,
-			2.0,
+			4.0,
 			0.05,
 			2
 		);
+
+		const sh = subtree(render, "Shadows", ["render", "shadow"], "render.shadow");
+		bindToggle(sh, "启用", ["render", "shadow", "enabled"]);
+		bindSelect(
+			sh,
+			"贴图尺寸(mapSize)",
+			["render", "shadow", "mapSize"],
+			[
+				{ value: 256, text: "256" },
+				{ value: 512, text: "512" },
+				{ value: 1024, text: "1024" },
+				{ value: 2048, text: "2048" },
+			],
+			() => {
+				try {
+					window.AYE48 && window.AYE48.ConfigStore && window.AYE48.ConfigStore.markDirty("shadow");
+				} catch {
+					// ignore
+				}
+			}
+		);
+		bindToggle(sh, "模糊(blur)", ["render", "shadow", "blurEnabled"]);
+		bindSlider(sh, "模糊核(kernel)", ["render", "shadow", "blurKernel"], 1, 64, 1, 0);
 
 		const dp = subtree(render, "DefaultRenderingPipeline", ["render", "defaultPipeline"], "render.defaultPipeline");
 		bindToggle(dp, "启用", ["render", "defaultPipeline", "enabled"]);

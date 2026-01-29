@@ -5,12 +5,18 @@
 	function mountHud(rootEl, config) {
 		const defaultMoveSpeed = Number(config.movement.moveSpeed || 6);
 		const defaultMouseTurn = Number(config.movement.mouseTurn || 0.008);
+		const defaultPreset = (config && config.render && config.render.preset) || "balanced";
 
 		rootEl.innerHTML = `
 			<div class="row">
 				<strong>${config.ui.title}</strong>
 				<span>
 					<button id="resetCamera" type="button">复位</button>
+					<select id="renderPreset" title="性能模式">
+						<option value="speed">速度</option>
+						<option value="balanced">平衡</option>
+						<option value="quality">质量</option>
+					</select>
 					<span id="fps">-- fps</span>
 				</span>
 			</div>
@@ -30,11 +36,31 @@
 			fps: rootEl.querySelector("#fps"),
 			status: rootEl.querySelector("#status"),
 			resetCamera: rootEl.querySelector("#resetCamera"),
+			renderPreset: rootEl.querySelector("#renderPreset"),
 			moveSpeed: rootEl.querySelector("#moveSpeed"),
 			moveSpeedVal: rootEl.querySelector("#moveSpeedVal"),
 			mouseTurn: rootEl.querySelector("#mouseTurn"),
 			mouseTurnVal: rootEl.querySelector("#mouseTurnVal"),
 		};
+
+		if (els.renderPreset) {
+			els.renderPreset.value = String(defaultPreset);
+			els.renderPreset.addEventListener("change", () => {
+				const v = els.renderPreset.value;
+				try {
+					window.AYE48 && window.AYE48.RenderPresets && window.AYE48.RenderPresets.apply(config, v);
+					window.AYE48 && window.AYE48.ConfigStore && window.AYE48.ConfigStore.markDirty("renderPreset");
+				} catch {
+					// ignore
+				}
+				try {
+					const ev = new Event("AYE48:renderPresetApplied");
+					window.dispatchEvent(ev);
+				} catch {
+					// ignore
+				}
+			});
+		}
 
 		function setStatus(text) {
 			els.status.textContent = text;

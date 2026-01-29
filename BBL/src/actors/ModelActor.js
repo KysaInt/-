@@ -122,7 +122,11 @@
 
 		for (const m of root.getChildMeshes(false)) {
 			if (m && m.getTotalVertices && m.getTotalVertices() > 0) {
-				shadowGen.addShadowCaster(m, true);
+				try {
+					shadowGen && shadowGen.addShadowCaster && shadowGen.addShadowCaster(m, true);
+				} catch {
+					// ignore
+				}
 			}
 		}
 

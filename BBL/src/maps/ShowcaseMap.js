@@ -285,9 +285,8 @@
 		const dir = new BABYLON.DirectionalLight("dir", new BABYLON.Vector3(-0.4, -1.0, 0.6), scene);
 		dir.intensity = 1.1;
 
-		const shadowGen = new BABYLON.ShadowGenerator(2048, dir);
-		shadowGen.useBlurExponentialShadowMap = true;
-		shadowGen.blurKernel = 16;
+		let shadowGen = null;
+		let lastShadowKey = "";
 
 		// 环境强度在 skybox/IBL 初始化里设置
 
@@ -300,16 +299,36 @@
 		let ssao2Pipeline = null;
 		let lastRenderKey = "";
 		let lastHardwareScaling = null;
+		let lastDRTick = 0;
+		let drAvgFps = 0;
+		let lastDRSave = 0;
 
 		function getRenderSettings() {
 			const r = (config && config.render) || {};
 			const e = r.engine || {};
 			const dp = r.defaultPipeline || {};
 			const ssao = r.ssao2 || {};
+			const sh = r.shadow || {};
+			const dr = r.dynamicResolution || {};
 			return {
 				engine: {
 					hardwareScalingLevel:
 						typeof e.hardwareScalingLevel === "number" ? e.hardwareScalingLevel : 1.0,
+				},
+				dynamicResolution: {
+					enabled: !!dr.enabled,
+					targetFps: typeof dr.targetFps === "number" ? dr.targetFps : 60,
+					minScaling: typeof dr.minScaling === "number" ? dr.minScaling : 0.5,
+					maxScaling: typeof dr.maxScaling === "number" ? dr.maxScaling : 4.0,
+					step: typeof dr.step === "number" ? dr.step : 0.1,
+					intervalMs: typeof dr.intervalMs === "number" ? dr.intervalMs : 250,
+					hysteresis: typeof dr.hysteresis === "number" ? dr.hysteresis : 3,
+				},
+				shadow: {
+					enabled: !!sh.enabled,
+					mapSize: typeof sh.mapSize === "number" ? sh.mapSize : 1024,
+					blurEnabled: !!sh.blurEnabled,
+					blurKernel: typeof sh.blurKernel === "number" ? sh.blurKernel : 8,
 				},
 				defaultPipeline: {
 					enabled: dp.enabled !== false,
@@ -343,6 +362,124 @@
 					fallOff: typeof ssao.fallOff === "number" ? ssao.fallOff : 0.000001,
 				},
 			};
+		}
+
+		function syncDynamicResolution(fpsNow) {
+			const r = getRenderSettings();
+			const d = r.dynamicResolution;
+			if (!d || !d.enabled) {
+				drAvgFps = 0;
+				return;
+			}
+			if (typeof fpsNow !== "number" || !Number.isFinite(fpsNow) || fpsNow <= 0) return;
+
+			const now = performance && performance.now ? performance.now() : Date.now();
+			if (now - lastDRTick < Math.max(100, d.intervalMs)) return;
+			lastDRTick = now;
+
+			// EMA 平滑，避免抖动
+			drAvgFps = drAvgFps ? drAvgFps * 0.85 + fpsNow * 0.15 : fpsNow;
+
+			// 迟滞区间：落在区间内不调整
+			const low = d.targetFps - Math.max(0, d.hysteresis);
+			const high = d.targetFps + Math.max(0, d.hysteresis);
+
+			// 注意：hardwareScalingLevel 越大越省（更糊）
+			config.render = config.render || {};
+			config.render.engine = config.render.engine || {};
+			const cur = typeof config.render.engine.hardwareScalingLevel === "number" ? config.render.engine.hardwareScalingLevel : 1.0;
+			let next = cur;
+			const step = Math.max(0.01, Math.min(1.0, d.step));
+			const minS = Math.max(0.5, Math.min(4.0, d.minScaling));
+			const maxS = Math.max(minS, Math.min(4.0, d.maxScaling));
+
+			if (drAvgFps < low) next = Math.min(maxS, cur + step);
+			else if (drAvgFps > high) next = Math.max(minS, cur - step);
+			else return;
+
+			// 限制精度，避免无限小数导致频繁触发 key
+			next = Math.round(next * 100) / 100;
+			if (next === cur) return;
+			config.render.engine.hardwareScalingLevel = next;
+
+			// 避免每次自动调节都写 localStorage：最多 2s 标记一次
+			if (now - lastDRSave > 2000) {
+				lastDRSave = now;
+				try {
+					window.AYE48 && window.AYE48.ConfigStore && window.AYE48.ConfigStore.markDirty("dynamicResolution");
+				} catch {
+					// ignore
+				}
+			}
+		}
+
+		function computeShadowKey(r) {
+			return ["v1", r.shadow.enabled, r.shadow.mapSize, r.shadow.blurEnabled, r.shadow.blurKernel].join("|");
+		}
+
+		function disposeShadowGen() {
+			try {
+				shadowGen && shadowGen.dispose && shadowGen.dispose();
+			} catch {
+				// ignore
+			}
+			shadowGen = null;
+		}
+
+		function ensureShadows(r, model) {
+			const key = computeShadowKey(r);
+			if (key === lastShadowKey) return;
+			lastShadowKey = key;
+
+			if (!r.shadow.enabled) {
+				disposeShadowGen();
+				// 关闭接收阴影（如果之前开过）
+				try {
+					if (model && model.root) {
+						for (const m of model.root.getChildMeshes(false)) {
+							m.receiveShadows = false;
+						}
+					}
+				} catch {
+					// ignore
+				}
+				return;
+			}
+
+			// 重建 shadow generator（mapSize 改变需要）
+			disposeShadowGen();
+			try {
+				const size = Math.max(256, Math.min(4096, Math.floor(r.shadow.mapSize)));
+				shadowGen = new BABYLON.ShadowGenerator(size, dir);
+				if (r.shadow.blurEnabled) {
+					shadowGen.useBlurExponentialShadowMap = true;
+					shadowGen.blurKernel = Math.max(1, Math.min(64, Math.floor(r.shadow.blurKernel)));
+				} else {
+					shadowGen.useBlurExponentialShadowMap = false;
+					// 更省的软阴影（不同版本可能没有该属性，容错）
+					try {
+						shadowGen.usePoissonSampling = true;
+					} catch {
+						// ignore
+					}
+				}
+			} catch {
+				shadowGen = null;
+			}
+
+			// 重新挂载 cast/receive
+			try {
+				if (shadowGen && model && model.root) {
+					for (const m of model.root.getChildMeshes(false)) {
+						if (m && m.getTotalVertices && m.getTotalVertices() > 0) {
+							shadowGen.addShadowCaster(m, true);
+							m.receiveShadows = true;
+						}
+					}
+				}
+			} catch {
+				// ignore
+			}
 		}
 
 		function disposePipeline(p) {
@@ -510,7 +647,7 @@
 
 		function syncRender() {
 			const r = getRenderSettings();
-			const lvl = Math.max(0.5, Math.min(2.0, r.engine.hardwareScalingLevel));
+			const lvl = Math.max(0.5, Math.min(4.0, r.engine.hardwareScalingLevel));
 			if (lastHardwareScaling !== lvl) {
 				try {
 					engine.setHardwareScalingLevel(lvl);
@@ -586,7 +723,8 @@
 		const start = performance.now();
 		scene.onBeforeRenderObservable.add(() => {
 			const dt = engine.getDeltaTime() / 1000;
-			hud.setFps(`${engine.getFps().toFixed(0)} fps`);
+			const fpsNow = engine.getFps();
+			hud.setFps(`${fpsNow.toFixed(0)} fps`);
 
 			// 环境参数实时同步
 			syncBackgroundParams();
@@ -598,7 +736,9 @@
 			}
 
 			groundActor.followCamera(cameraActor.camera.position);
+			syncDynamicResolution(fpsNow);
 			syncRender();
+			ensureShadows(getRenderSettings(), model);
 			propBP.tick(dt);
 			controller.tick(dt);
 		});
