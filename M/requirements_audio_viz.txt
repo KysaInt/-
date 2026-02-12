@@ -1,0 +1,5 @@
+﻿PySide6>=6.0.0
+pyaudiowpatch
+numpy
+scipy
+pygame
