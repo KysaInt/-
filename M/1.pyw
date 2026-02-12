@@ -34,6 +34,7 @@ CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
+    'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
@@ -49,6 +50,7 @@ _DEFAULT_CONFIG = {
     'bar_length_min': 0, 'bar_length_max': 300,
     'freq_min': 20, 'freq_max': 20000,
     'a1_time_window': 10,
+    'k2_enabled': False, 'k2_pow': 1.0,
     'master_visible': True,
     # C1 内缓慢  C2 内快速  C3 基圆  C4 外快速  C5 外缓慢
     'c1_on': True,  'c1_color': (100,180,255), 'c1_alpha': 100, 'c1_thick': 1,
@@ -136,17 +138,19 @@ class CircularVisualizerWindow:
         self.window_alpha = self.config['alpha']
         self.ui_bg_alpha = self.config['ui_alpha']
 
-        # 锁定按钮
+        # 锁定按钮（居中）
         self.lock_button_size = 50
         self.lock_button_rect = pygame.Rect(
-            self.WIDTH - self.lock_button_size - 10, 10,
+            self.WIDTH // 2 - self.lock_button_size // 2,
+            self.HEIGHT // 2 - self.lock_button_size // 2,
             self.lock_button_size, self.lock_button_size
         )
-        self.lock_button_visible = True
+        self.lock_button_visible = False
         self.lock_button_hover = False
-        self.is_locked = False
-        self.hover_timer = time.time()
+        self.is_locked = True
+        self.hover_timer = 0.0
         self.hide_delay = 2.0
+        self.lock_center_hover_radius = 80  # 悬停检测半径
 
         # 窗口拖动
         self.dragging = False
@@ -173,6 +177,7 @@ class CircularVisualizerWindow:
         self.loudness_history = []
         self.a1_value = 0.0
         self.prev_a1_value = 0.0  # 前一帧 A1，用于计算变化率
+        self.k2_value = 0.0       # K2 = sign(delta)*|delta|^pow
         self.last_status_send = time.time()
 
         # 每层独立旋转状态 {1..5}
@@ -268,14 +273,26 @@ class CircularVisualizerWindow:
                 bar_values[i] = np.mean(sub[start:end])
         return bar_values
 
-    # ── A1 ────────────────────────────────────────────────
+    # ── A1 / K2 ────────────────────────────────────────────
 
     def _update_a1(self, loudness):
         now = time.time()
         self.loudness_history.append((now, loudness))
         cutoff = now - self.a1_time_window
         self.loudness_history = [(t, l) for t, l in self.loudness_history if t >= cutoff]
+        old_a1 = self.a1_value
         self.a1_value = np.mean([l for _, l in self.loudness_history]) if self.loudness_history else 0.0
+        # K2: sign-preserving power of delta
+        delta = self.a1_value - old_a1
+        pw = self.config.get('k2_pow', 1.0)
+        self.k2_value = np.sign(delta) * (abs(delta) ** pw)
+
+    @property
+    def effective_a1(self):
+        """K2 启用时用 K2 替代 K1"""
+        if self.config.get('k2_enabled', False):
+            return self.k2_value
+        return self.a1_value
 
     def _send_status(self):
         if not self.status_queue or self.status_queue.full():
@@ -286,9 +303,23 @@ class CircularVisualizerWindow:
                     self.status_queue.get_nowait()
                 except:
                     break
-            self.status_queue.put({'a1': self.a1_value})
+            self.status_queue.put({
+                'a1': self.a1_value, 'k2': self.k2_value,
+                'pos_x': self._get_window_pos()[0],
+                'pos_y': self._get_window_pos()[1],
+            })
         except:
             pass
+
+    def _get_window_pos(self):
+        """获取当前窗口屏幕坐标"""
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            rect = wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            return (rect.left, rect.top)
+        except:
+            return (-1, -1)
 
     # ── 颜色系统 ──────────────────────────────────────────
 
@@ -401,7 +432,13 @@ class CircularVisualizerWindow:
             if self.config.get('always_on_top', True):
                 user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0040)
 
-            self._center_window()
+            # 恢复保存的位置，否则居中
+            px = self.config.get('pos_x', -1)
+            py = self.config.get('pos_y', -1)
+            if px >= 0 and py >= 0:
+                user32.SetWindowPos(hwnd, -1, px, py, 0, 0, 0x0001 | 0x0040)
+            else:
+                self._center_window()
             print("✓ 透明悬浮窗口设置成功")
         except Exception as e:
             print(f"警告: 设置透明窗口失败: {e}")
@@ -430,11 +467,17 @@ class CircularVisualizerWindow:
         except:
             pass
 
-    # ── 锁定按钮 ─────────────────────────────────────────
+    # ── 锁定按钮（居中悬停） ─────────────────────────────
 
     def _draw_lock_button(self):
         if not self.lock_button_visible:
             return
+        # 按钮始终在画面中心
+        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        self.lock_button_rect = pygame.Rect(
+            cx - self.lock_button_size // 2,
+            cy - self.lock_button_size // 2,
+            self.lock_button_size, self.lock_button_size)
         bg = pygame.Surface((self.lock_button_size, self.lock_button_size), pygame.SRCALPHA)
         bg.fill((120, 120, 120, 240) if self.lock_button_hover else (60, 60, 60, 200))
         self.screen.blit(bg, self.lock_button_rect.topleft)
@@ -443,31 +486,42 @@ class CircularVisualizerWindow:
             (200, 200, 200) if self.lock_button_hover else (100, 100, 100),
             self.lock_button_rect, 2,
         )
-        icon = pygame.font.Font(None, 32).render("🔒" if self.is_locked else "🔓", True, (255, 255, 255))
+        icon_text = "🔒" if self.is_locked else "🔓"
+        icon = pygame.font.Font(None, 32).render(icon_text, True, (255, 255, 255))
         self.screen.blit(icon, icon.get_rect(center=self.lock_button_rect.center))
 
         if self.lock_button_hover:
-            txt = "锁定" if self.is_locked else "解锁-可拖动"
+            txt = "点击解锁拖动" if self.is_locked else "点击锁定"
             surf = pygame.font.Font(None, 20).render(txt, True, (255, 255, 255))
-            r = surf.get_rect(centerx=self.lock_button_rect.centerx, top=self.lock_button_rect.bottom + 8)
+            r = surf.get_rect(centerx=cx, top=self.lock_button_rect.bottom + 8)
             hint_bg = pygame.Surface((r.width + 12, r.height + 6), pygame.SRCALPHA)
             hint_bg.fill((30, 30, 30, 220))
             self.screen.blit(hint_bg, (r.left - 6, r.top - 3))
             self.screen.blit(surf, r)
 
     def _check_lock_hover(self, pos):
-        hover_area = pygame.Rect(self.WIDTH - 120, 0, 120, 100)
-        if hover_area.collidepoint(pos):
+        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        dx, dy = pos[0] - cx, pos[1] - cy
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist <= self.lock_center_hover_radius:
             self.lock_button_visible = True
             self.hover_timer = time.time()
             self.lock_button_hover = self.lock_button_rect.collidepoint(pos)
-        elif time.time() - self.hover_timer > self.hide_delay:
-            self.lock_button_visible = False
+        else:
             self.lock_button_hover = False
+            # 锁定状态下 2 秒后自动隐藏
+            if self.is_locked and time.time() - self.hover_timer > self.hide_delay:
+                self.lock_button_visible = False
 
     def _handle_lock_click(self, pos):
+        if not self.lock_button_visible:
+            return False
         if self.lock_button_rect.collidepoint(pos):
             self.is_locked = not self.is_locked
+            if self.is_locked:
+                self.hover_timer = time.time()  # 锁定后开始隐藏倒计时
+            else:
+                self.lock_button_visible = True  # 解锁时保持可见
             return True
         return False
 
@@ -561,14 +615,16 @@ class CircularVisualizerWindow:
             return
 
         cx, cy = self.WIDTH // 2, self.HEIGHT // 2
-        base_radius = self.config.get('circle_radius', 150)
+        scale = self.config.get('global_scale', 1.0)
+        base_radius = self.config.get('circle_radius', 150) * scale
         segments = self.config.get('circle_segments', 1)
         seg_angle = 2 * np.pi / segments
 
         # ── A1 驱动半径（弹性缓动）──
         target_radius = base_radius
-        if self.config.get('circle_a1_radius', True) and self.a1_value > 0:
-            target_radius = base_radius + (self.a1_value / 1000.0) * 100
+        ea1 = self.effective_a1
+        if self.config.get('circle_a1_radius', True) and ea1 > 0:
+            target_radius = base_radius + (ea1 / 1000.0) * 100 * scale
         r_damping = self.config.get('radius_damping', 0.92)
         r_spring  = self.config.get('radius_spring', 0.15)
         r_gravity = self.config.get('radius_gravity', 0.3)
@@ -588,7 +644,7 @@ class CircularVisualizerWindow:
         self.bar_velocities *= self.damping
         self.bar_velocities += spring_forces - self.gravity * 0.1
         self.bar_heights = np.clip(self.bar_heights + self.bar_velocities, 0, 300)
-        lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max)
+        lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max) * scale
 
         # ── 峰值跟踪 ──
         decay_1 = self.config.get('c1_decay', 0.995)
@@ -597,8 +653,8 @@ class CircularVisualizerWindow:
         self.peak_outer_heights = np.maximum(lengths, self.peak_outer_heights * decay_5)
 
         # ── 每层独立旋转 ──
-        a1_delta = abs(self.a1_value - self.prev_a1_value)
-        self.prev_a1_value = self.a1_value
+        a1_delta = abs(ea1 - self.prev_a1_value)
+        self.prev_a1_value = ea1
         norm_delta = min(a1_delta / 500.0, 1.0)
         for li in range(1, 6):
             spd = self.config.get(f'c{li}_rot_speed', 1.0)
@@ -724,10 +780,18 @@ class CircularVisualizerWindow:
                         new.get('gradient_points') != old.get('gradient_points')):
                     self._update_colors()
 
-                self.lock_button_rect = pygame.Rect(
-                    self.WIDTH - self.lock_button_size - 10, 10,
-                    self.lock_button_size, self.lock_button_size,
-                )
+                # 位置同步（来自控制台手动设置）
+                new_px = new.get('pos_x', -1)
+                new_py = new.get('pos_y', -1)
+                old_px = old.get('pos_x', -1)
+                old_py = old.get('pos_y', -1)
+                if (new_px, new_py) != (old_px, old_py) and new_px >= 0 and new_py >= 0:
+                    try:
+                        hwnd = pygame.display.get_wm_info()["window"]
+                        ctypes.windll.user32.SetWindowPos(
+                            hwnd, -1, new_px, new_py, 0, 0, 0x0001 | 0x0040)
+                    except:
+                        pass
         except queue.Empty:
             pass
 
@@ -770,10 +834,11 @@ class CircularVisualizerWindow:
             self.screen.fill(self.transparent_color)
 
             # 动态颜色循环
+            ea1 = self.effective_a1
             if self.config.get('color_dynamic', False):
                 base_hue_speed = 0.001
-                if self.config.get('color_cycle_a1', True) and self.a1_value > 0:
-                    base_hue_speed *= 1.0 + (self.a1_value / 1000.0) * 2.0
+                if self.config.get('color_cycle_a1', True) and ea1 > 0:
+                    base_hue_speed *= 1.0 + (ea1 / 1000.0) * 2.0
                 spd = self.config.get('color_cycle_speed', 1.0)
                 pw = self.config.get('color_cycle_pow', 2.0)
                 self.color_cycle_hue = (self.color_cycle_hue + base_hue_speed * pow(spd, pw)) % 1.0

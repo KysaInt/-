@@ -24,6 +24,7 @@ CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
+    'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
@@ -39,6 +40,7 @@ _DEFAULT_CONFIG = {
     'bar_length_min': 0, 'bar_length_max': 300,
     'freq_min': 20, 'freq_max': 20000,
     'a1_time_window': 10,
+    'k2_enabled': False, 'k2_pow': 1.0,
     'master_visible': True,
     # C1 内缓慢  C2 内快速  C3 基圆  C4 外快速  C5 外缓慢
     'c1_on': True,  'c1_color': (100,180,255), 'c1_alpha': 100, 'c1_thick': 1,
@@ -56,7 +58,7 @@ _DEFAULT_CONFIG = {
     'c5_on': True,  'c5_color': (255,200,100), 'c5_alpha': 100, 'c5_thick': 1,
     'c5_fill': False, 'c5_fill_alpha': 30, 'c5_step': 2, 'c5_decay': 0.995,
     'c5_rot_speed': 1.0, 'c5_rot_pow': 0.5,
-    # 四层条形  b12(C1-C2) b23(C2-C3) b34(C3-C4) b45(C4-C5)
+    # 四层条形  b12(L1-L2) b23(L2-L3) b34(L3-L4) b45(L4-L5)
     'b12_on': False, 'b12_thick': 2,
     'b12_fixed': False, 'b12_fixed_len': 30, 'b12_from_start': True, 'b12_from_end': False, 'b12_from_center': False,
     'b23_on': False, 'b23_thick': 3,
@@ -200,53 +202,70 @@ class VisualizerControlUI(QWidget):
         vlay.setSpacing(2); vlay.setContentsMargins(4, 4, 4, 4)
 
         self._build_control_section(vlay)
-        self._build_visual_section(vlay)
         self._build_color_section(vlay)
         self._build_physics_section(vlay)
         self._build_window_section(vlay)
-        self._build_spectrum_section(vlay)
         self._build_contour_section(vlay)
         self._build_bars_section(vlay)
-        self._build_a1_section(vlay)
+        self._build_k1_section(vlay)
 
         vlay.addStretch()
         scroll.setWidget(inner)
         root.addWidget(scroll)
 
-    # ── 控制区 ──────────────────────────────────────────
+    # ── 控制（含基础设置） ──────────────────────────────
 
     def _build_control_section(self, vlay):
         s = _Collapsible("控制")
-        g = QVBoxLayout()
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("模式:"))
+        # ■ 总开关（最顶部）
+        self.master_visible_check = QCheckBox("总开关（显示全部）")
+        self.master_visible_check.setChecked(self.config.get('master_visible', True))
+        self.master_visible_check.toggled.connect(lambda v: self._update_cfg('master_visible', v))
+        g.addWidget(self.master_visible_check, r, 0, 1, 3); r += 1
+
+        # 模式
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("模式:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["圆形频谱"])
-        row.addWidget(self.mode_combo); row.addStretch()
-        g.addLayout(row)
+        mrow.addWidget(self.mode_combo); mrow.addStretch()
+        g.addLayout(mrow, r, 0, 1, 3); r += 1
 
-        self.toggle_btn = QPushButton("🚀 启动可视化")
-        self.toggle_btn.setMinimumHeight(40)
-        self._set_btn_start_style()
-        self.toggle_btn.clicked.connect(self._toggle)
-        g.addWidget(self.toggle_btn)
-
+        # 复位
         rrow = QHBoxLayout()
         b1 = QPushButton("📍 复位位置"); b1.setMinimumHeight(30)
         b1.clicked.connect(self._center_window); rrow.addWidget(b1)
         b2 = QPushButton("🔄 复位参数"); b2.setMinimumHeight(30)
         b2.clicked.connect(self._reset_all); rrow.addWidget(b2)
-        g.addLayout(rrow)
+        g.addLayout(rrow, r, 0, 1, 3); r += 1
 
-        s.add_layout(g)
-        vlay.addWidget(s)
+        # 整体缩放
+        g.addWidget(QLabel("缩放:"), r, 0)
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.1, 10.0); self.scale_spin.setSingleStep(0.1); self.scale_spin.setDecimals(2)
+        self.scale_spin.setValue(self.config.get('global_scale', 1.0))
+        self.scale_spin.valueChanged.connect(lambda v: self._update_cfg('global_scale', v))
+        g.addWidget(self.scale_spin, r, 1); g.addWidget(QLabel("x"), r, 2); r += 1
 
-    # ── 视觉设置 ──────────────────────────────────────────
+        # 位置 XY
+        g.addWidget(QLabel("位置:"), r, 0)
+        h_pos = QHBoxLayout(); h_pos.setSpacing(4)
+        self.pos_x_spin = QSpinBox(); self.pos_x_spin.setRange(-9999, 9999)
+        self.pos_x_spin.setValue(self.config.get('pos_x', -1))
+        self.pos_x_spin.valueChanged.connect(lambda v: self._update_cfg('pos_x', v))
+        self.pos_y_spin = QSpinBox(); self.pos_y_spin.setRange(-9999, 9999)
+        self.pos_y_spin.setValue(self.config.get('pos_y', -1))
+        self.pos_y_spin.valueChanged.connect(lambda v: self._update_cfg('pos_y', v))
+        h_pos.addWidget(QLabel("X")); h_pos.addWidget(self.pos_x_spin)
+        h_pos.addWidget(QLabel("Y")); h_pos.addWidget(self.pos_y_spin)
+        g.addLayout(h_pos, r, 1, 1, 2); r += 1
 
-    def _build_visual_section(self, vlay):
-        s = _Collapsible("通用视觉", expanded=False)
-        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
+        # ── 通用 ──
+        _sh0 = QLabel("── 通用 ──")
+        _sh0.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(_sh0, r, 0, 1, 3); r += 1
 
         g.addWidget(QLabel("宽度:"), r, 0)
         self.width_spin = QSpinBox(); self.width_spin.setRange(0, 7680); self.width_spin.setSingleStep(100)
@@ -286,6 +305,79 @@ class VisualizerControlUI(QWidget):
         self.bars_spin.setValue(self.config['num_bars'])
         self.bars_spin.valueChanged.connect(lambda v: self._update_cfg('num_bars', v))
         g.addWidget(self.bars_spin, r, 1); r += 1
+
+        # ── 频谱 ──
+        _sh = QLabel("── 频谱 ──")
+        _sh.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(_sh, r, 0, 1, 3); r += 1
+
+        g.addWidget(QLabel("半径:"), r, 0)
+        self.radius_spin = QSpinBox(); self.radius_spin.setRange(10, 2000); self.radius_spin.setSingleStep(10)
+        self.radius_spin.setValue(self.config['circle_radius'])
+        self.radius_spin.valueChanged.connect(lambda v: self._update_cfg('circle_radius', v))
+        g.addWidget(self.radius_spin, r, 1); g.addWidget(QLabel("px"), r, 2); r += 1
+
+        g.addWidget(QLabel("段数:"), r, 0)
+        self.seg_spin = QSpinBox(); self.seg_spin.setRange(1, 16)
+        self.seg_spin.setValue(self.config['circle_segments'])
+        self.seg_spin.valueChanged.connect(lambda v: self._update_cfg('circle_segments', v))
+        g.addWidget(self.seg_spin, r, 1); r += 1
+
+        hr = QHBoxLayout(); hr.setSpacing(12)
+        self.a1rot_check = QCheckBox("K1 驱动旋转")
+        self.a1rot_check.setChecked(self.config['circle_a1_rotation'])
+        self.a1rot_check.toggled.connect(lambda v: self._update_cfg('circle_a1_rotation', v))
+        self.a1rad_check = QCheckBox("K1 响应半径")
+        self.a1rad_check.setChecked(self.config['circle_a1_radius'])
+        self.a1rad_check.toggled.connect(lambda v: self._update_cfg('circle_a1_radius', v))
+        hr.addWidget(self.a1rot_check); hr.addWidget(self.a1rad_check); hr.addStretch()
+        g.addLayout(hr, r, 0, 1, 3); r += 1
+
+        _sh2 = QLabel("── 半径缓动 ──")
+        _sh2.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(_sh2, r, 0, 1, 3); r += 1
+        for lbl_t, attr, sl_range, cfg_key, default in [
+            ("阻尼:", "rdamp", (50, 99), 'radius_damping', 0.92),
+            ("弹性:", "rspring", (1, 100), 'radius_spring', 0.15),
+            ("回弹:", "rgrav", (0, 100), 'radius_gravity', 0.3),
+        ]:
+            g.addWidget(QLabel(lbl_t), r, 0)
+            sl = QSlider(Qt.Horizontal); sl.setRange(*sl_range)
+            val = self.config.get(cfg_key, default)
+            sl.setValue(int(val * 100))
+            lb = QLabel(f"{val:.2f}"); lb.setFixedWidth(42)
+            sl.valueChanged.connect(lambda v, k=cfg_key, l=lb: (l.setText(f"{v/100:.2f}"), self._update_cfg(k, v / 100)))
+            g.addWidget(sl, r, 1); g.addWidget(lb, r, 2)
+            setattr(self, f'{attr}_slider', sl); setattr(self, f'{attr}_lbl', lb)
+            r += 1
+
+        _sh3 = QLabel("── 频率 · 条形长度 ──")
+        _sh3.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(_sh3, r, 0, 1, 3); r += 1
+
+        g.addWidget(QLabel("频率:"), r, 0)
+        h_freq = QHBoxLayout(); h_freq.setSpacing(4)
+        self.freq_min_spin = QSpinBox(); self.freq_min_spin.setRange(1, 20000); self.freq_min_spin.setSingleStep(10)
+        self.freq_min_spin.setValue(self.config.get('freq_min', 20))
+        self.freq_min_spin.valueChanged.connect(lambda v: self._update_cfg('freq_min', v))
+        self.freq_max_spin = QSpinBox(); self.freq_max_spin.setRange(100, 22050); self.freq_max_spin.setSingleStep(100)
+        self.freq_max_spin.setValue(self.config.get('freq_max', 20000))
+        self.freq_max_spin.valueChanged.connect(lambda v: self._update_cfg('freq_max', v))
+        h_freq.addWidget(self.freq_min_spin); h_freq.addWidget(QLabel("~")); h_freq.addWidget(self.freq_max_spin)
+        h_freq.addWidget(QLabel("Hz"))
+        g.addLayout(h_freq, r, 1, 1, 2); r += 1
+
+        g.addWidget(QLabel("长度:"), r, 0)
+        h_len = QHBoxLayout(); h_len.setSpacing(4)
+        self.bar_len_min_spin = QSpinBox(); self.bar_len_min_spin.setRange(0, 500)
+        self.bar_len_min_spin.setValue(self.config.get('bar_length_min', 0))
+        self.bar_len_min_spin.valueChanged.connect(lambda v: self._update_cfg('bar_length_min', v))
+        self.bar_len_max_spin = QSpinBox(); self.bar_len_max_spin.setRange(1, 2000)
+        self.bar_len_max_spin.setValue(self.config.get('bar_length_max', 300))
+        self.bar_len_max_spin.valueChanged.connect(lambda v: self._update_cfg('bar_length_max', v))
+        h_len.addWidget(self.bar_len_min_spin); h_len.addWidget(QLabel("~")); h_len.addWidget(self.bar_len_max_spin)
+        h_len.addWidget(QLabel("px"))
+        g.addLayout(h_len, r, 1, 1, 2); r += 1
 
         s.add_layout(g)
         vlay.addWidget(s)
@@ -355,7 +447,7 @@ class VisualizerControlUI(QWidget):
         self.cyc_pow_lbl = QLabel(f"{self.config['color_cycle_pow']:.2f}"); self.cyc_pow_lbl.setFixedWidth(42)
         self.cyc_pow_slider.valueChanged.connect(lambda v: (self.cyc_pow_lbl.setText(f"{v/100:.2f}"), self._update_cfg('color_cycle_pow', v / 100)))
         dl.addWidget(self.cyc_pow_slider, 1, 1); dl.addWidget(self.cyc_pow_lbl, 1, 2)
-        self.cyc_a1_check = QCheckBox("受A1响度控制")
+        self.cyc_a1_check = QCheckBox("受K1响度控制")
         self.cyc_a1_check.setChecked(self.config['color_cycle_a1'])
         self.cyc_a1_check.toggled.connect(lambda v: self._update_cfg('color_cycle_a1', v))
         dl.addWidget(self.cyc_a1_check, 2, 0, 1, 3)
@@ -419,108 +511,28 @@ class VisualizerControlUI(QWidget):
         s.add_layout(g)
         vlay.addWidget(s)
 
-    # ── 频谱基础 ──────────────────────────────────────────
-
-    def _build_spectrum_section(self, vlay):
-        s = _Collapsible("频谱基础")
-        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
-
-        self.master_visible_check = QCheckBox("总开关（显示全部）")
-        self.master_visible_check.setChecked(self.config.get('master_visible', True))
-        self.master_visible_check.toggled.connect(lambda v: self._update_cfg('master_visible', v))
-        g.addWidget(self.master_visible_check, r, 0, 1, 3); r += 1
-
-        g.addWidget(QLabel("半径:"), r, 0)
-        self.radius_spin = QSpinBox(); self.radius_spin.setRange(10, 2000); self.radius_spin.setSingleStep(10)
-        self.radius_spin.setValue(self.config['circle_radius'])
-        self.radius_spin.valueChanged.connect(lambda v: self._update_cfg('circle_radius', v))
-        g.addWidget(self.radius_spin, r, 1); g.addWidget(QLabel("px"), r, 2); r += 1
-
-        g.addWidget(QLabel("段数:"), r, 0)
-        self.seg_spin = QSpinBox(); self.seg_spin.setRange(1, 16)
-        self.seg_spin.setValue(self.config['circle_segments'])
-        self.seg_spin.valueChanged.connect(lambda v: self._update_cfg('circle_segments', v))
-        g.addWidget(self.seg_spin, r, 1); r += 1
-
-        hr = QHBoxLayout(); hr.setSpacing(12)
-        self.a1rot_check = QCheckBox("A1 驱动旋转")
-        self.a1rot_check.setChecked(self.config['circle_a1_rotation'])
-        self.a1rot_check.toggled.connect(lambda v: self._update_cfg('circle_a1_rotation', v))
-        self.a1rad_check = QCheckBox("A1 响应半径")
-        self.a1rad_check.setChecked(self.config['circle_a1_radius'])
-        self.a1rad_check.toggled.connect(lambda v: self._update_cfg('circle_a1_radius', v))
-        hr.addWidget(self.a1rot_check); hr.addWidget(self.a1rad_check); hr.addStretch()
-        g.addLayout(hr, r, 0, 1, 3); r += 1
-
-        _sh = QLabel("── 半径缓动 ──")
-        _sh.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
-        g.addWidget(_sh, r, 0, 1, 3); r += 1
-        for lbl_t, attr, sl_range, cfg_key, default in [
-            ("阻尼:", "rdamp", (50, 99), 'radius_damping', 0.92),
-            ("弹性:", "rspring", (1, 100), 'radius_spring', 0.15),
-            ("回弹:", "rgrav", (0, 100), 'radius_gravity', 0.3),
-        ]:
-            g.addWidget(QLabel(lbl_t), r, 0)
-            sl = QSlider(Qt.Horizontal); sl.setRange(*sl_range)
-            val = self.config.get(cfg_key, default)
-            sl.setValue(int(val * 100))
-            lb = QLabel(f"{val:.2f}"); lb.setFixedWidth(42)
-            sl.valueChanged.connect(lambda v, k=cfg_key, l=lb: (l.setText(f"{v/100:.2f}"), self._update_cfg(k, v / 100)))
-            g.addWidget(sl, r, 1); g.addWidget(lb, r, 2)
-            setattr(self, f'{attr}_slider', sl); setattr(self, f'{attr}_lbl', lb)
-            r += 1
-
-        _sh2 = QLabel("── 频率 · 条形长度 ──")
-        _sh2.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
-        g.addWidget(_sh2, r, 0, 1, 3); r += 1
-
-        g.addWidget(QLabel("频率:"), r, 0)
-        h_freq = QHBoxLayout(); h_freq.setSpacing(4)
-        self.freq_min_spin = QSpinBox(); self.freq_min_spin.setRange(1, 20000); self.freq_min_spin.setSingleStep(10)
-        self.freq_min_spin.setValue(self.config.get('freq_min', 20))
-        self.freq_min_spin.valueChanged.connect(lambda v: self._update_cfg('freq_min', v))
-        self.freq_max_spin = QSpinBox(); self.freq_max_spin.setRange(100, 22050); self.freq_max_spin.setSingleStep(100)
-        self.freq_max_spin.setValue(self.config.get('freq_max', 20000))
-        self.freq_max_spin.valueChanged.connect(lambda v: self._update_cfg('freq_max', v))
-        h_freq.addWidget(self.freq_min_spin); h_freq.addWidget(QLabel("~")); h_freq.addWidget(self.freq_max_spin)
-        h_freq.addWidget(QLabel("Hz"))
-        g.addLayout(h_freq, r, 1, 1, 2); r += 1
-
-        g.addWidget(QLabel("长度:"), r, 0)
-        h_len = QHBoxLayout(); h_len.setSpacing(4)
-        self.bar_len_min_spin = QSpinBox(); self.bar_len_min_spin.setRange(0, 500)
-        self.bar_len_min_spin.setValue(self.config.get('bar_length_min', 0))
-        self.bar_len_min_spin.valueChanged.connect(lambda v: self._update_cfg('bar_length_min', v))
-        self.bar_len_max_spin = QSpinBox(); self.bar_len_max_spin.setRange(1, 2000)
-        self.bar_len_max_spin.setValue(self.config.get('bar_length_max', 300))
-        self.bar_len_max_spin.valueChanged.connect(lambda v: self._update_cfg('bar_length_max', v))
-        h_len.addWidget(self.bar_len_min_spin); h_len.addWidget(QLabel("~")); h_len.addWidget(self.bar_len_max_spin)
-        h_len.addWidget(QLabel("px"))
-        g.addLayout(h_len, r, 1, 1, 2); r += 1
-
-        s.add_layout(g)
-        vlay.addWidget(s)
-
     # ── 五层轮廓 ──────────────────────────────────────────
 
     def _build_contour_section(self, vlay):
-        s = _Collapsible("五层轮廓 (C1~C5)", expanded=False)
+        s = _Collapsible("五层轮廓 (L1~L5)", expanded=False)
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
         _layers = [
-            (1, "内缓慢", True, True),
-            (2, "内快速", True, False),
-            (3, "基圆",   False, False),
-            (4, "外快速", True, False),
-            (5, "外缓慢", True, True),
+            (1, "L1 内缓慢", True, True),
+            (2, "L2 内快速", True, False),
+            (3, "L3 基圆",   False, False),
+            (4, "L4 外快速", True, False),
+            (5, "L5 外缓慢", True, True),
         ]
         for li, lname, has_step, has_decay in _layers:
-            sec = _Collapsible(f"L{li} {lname}", expanded=False)
-            gl = QGridLayout(); gl.setSpacing(3); gl.setContentsMargins(0,0,0,0); rl = 0
+            hdr = QLabel(f"── {lname} ──")
+            hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+            g.addWidget(hdr, r, 0, 1, 4); r += 1
 
             chk = QCheckBox("显示")
             chk.setChecked(self.config.get(f'c{li}_on', False))
             chk.toggled.connect(lambda v, k=f'c{li}_on': self._update_cfg(k, v))
             setattr(self, f'c{li}_on_check', chk)
-            gl.addWidget(chk, rl, 0)
+            g.addWidget(chk, r, 0)
 
             cbtn = QPushButton()
             cc = self.config.get(f'c{li}_color', (255, 255, 255))
@@ -528,7 +540,7 @@ class VisualizerControlUI(QWidget):
             cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
             cbtn.clicked.connect(lambda _, i=li: self._pick_layer_color(i))
             setattr(self, f'c{li}_color_btn', cbtn)
-            gl.addWidget(cbtn, rl, 1)
+            g.addWidget(cbtn, r, 1)
 
             sp = QSpinBox(); sp.setRange(1, 20)
             sp.setValue(self.config.get(f'c{li}_thick', 2))
@@ -536,106 +548,105 @@ class VisualizerControlUI(QWidget):
             setattr(self, f'c{li}_thick_spin', sp)
             ht = QHBoxLayout()
             ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            gl.addLayout(ht, rl, 2, 1, 2); rl += 1
+            g.addLayout(ht, r, 2, 1, 2); r += 1
 
-            gl.addWidget(QLabel("透明:"), rl, 0)
+            g.addWidget(QLabel("透明:"), r, 0)
             sl_a = QSlider(Qt.Horizontal); sl_a.setRange(0, 255)
             av = self.config.get(f'c{li}_alpha', 180)
             sl_a.setValue(av)
             lb_a = QLabel(str(av)); lb_a.setFixedWidth(30)
             sl_a.valueChanged.connect(lambda v, k=f'c{li}_alpha', l=lb_a: (l.setText(str(v)), self._update_cfg(k, v)))
             setattr(self, f'c{li}_alpha_slider', sl_a)
-            gl.addWidget(sl_a, rl, 1, 1, 2); gl.addWidget(lb_a, rl, 3); rl += 1
+            g.addWidget(sl_a, r, 1, 1, 2); g.addWidget(lb_a, r, 3); r += 1
 
             fc = QCheckBox("填充")
             fc.setChecked(self.config.get(f'c{li}_fill', False))
             fc.toggled.connect(lambda v, k=f'c{li}_fill': self._update_cfg(k, v))
             setattr(self, f'c{li}_fill_check', fc)
-            gl.addWidget(fc, rl, 0)
+            g.addWidget(fc, r, 0)
             fsl = QSlider(Qt.Horizontal); fsl.setRange(0, 255)
             fv = self.config.get(f'c{li}_fill_alpha', 50)
             fsl.setValue(fv)
             flb = QLabel(str(fv)); flb.setFixedWidth(30)
             fsl.valueChanged.connect(lambda v, k=f'c{li}_fill_alpha', l=flb: (l.setText(str(v)), self._update_cfg(k, v)))
             setattr(self, f'c{li}_fill_alpha_slider', fsl)
-            gl.addWidget(fsl, rl, 1, 1, 2); gl.addWidget(flb, rl, 3); rl += 1
+            g.addWidget(fsl, r, 1, 1, 2); g.addWidget(flb, r, 3); r += 1
 
             if has_step:
-                gl.addWidget(QLabel("间隔:"), rl, 0)
+                g.addWidget(QLabel("间隔:"), r, 0)
                 ssp = QSpinBox(); ssp.setRange(1, 32)
                 ssp.setValue(self.config.get(f'c{li}_step', 2))
                 ssp.valueChanged.connect(lambda v, k=f'c{li}_step': self._update_cfg(k, v))
                 setattr(self, f'c{li}_step_spin', ssp)
-                gl.addWidget(ssp, rl, 1); rl += 1
+                g.addWidget(ssp, r, 1); r += 1
 
             if has_decay:
-                gl.addWidget(QLabel("衰减:"), rl, 0)
+                g.addWidget(QLabel("衰减:"), r, 0)
                 dsl = QSlider(Qt.Horizontal); dsl.setRange(900, 1000)
                 dv = self.config.get(f'c{li}_decay', 0.995)
                 dsl.setValue(int(dv * 1000))
                 dlb = QLabel(f"{dv:.3f}"); dlb.setFixedWidth(42)
                 dsl.valueChanged.connect(lambda v, k=f'c{li}_decay', l=dlb: (l.setText(f"{v/1000:.3f}"), self._update_cfg(k, v / 1000)))
                 setattr(self, f'c{li}_decay_slider', dsl)
-                gl.addWidget(dsl, rl, 1, 1, 2); gl.addWidget(dlb, rl, 3); rl += 1
+                g.addWidget(dsl, r, 1, 1, 2); g.addWidget(dlb, r, 3); r += 1
 
-            gl.addWidget(QLabel("转速:"), rl, 0)
+            g.addWidget(QLabel("转速:"), r, 0)
             rsl = QSlider(Qt.Horizontal); rsl.setRange(-500, 500)
             rv = self.config.get(f'c{li}_rot_speed', 1.0)
             rsl.setValue(int(rv * 100))
             rlb = QLabel(f"{rv:.2f}"); rlb.setFixedWidth(42)
             rsl.valueChanged.connect(lambda v, k=f'c{li}_rot_speed', l=rlb: (l.setText(f"{v/100:.2f}"), self._update_cfg(k, v / 100)))
             setattr(self, f'c{li}_rot_speed_slider', rsl)
-            gl.addWidget(rsl, rl, 1, 1, 2); gl.addWidget(rlb, rl, 3); rl += 1
+            g.addWidget(rsl, r, 1, 1, 2); g.addWidget(rlb, r, 3); r += 1
 
-            gl.addWidget(QLabel("pow:"), rl, 0)
+            g.addWidget(QLabel("pow:"), r, 0)
             psl = QSlider(Qt.Horizontal); psl.setRange(-300, 300)
             pv = self.config.get(f'c{li}_rot_pow', 0.5)
             psl.setValue(int(pv * 100))
             plb = QLabel(f"{pv:.2f}"); plb.setFixedWidth(42)
             psl.valueChanged.connect(lambda v, k=f'c{li}_rot_pow', l=plb: (l.setText(f"{v/100:.2f}"), self._update_cfg(k, v / 100)))
             setattr(self, f'c{li}_rot_pow_slider', psl)
-            gl.addWidget(psl, rl, 1, 1, 2); gl.addWidget(plb, rl, 3); rl += 1
+            g.addWidget(psl, r, 1, 1, 2); g.addWidget(plb, r, 3); r += 1
 
-            sec.add_layout(gl)
-            s.add_widget(sec)
+        s.add_layout(g)
         vlay.addWidget(s)
 
     # ── 四层条形 ──────────────────────────────────────────
 
     def _build_bars_section(self, vlay):
         s = _Collapsible("四层条形 (B12~B45)", expanded=False)
-        for key, bname in [('b12', 'C1-C2 间'), ('b23', 'C2-C3 间'),
-                           ('b34', 'C3-C4 间'), ('b45', 'C4-C5 间')]:
-            sec = _Collapsible(f"{bname}", expanded=False)
-            gl = QGridLayout(); gl.setSpacing(3); gl.setContentsMargins(0,0,0,0); rl = 0
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
+        for key, bname in [('b12', 'L1-L2 间'), ('b23', 'L2-L3 间'),
+                           ('b34', 'L3-L4 间'), ('b45', 'L4-L5 间')]:
+            hdr = QLabel(f"── {bname} ──")
+            hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+            g.addWidget(hdr, r, 0, 1, 3); r += 1
 
             chk = QCheckBox("显示")
             chk.setChecked(self.config.get(f'{key}_on', False))
             chk.toggled.connect(lambda v, k=f'{key}_on': self._update_cfg(k, v))
             setattr(self, f'{key}_on_check', chk)
-            gl.addWidget(chk, rl, 0)
+            g.addWidget(chk, r, 0)
             sp = QSpinBox(); sp.setRange(1, 20)
             sp.setValue(self.config.get(f'{key}_thick', 3))
             sp.valueChanged.connect(lambda v, k=f'{key}_thick': self._update_cfg(k, v))
             setattr(self, f'{key}_thick_spin', sp)
             ht = QHBoxLayout()
             ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            gl.addLayout(ht, rl, 1, 1, 2); rl += 1
+            g.addLayout(ht, r, 1, 1, 2); r += 1
 
-            # 固定长度
             fchk = QCheckBox("固定长度")
             fchk.setChecked(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_fixed_check', fchk)
-            gl.addWidget(fchk, rl, 0)
+            g.addWidget(fchk, r, 0)
             fsp = QSpinBox(); fsp.setRange(1, 500)
             fsp.setValue(self.config.get(f'{key}_fixed_len', 30))
             fsp.valueChanged.connect(lambda v, k=f'{key}_fixed_len': self._update_cfg(k, v))
             setattr(self, f'{key}_fixed_len_spin', fsp)
             fh = QHBoxLayout()
             fh.addWidget(fsp); fh.addWidget(QLabel("px"))
-            gl.addLayout(fh, rl, 1, 1, 2); rl += 1
+            g.addLayout(fh, r, 1, 1, 2); r += 1
 
-            # 三模式复选框（仅固定长度启用时可用）
             mode_w = QWidget()
             ml = QHBoxLayout(mode_w); ml.setContentsMargins(10,0,0,0); ml.setSpacing(8)
             cs = QCheckBox("首端")
@@ -653,37 +664,49 @@ class VisualizerControlUI(QWidget):
             ml.addWidget(cs); ml.addWidget(ce); ml.addWidget(cc)
             mode_w.setVisible(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_mode_widget', mode_w)
-            gl.addWidget(mode_w, rl, 0, 1, 3); rl += 1
+            g.addWidget(mode_w, r, 0, 1, 3); r += 1
 
             fchk.toggled.connect(lambda v, k=key, w=mode_w: (self._update_cfg(f'{k}_fixed', v), w.setVisible(v)))
 
-            sec.add_layout(gl)
-            s.add_widget(sec)
+        s.add_layout(g)
         vlay.addWidget(s)
 
-    # ── A1 响度监测 ──────────────────────────────────────────
+    # ── 高级控制 ──────────────────────────────────────────
 
-    def _build_a1_section(self, vlay):
-        s = _Collapsible("A1 响度监测", expanded=False)
-        g = QVBoxLayout()
+    def _build_k1_section(self, vlay):
+        s = _Collapsible("高级控制", expanded=False)
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
 
-        vrow = QHBoxLayout()
-        vrow.addWidget(QLabel("当前 A1:"))
+        # K1 当前值 + 时间窗口
+        g.addWidget(QLabel("K1:"), r, 0)
         self.a1_lbl = QLabel("0.00")
-        self.a1_lbl.setStyleSheet(
-            "QLabel{font-size:18px;font-weight:bold;color:#0080ff;"
-            "padding:6px;background:#f0f0f0;border-radius:4px;}")
-        vrow.addWidget(self.a1_lbl); vrow.addStretch()
-        g.addLayout(vrow)
-
-        trow = QHBoxLayout()
-        trow.addWidget(QLabel("窗口:"))
+        g.addWidget(self.a1_lbl, r, 1)
+        g.addWidget(QLabel("窗口:"), r, 2)
         self.a1_spin = QDoubleSpinBox()
         self.a1_spin.setRange(0.01, 60.0); self.a1_spin.setSingleStep(0.1); self.a1_spin.setDecimals(2)
         self.a1_spin.setValue(self.config['a1_time_window']); self.a1_spin.setSuffix(" 秒")
         self.a1_spin.valueChanged.connect(lambda v: self._update_cfg('a1_time_window', v))
-        trow.addWidget(self.a1_spin); trow.addStretch()
-        g.addLayout(trow)
+        g.addWidget(self.a1_spin, r, 3); r += 1
+
+        # K2 启用
+        _sh_k2 = QLabel("── K2 (差分幂) ──")
+        _sh_k2.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(_sh_k2, r, 0, 1, 4); r += 1
+
+        self.k2_check = QCheckBox("启用 K2 替代 K1")
+        self.k2_check.setChecked(self.config.get('k2_enabled', False))
+        self.k2_check.toggled.connect(lambda v: self._update_cfg('k2_enabled', v))
+        g.addWidget(self.k2_check, r, 0, 1, 2)
+        g.addWidget(QLabel("K2:"), r, 2)
+        self.k2_lbl = QLabel("0.00")
+        g.addWidget(self.k2_lbl, r, 3); r += 1
+
+        g.addWidget(QLabel("幂次:"), r, 0)
+        self.k2_pow_spin = QDoubleSpinBox()
+        self.k2_pow_spin.setRange(0.01, 10.0); self.k2_pow_spin.setSingleStep(0.1); self.k2_pow_spin.setDecimals(2)
+        self.k2_pow_spin.setValue(self.config.get('k2_pow', 1.0))
+        self.k2_pow_spin.valueChanged.connect(lambda v: self._update_cfg('k2_pow', v))
+        g.addWidget(self.k2_pow_spin, r, 1); r += 1
 
         s.add_layout(g)
         vlay.addWidget(s)
@@ -776,12 +799,6 @@ class VisualizerControlUI(QWidget):
     #  进程管理
     # ═══════════════════════════════════════════════════════
 
-    def _toggle(self):
-        if self.viz_process and self.viz_process.is_alive():
-            self._stop_visualizer()
-        else:
-            self._start_visualizer()
-
     def _start_visualizer(self):
         if self.viz_process and self.viz_process.is_alive():
             return
@@ -801,8 +818,6 @@ class VisualizerControlUI(QWidget):
                 QMessageBox.warning(self, "错误", "可视化进程启动失败")
                 return
 
-            self.toggle_btn.setText("⏹️ 停止可视化")
-            self._set_btn_stop_style()
             self.status_timer.start(100)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"启动失败: {e}")
@@ -818,20 +833,6 @@ class VisualizerControlUI(QWidget):
         self.viz_process = None
         self.config_queue = None
         self.status_queue = None
-        self.toggle_btn.setText("🚀 启动可视化")
-        self._set_btn_start_style()
-
-    def _set_btn_start_style(self):
-        self.toggle_btn.setStyleSheet("""
-            QPushButton { font-size:14pt; font-weight:bold; background-color:#4CAF50; color:white; border-radius:5px; }
-            QPushButton:hover { background-color:#45a049; }
-        """)
-
-    def _set_btn_stop_style(self):
-        self.toggle_btn.setStyleSheet("""
-            QPushButton { font-size:14pt; font-weight:bold; background-color:#f44336; color:white; border-radius:5px; }
-            QPushButton:hover { background-color:#da190b; }
-        """)
 
     def _center_window(self):
         if not self.viz_process or not self.viz_process.is_alive():
@@ -851,19 +852,23 @@ class VisualizerControlUI(QWidget):
         d = self.config
 
         # 基础 UI
+        self.master_visible_check.setChecked(True)
+        self.scale_spin.setValue(1.0)
+        self.pos_x_spin.setValue(-1); self.pos_y_spin.setValue(-1)
         self.width_spin.setValue(0); self.height_spin.setValue(0)
         self.bars_spin.setValue(64); self.smooth_slider.setValue(70)
         self.alpha_slider.setValue(255); self.ui_alpha_slider.setValue(180)
         self.color_combo.setCurrentIndex(0)
         self.damp_slider.setValue(85); self.spring_slider.setValue(30); self.grav_slider.setValue(50)
         self.hmin_spin.setValue(0); self.hmax_spin.setValue(500)
-        self.master_visible_check.setChecked(True)
         self.radius_spin.setValue(150); self.seg_spin.setValue(1)
         self.a1rot_check.setChecked(True); self.a1rad_check.setChecked(True)
         self.rdamp_slider.setValue(92); self.rspring_slider.setValue(15); self.rgrav_slider.setValue(30)
         self.freq_min_spin.setValue(20); self.freq_max_spin.setValue(20000)
         self.bar_len_min_spin.setValue(0); self.bar_len_max_spin.setValue(300)
         self.a1_spin.setValue(10.0)
+        self.k2_check.setChecked(False)
+        self.k2_pow_spin.setValue(1.0)
         self.trans_check.setChecked(True); self.top_check.setChecked(True)
 
         # 五层轮廓
@@ -906,6 +911,15 @@ class VisualizerControlUI(QWidget):
                 if 'a1' in st:
                     self.current_a1 = st['a1']
                     self.a1_lbl.setText(f"{self.current_a1:.2f}")
+                if 'k2' in st:
+                    self.k2_lbl.setText(f"{st['k2']:.2f}")
+                if 'pos_x' in st and 'pos_y' in st:
+                    self.pos_x_spin.blockSignals(True)
+                    self.pos_y_spin.blockSignals(True)
+                    self.pos_x_spin.setValue(st['pos_x'])
+                    self.pos_y_spin.setValue(st['pos_y'])
+                    self.pos_x_spin.blockSignals(False)
+                    self.pos_y_spin.blockSignals(False)
         except:
             pass
 
@@ -939,16 +953,18 @@ def main():
     mp.set_start_method('spawn', force=True)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setStyleSheet("""
-        QCheckBox::indicator { width: 15px; height: 15px; border-radius: 2px; }
-        QCheckBox::indicator:unchecked {
-            background-color: #e8e8e8;
-            border: 1px solid #aaa;
-        }
-        QCheckBox::indicator:checked {
-            background-color: #2d2d2d;
-            border: 1px solid #555;
-        }
+    pal = app.palette()
+    _hi = pal.color(QPalette.ColorRole.Highlight)
+    app.setStyleSheet(f"""
+        QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 2px; }}
+        QCheckBox::indicator:unchecked {{
+            background-color: #bbb;
+            border: 1px solid #888;
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {_hi.name()};
+            border: 1px solid {_hi.darker(120).name()};
+        }}
     """)
     w = VisualizerControlUI()
     w.show()
