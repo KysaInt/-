@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import time
+import random
 import multiprocessing as mp
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
     QInputDialog,
     QFrame, QMessageBox, QColorDialog, QScrollArea,
+    QTreeWidget, QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor, QPalette
@@ -70,6 +72,9 @@ _DEFAULT_CONFIG = {
     'b34_fixed': False, 'b34_fixed_len': 30, 'b34_from_start': True, 'b34_from_end': False, 'b34_from_center': False,
     'b45_on': False, 'b45_thick': 2,
     'b45_fixed': False, 'b45_fixed_len': 30, 'b45_from_start': True, 'b45_from_end': False, 'b45_from_center': False,
+    'random_checked': [],
+    'preset_auto_switch': False,
+    'preset_switch_interval': 10,
 }
 
 
@@ -132,6 +137,9 @@ class VisualizerControlUI(QWidget):
 
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
+
+        self.preset_timer = QTimer()
+        self.preset_timer.timeout.connect(self._auto_switch_preset)
 
         self._init_ui()
         self._refresh_preset_list()
@@ -219,6 +227,7 @@ class VisualizerControlUI(QWidget):
         self._build_contour_section(vlay)
         self._build_bars_section(vlay)
         self._build_k1_section(vlay)
+        self._build_random_section(vlay)
 
         vlay.addStretch()
         scroll.setWidget(inner)
@@ -418,8 +427,28 @@ class VisualizerControlUI(QWidget):
         b_reload.clicked.connect(self._refresh_preset_list)
         g.addWidget(b_reload, 1, 1)
 
+        # 自动随机切换预设
+        self.preset_auto_check = QCheckBox("🔀 自动随机切换")
+        self.preset_auto_check.setChecked(self.config.get('preset_auto_switch', False))
+        self.preset_auto_check.toggled.connect(self._on_preset_auto_toggled)
+        g.addWidget(self.preset_auto_check, 2, 0, 1, 2)
+
+        h_interval = QHBoxLayout(); h_interval.setSpacing(4)
+        h_interval.addWidget(QLabel("间隔:"))
+        self.preset_interval_spin = QSpinBox()
+        self.preset_interval_spin.setRange(1, 3600)
+        self.preset_interval_spin.setSuffix(" 秒")
+        self.preset_interval_spin.setValue(self.config.get('preset_switch_interval', 10))
+        self.preset_interval_spin.valueChanged.connect(self._on_preset_interval_changed)
+        h_interval.addWidget(self.preset_interval_spin)
+        g.addLayout(h_interval, 2, 2, 1, 2)
+
         s.add_layout(g)
         vlay.addWidget(s)
+
+        # 如果之前已启用，启动定时器
+        if self.config.get('preset_auto_switch', False):
+            self.preset_timer.start(self.config.get('preset_switch_interval', 10) * 1000)
 
     def _ensure_presets_dir(self):
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -448,6 +477,28 @@ class VisualizerControlUI(QWidget):
     def _on_preset_changed(self, _idx):
         self._load_selected_preset(show_message=False)
 
+    def _on_preset_auto_toggled(self, v):
+        self._update_cfg('preset_auto_switch', v)
+        if v:
+            interval = self.preset_interval_spin.value()
+            self.preset_timer.start(interval * 1000)
+        else:
+            self.preset_timer.stop()
+
+    def _on_preset_interval_changed(self, v):
+        self._update_cfg('preset_switch_interval', v)
+        if self.preset_auto_check.isChecked():
+            self.preset_timer.start(v * 1000)
+
+    def _auto_switch_preset(self):
+        count = self.preset_combo.count()
+        if count < 2:
+            return
+        current = self.preset_combo.currentIndex()
+        candidates = [i for i in range(count) if i != current]
+        idx = random.choice(candidates)
+        self.preset_combo.setCurrentIndex(idx)
+
     def _save_preset_as(self):
         name, ok = QInputDialog.getText(self, "保存预设", "请输入预设名称:")
         if not ok:
@@ -470,8 +521,9 @@ class VisualizerControlUI(QWidget):
                 return
 
         try:
+            save_data = {k: v for k, v in self.config.items() if k not in ('pos_x', 'pos_y')}
             with open(fp, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
+                json.dump(save_data, f, indent=2, ensure_ascii=False)
             self._refresh_preset_list()
             idx = self.preset_combo.findText(safe_name)
             if idx >= 0:
@@ -489,6 +541,9 @@ class VisualizerControlUI(QWidget):
                 data = json.load(f)
             cfg = _get_defaults()
             cfg.update(data)
+            # 保留当前位置，不用预设中的
+            cfg['pos_x'] = self.config.get('pos_x', -1)
+            cfg['pos_y'] = self.config.get('pos_y', -1)
             self._apply_config_to_ui(cfg)
             if show_message:
                 QMessageBox.information(self, "成功", f"已加载预设: {Path(fp).stem}")
@@ -824,6 +879,186 @@ class VisualizerControlUI(QWidget):
         s.add_layout(g)
         vlay.addWidget(s)
 
+    # ── 随机化 ──────────────────────────────────────────
+
+    def _build_random_section(self, vlay):
+        s = _Collapsible("🎲 随机", expanded=False)
+        v = QVBoxLayout()
+
+        btn_row = QHBoxLayout()
+        btn_rand = QPushButton("🎲 随机化选中项")
+        btn_rand.setMinimumHeight(30)
+        btn_rand.clicked.connect(self._randomize_selected)
+        btn_row.addWidget(btn_rand)
+        btn_all = QPushButton("全选")
+        btn_all.clicked.connect(lambda: self._set_all_random_checks(True))
+        btn_row.addWidget(btn_all)
+        btn_none = QPushButton("全不选")
+        btn_none.clicked.connect(lambda: self._set_all_random_checks(False))
+        btn_row.addWidget(btn_none)
+        v.addLayout(btn_row)
+
+        self.random_tree = QTreeWidget()
+        self.random_tree.setHeaderHidden(True)
+        self.random_tree.setMinimumHeight(300)
+
+        saved_checks = set(self.config.get('random_checked', []))
+        categories = self._get_randomizable_props()
+        for cat_name, props in categories:
+            cat_item = QTreeWidgetItem(self.random_tree, [cat_name])
+            cat_item.setFlags(cat_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
+            cat_item.setCheckState(0, Qt.Unchecked)
+            for prop_def in props:
+                child = QTreeWidgetItem(cat_item, [prop_def[0]])
+                child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.Checked if prop_def[1] in saved_checks else Qt.Unchecked)
+                child.setData(0, Qt.UserRole, prop_def)
+
+        self.random_tree.expandAll()
+        self.random_tree.itemChanged.connect(self._on_random_tree_changed)
+        v.addWidget(self.random_tree)
+        s.add_layout(v)
+        vlay.addWidget(s)
+
+    @staticmethod
+    def _get_randomizable_props():
+        props = [
+            ("控制 · 通用", [
+                ("总开关", "master_visible", "bool"),
+                ("缩放", "global_scale", "float", 0.1, 5.0),
+                ("背景透明度", "alpha", "int", 0, 255),
+                ("UI透明度", "ui_alpha", "int", 0, 255),
+                ("平滑度", "smoothing", "float", 0.0, 1.0),
+                ("频谱条数", "num_bars", "int", 4, 256),
+            ]),
+            ("频谱", [
+                ("半径", "circle_radius", "int", 10, 500),
+                ("段数", "circle_segments", "int", 1, 8),
+                ("K1旋转", "circle_a1_rotation", "bool"),
+                ("K1半径", "circle_a1_radius", "bool"),
+                ("半径阻尼", "radius_damping", "float", 0.5, 0.99),
+                ("半径弹性", "radius_spring", "float", 0.01, 1.0),
+                ("半径回弹", "radius_gravity", "float", 0.0, 1.0),
+                ("最低频率", "freq_min", "int", 1, 5000),
+                ("最高频率", "freq_max", "int", 5000, 22050),
+                ("最小长度", "bar_length_min", "int", 0, 200),
+                ("最大长度", "bar_length_max", "int", 50, 1000),
+            ]),
+            ("颜色方案", [
+                ("颜色方案", "color_scheme", "choice", ["rainbow", "fire", "ice", "neon"]),
+                ("渐变启用", "gradient_enabled", "bool"),
+                ("渐变模式", "gradient_mode", "choice", ["frequency", "height"]),
+                ("动态色相", "color_dynamic", "bool"),
+                ("循环速度", "color_cycle_speed", "float", 0.0, 10.0),
+                ("循环指数", "color_cycle_pow", "float", 0.01, 5.0),
+                ("K1色相控制", "color_cycle_a1", "bool"),
+            ]),
+            ("物理动画", [
+                ("阻尼", "damping", "float", 0.0, 2.0),
+                ("弹性", "spring_strength", "float", 0.0, 3.0),
+                ("重力", "gravity", "float", 0.0, 2.0),
+                ("最小高度", "bar_height_min", "int", 0, 500),
+                ("最大高度", "bar_height_max", "int", 100, 2000),
+            ]),
+            ("窗口行为", [
+                ("背景透明", "bg_transparent", "bool"),
+                ("窗口置顶", "always_on_top", "bool"),
+            ]),
+        ]
+        layer_names = {1: "内缓慢", 2: "内快速", 3: "基圆", 4: "外快速", 5: "外缓慢"}
+        for li in range(1, 6):
+            cat_props = [
+                ("显示", f"c{li}_on", "bool"),
+                ("颜色", f"c{li}_color", "color"),
+                ("透明度", f"c{li}_alpha", "int", 0, 255),
+                ("线宽", f"c{li}_thick", "int", 1, 20),
+                ("填充", f"c{li}_fill", "bool"),
+                ("填充透明度", f"c{li}_fill_alpha", "int", 0, 255),
+                ("转速", f"c{li}_rot_speed", "float", -5.0, 5.0),
+                ("幂次", f"c{li}_rot_pow", "float", -3.0, 3.0),
+            ]
+            if li in (1, 2, 4, 5):
+                cat_props.append(("间隔", f"c{li}_step", "int", 1, 32))
+            if li in (1, 5):
+                cat_props.append(("衰减", f"c{li}_decay", "float", 0.9, 1.0))
+            props.append((f"L{li} {layer_names[li]}", cat_props))
+
+        for key, bname in [('b12', 'L1-L2 条形'), ('b23', 'L2-L3 条形'),
+                           ('b34', 'L3-L4 条形'), ('b45', 'L4-L5 条形')]:
+            cat_props = [
+                ("显示", f"{key}_on", "bool"),
+                ("线宽", f"{key}_thick", "int", 1, 20),
+                ("固定长度", f"{key}_fixed", "bool"),
+                ("固定长度值", f"{key}_fixed_len", "int", 1, 500),
+                ("首端", f"{key}_from_start", "bool"),
+                ("末端", f"{key}_from_end", "bool"),
+                ("中间", f"{key}_from_center", "bool"),
+            ]
+            props.append((bname, cat_props))
+
+        props.append(("高级控制", [
+            ("K1时间窗口", "a1_time_window", "float", 0.01, 60.0),
+            ("K2启用", "k2_enabled", "bool"),
+            ("K2幂次", "k2_pow", "float", 0.01, 10.0),
+        ]))
+        return props
+
+    def _set_all_random_checks(self, checked):
+        self.random_tree.blockSignals(True)
+        state = Qt.Checked if checked else Qt.Unchecked
+        for i in range(self.random_tree.topLevelItemCount()):
+            item = self.random_tree.topLevelItem(i)
+            item.setCheckState(0, state)
+        self.random_tree.blockSignals(False)
+        self._save_random_checks()
+
+    def _on_random_tree_changed(self, _item, _col):
+        self._save_random_checks()
+
+    def _save_random_checks(self):
+        checked = []
+        for i in range(self.random_tree.topLevelItemCount()):
+            cat_item = self.random_tree.topLevelItem(i)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                if child.checkState(0) == Qt.Checked:
+                    prop_def = child.data(0, Qt.UserRole)
+                    if prop_def:
+                        checked.append(prop_def[1])
+        self.config['random_checked'] = checked
+        self._save_config()
+
+    def _randomize_selected(self):
+        """随机化所有被选中的属性"""
+        changed = False
+        for i in range(self.random_tree.topLevelItemCount()):
+            cat_item = self.random_tree.topLevelItem(i)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                if child.checkState(0) != Qt.Checked:
+                    continue
+                prop_def = child.data(0, Qt.UserRole)
+                if not prop_def:
+                    continue
+                cfg_key, ptype = prop_def[1], prop_def[2]
+                if ptype == "bool":
+                    self.config[cfg_key] = random.choice([True, False])
+                elif ptype == "int":
+                    self.config[cfg_key] = random.randint(prop_def[3], prop_def[4])
+                elif ptype == "float":
+                    self.config[cfg_key] = round(random.uniform(prop_def[3], prop_def[4]), 3)
+                elif ptype == "color":
+                    self.config[cfg_key] = (
+                        random.randint(0, 255),
+                        random.randint(0, 255),
+                        random.randint(0, 255),
+                    )
+                elif ptype == "choice":
+                    self.config[cfg_key] = random.choice(prop_def[3])
+                changed = True
+        if changed:
+            self._apply_config_to_ui(self.config)
+
     # ═══════════════════════════════════════════════════════
     #  颜色控制回调
     # ═══════════════════════════════════════════════════════
@@ -948,17 +1183,28 @@ class VisualizerControlUI(QWidget):
         self.status_queue = None
 
     def _center_window(self):
-        if not self.viz_process or not self.viz_process.is_alive():
-            return
-        if self.config_queue and not self.config_queue.full():
-            try:
-                self.config_queue.put({'command': 'center_window'})
-            except:
-                pass
+        # 复位位置：设为 -1 表示屏幕居中
+        self.config['pos_x'] = -1
+        self.config['pos_y'] = -1
+        self.pos_x_spin.blockSignals(True)
+        self.pos_y_spin.blockSignals(True)
+        self.pos_x_spin.setValue(-1)
+        self.pos_y_spin.setValue(-1)
+        self.pos_x_spin.blockSignals(False)
+        self.pos_y_spin.blockSignals(False)
+        self._save_config()
+        if self.viz_process and self.viz_process.is_alive():
+            if self.config_queue and not self.config_queue.full():
+                try:
+                    self.config_queue.put({'command': 'center_window'})
+                except:
+                    pass
 
     def _apply_config_to_ui(self, cfg):
         d = _get_defaults()
         d.update(cfg)
+        # 保留随机勾选状态，不被预设/复位覆盖
+        d['random_checked'] = self.config.get('random_checked', [])
 
         self._applying_config = True
         try:
@@ -1108,6 +1354,11 @@ def main():
     """)
     w = VisualizerControlUI()
     w.show()
+    # show 后再居中，确保 frameGeometry 含标题栏
+    fg = w.frameGeometry()
+    screen_geo = QApplication.primaryScreen().availableGeometry()
+    fg.moveCenter(screen_geo.center())
+    w.move(fg.topLeft())
     sys.exit(app.exec())
 
 

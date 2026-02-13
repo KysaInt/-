@@ -155,8 +155,9 @@ class CircularVisualizerWindow:
         if self.center_y < 0:
             self.center_y = cy_default
 
-        # 透明
-        self.transparent_color = (0, 0, 0)
+        # 透明（使用近似黑 (1,0,1) 而非纯黑 (0,0,0) 作为色键，
+        # 避免用户选择纯黑色时与透明色键冲突导致内容不可见）
+        self.transparent_color = (1, 0, 1)
         self.window_alpha = self.config['alpha']
         self.ui_bg_alpha = self.config['ui_alpha']
 
@@ -537,12 +538,17 @@ class CircularVisualizerWindow:
             user32 = ctypes.windll.user32
             sw = user32.GetSystemMetrics(0)
             sh = user32.GetSystemMetrics(1)
-            if self.WIDTH >= sw or self.HEIGHT >= sh:
-                return
             hwnd = pygame.display.get_wm_info()["window"]
-            x = (sw - self.WIDTH) // 2
-            y = (sh - self.HEIGHT) // 2
-            user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0004 | 0x0001 | 0x0040)
+            
+            # 全屏模式：确保窗口在屏幕内
+            if self.WIDTH >= sw or self.HEIGHT >= sh:
+                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0004 | 0x0001 | 0x0040)
+                print(f"✓ 全屏窗口已定位到 (0,0)")
+            else:
+                x = (sw - self.WIDTH) // 2
+                y = (sh - self.HEIGHT) // 2
+                user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0004 | 0x0001 | 0x0040)
+                print(f"✓ 窗口已居中到 ({x},{y})")
         except Exception as e:
             print(f"警告: 居中窗口失败: {e}")
 
