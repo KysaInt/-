@@ -131,17 +131,40 @@ class CircularVisualizerWindow:
         pygame.display.set_caption("圆形频谱")
         self.clock = pygame.time.Clock()
 
-        # 字体
+        # 字体（使用系统中文字体，回退到默认字体）
         self.font_small = pygame.font.Font(None, 24)
+        self._cn_font_28 = None
+        self._cn_font_20 = None
+        for _fn in ['msyh.ttc', 'simhei.ttf', 'simsun.ttc', 'microsoftyahei.ttf']:
+            _fp = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'Fonts', _fn)
+            if os.path.exists(_fp):
+                try:
+                    self._cn_font_28 = pygame.font.Font(_fp, 16)
+                    self._cn_font_20 = pygame.font.Font(_fp, 12)
+                    break
+                except Exception:
+                    pass
+
+        # 可视化中心位置（使用 config 的 pos_x/pos_y，-1 表示屏幕中心）
+        cx_default = self.WIDTH // 2
+        cy_default = self.HEIGHT // 2
+        self.center_x = self.config.get('pos_x', -1)
+        self.center_y = self.config.get('pos_y', -1)
+        if self.center_x < 0:
+            self.center_x = cx_default
+        if self.center_y < 0:
+            self.center_y = cy_default
 
         # 透明
         self.transparent_color = (0, 0, 0)
         self.window_alpha = self.config['alpha']
         self.ui_bg_alpha = self.config['ui_alpha']
 
-        # 窗口拖动
+        # 窗口拖动（这里实际是拖动可视化中心点，而不是窗口本身）
         self.dragging = False
-        self.drag_offset = (0, 0)
+        # 记录拖动开始时的鼠标全局位置和中心点位置
+        self.drag_start_cursor = None
+        self.center_drag_start = None
         self.drag_handle_size = 92
         self.drag_handle_rect = pygame.Rect(
             self.WIDTH // 2 - self.drag_handle_size // 2,
@@ -290,20 +313,23 @@ class CircularVisualizerWindow:
         return self.a1_value
 
     def _send_status(self):
+        """向控制台汇报当前状态：K 值和可视化中心位置"""
         if not self.status_queue or self.status_queue.full():
             return
         try:
             while not self.status_queue.empty():
                 try:
                     self.status_queue.get_nowait()
-                except:
+                except Exception:
                     break
             self.status_queue.put({
-                'a1': self.a1_value, 'k2': self.k2_value,
-                'pos_x': self._get_window_pos()[0],
-                'pos_y': self._get_window_pos()[1],
+                'a1': self.a1_value,
+                'k2': self.k2_value,
+                # 这里的 pos_x/pos_y 表示可视化中心点，而非窗口左上角
+                'pos_x': int(self.center_x),
+                'pos_y': int(self.center_y),
             })
-        except:
+        except Exception:
             pass
 
     def _get_window_pos(self):
@@ -429,13 +455,12 @@ class CircularVisualizerWindow:
             if self.config.get('always_on_top', True):
                 user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0040)
 
-            # 恢复保存的位置，否则居中
-            px = self.config.get('pos_x', -1)
-            py = self.config.get('pos_y', -1)
-            if px >= 0 and py >= 0:
-                user32.SetWindowPos(hwnd, -1, px, py, 0, 0, 0x0001 | 0x0040)
-            else:
-                self._center_window()
+            # 全屏/窗口位置只在创建时由系统决定或简单居中，
+            # 不再使用 pos_x/pos_y 控制窗口位置，pos_* 仅表示可视化中心
+            self._center_window()
+
+            # 发送初始中心坐标状态，让控制台立即获得正确的位置
+            self._send_status()
             print("✓ 透明悬浮窗口设置成功")
         except Exception as e:
             print(f"警告: 设置透明窗口失败: {e}")
@@ -459,29 +484,53 @@ class CircularVisualizerWindow:
     def _draw_drag_handle(self):
         if not self.config.get('drag_adjust_mode', False):
             return
-        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        # 使用可视化中心点，而非窗口中心
+        cx, cy = int(self.center_x), int(self.center_y)
+        sz = self.drag_handle_size
         self.drag_handle_rect = pygame.Rect(
-            cx - self.drag_handle_size // 2,
-            cy - self.drag_handle_size // 2,
-            self.drag_handle_size,
-            self.drag_handle_size,
+            cx - sz // 2, cy - sz // 2, sz, sz,
         )
 
-        bg = pygame.Surface((self.drag_handle_size, self.drag_handle_size), pygame.SRCALPHA)
-        bg.fill((60, 60, 60, 190) if not self.drag_handle_hover else (100, 100, 100, 220))
+        # 半透明圆角背景
+        bg = pygame.Surface((sz, sz), pygame.SRCALPHA)
+        radius = 12
+        col_bg = (50, 50, 60, 200) if not self.drag_handle_hover else (70, 70, 90, 230)
+        col_border = (180, 200, 255) if self.drag_handle_hover else (120, 130, 160)
+        pygame.draw.rect(bg, col_bg, (0, 0, sz, sz), border_radius=radius)
+        pygame.draw.rect(bg, (*col_border, 180), (0, 0, sz, sz), 2, border_radius=radius)
         self.screen.blit(bg, self.drag_handle_rect.topleft)
 
-        pygame.draw.rect(
-            self.screen,
-            (230, 230, 230) if self.drag_handle_hover else (170, 170, 170),
-            self.drag_handle_rect,
-            2,
-        )
+        # 绘制十字移动箭头图标（不依赖字体）
+        arrow_col = (220, 230, 255) if self.drag_handle_hover else (160, 170, 200)
+        arm = 16  # 箭头臂长
+        head = 5  # 箭头头部大小
+        lw = 2
+        # 上
+        pygame.draw.line(self.screen, arrow_col, (cx, cy - arm), (cx, cy - 3), lw)
+        pygame.draw.polygon(self.screen, arrow_col, [
+            (cx, cy - arm - head), (cx - head, cy - arm), (cx + head, cy - arm)])
+        # 下
+        pygame.draw.line(self.screen, arrow_col, (cx, cy + 3), (cx, cy + arm), lw)
+        pygame.draw.polygon(self.screen, arrow_col, [
+            (cx, cy + arm + head), (cx - head, cy + arm), (cx + head, cy + arm)])
+        # 左
+        pygame.draw.line(self.screen, arrow_col, (cx - arm, cy), (cx - 3, cy), lw)
+        pygame.draw.polygon(self.screen, arrow_col, [
+            (cx - arm - head, cy), (cx - arm, cy - head), (cx - arm, cy + head)])
+        # 右
+        pygame.draw.line(self.screen, arrow_col, (cx + 3, cy), (cx + arm, cy), lw)
+        pygame.draw.polygon(self.screen, arrow_col, [
+            (cx + arm + head, cy), (cx + arm, cy - head), (cx + arm, cy + head)])
 
-        title = pygame.font.Font(None, 28).render("拖动区", True, (255, 255, 255))
-        hint = pygame.font.Font(None, 20).render("按住左键拖动", True, (235, 235, 235))
-        self.screen.blit(title, title.get_rect(center=(cx, cy - 10)))
-        self.screen.blit(hint, hint.get_rect(center=(cx, cy + 14)))
+        # 中心小点
+        pygame.draw.circle(self.screen, arrow_col, (cx, cy), 2)
+
+        # 底部提示文字
+        if self._cn_font_20:
+            hint = self._cn_font_20.render("拖动", True, (200, 210, 240))
+        else:
+            hint = pygame.font.Font(None, 16).render("DRAG", True, (200, 210, 240))
+        self.screen.blit(hint, hint.get_rect(center=(cx, cy + arm + head + 12)))
 
     def _center_window(self):
         try:
@@ -497,15 +546,14 @@ class CircularVisualizerWindow:
         except Exception as e:
             print(f"警告: 居中窗口失败: {e}")
 
-    def _move_window(self, mouse_pos):
-        try:
-            hwnd = pygame.display.get_wm_info()["window"]
-            user32 = ctypes.windll.user32
-            pt = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            user32.SetWindowPos(hwnd, -1, pt.x - self.drag_offset[0], pt.y - self.drag_offset[1], 0, 0, 0x0001 | 0x0040)
-        except:
-            pass
+    def _move_window(self, event):
+        """拖动时更新可视化中心点（而不是窗口位置）"""
+        # 使用鼠标相对移动量 event.rel，避免全局坐标和 DPI 问题
+        dx, dy = event.rel
+        if dx == 0 and dy == 0:
+            return
+        self.center_x += dx
+        self.center_y += dy
 
     # ── 辅助：NURBS / 轮廓 / 条形 ──────────────────────────
 
@@ -596,7 +644,9 @@ class CircularVisualizerWindow:
         if not self.config.get('master_visible', True):
             return
 
-        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        # 使用可视化中心点作为轴心，而不是窗口中心
+        cx = int(getattr(self, 'center_x', self.WIDTH // 2))
+        cy = int(getattr(self, 'center_y', self.HEIGHT // 2))
         scale = self.config.get('global_scale', 1.0)
         base_radius = self.config.get('circle_radius', 150) * scale
         segments = self.config.get('circle_segments', 1)
@@ -767,18 +817,16 @@ class CircularVisualizerWindow:
                         new.get('gradient_points') != old.get('gradient_points')):
                     self._update_colors()
 
-                # 位置同步（来自控制台手动设置）
-                new_px = new.get('pos_x', -1)
-                new_py = new.get('pos_y', -1)
-                old_px = old.get('pos_x', -1)
-                old_py = old.get('pos_y', -1)
-                if (new_px, new_py) != (old_px, old_py) and new_px >= 0 and new_py >= 0:
-                    try:
-                        hwnd = pygame.display.get_wm_info()["window"]
-                        ctypes.windll.user32.SetWindowPos(
-                            hwnd, -1, new_px, new_py, 0, 0, 0x0001 | 0x0040)
-                    except:
-                        pass
+                # 位置同步（来自控制台手动设置，可视化中心点）
+                new_cx = new.get('pos_x', -1)
+                new_cy = new.get('pos_y', -1)
+                old_cx = old.get('pos_x', -1)
+                old_cy = old.get('pos_y', -1)
+                if (new_cx, new_cy) != (old_cx, old_cy):
+                    if new_cx >= 0:
+                        self.center_x = new_cx
+                    if new_cy >= 0:
+                        self.center_y = new_cy
         except queue.Empty:
             pass
 
@@ -791,9 +839,9 @@ class CircularVisualizerWindow:
         while running:
             self._update_config_from_queue()
 
-            # 定期发送状态
+            # 定期发送状态（降低频率减少UI干扰）
             now = time.time()
-            if now - self.last_status_send >= 1.0:
+            if now - self.last_status_send >= 2.0:  # 2秒发送一次
                 self._send_status()
                 self.last_status_send = now
 
@@ -807,15 +855,27 @@ class CircularVisualizerWindow:
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self.config.get('drag_adjust_mode', False):
                         if self.drag_handle_rect.collidepoint(event.pos):
+                            # 开始拖动：记录当前全局鼠标位置和当前中心点
                             self.dragging = True
-                            self.drag_offset = event.pos
+                            try:
+                                user32 = ctypes.windll.user32
+                                pt = wintypes.POINT()
+                                user32.GetCursorPos(ctypes.byref(pt))
+                                self.drag_start_cursor = (pt.x, pt.y)
+                                self.center_drag_start = (self.center_x, self.center_y)
+                            except Exception:
+                                self.drag_start_cursor = None
+                                self.center_drag_start = None
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     self.dragging = False
+                    self.drag_start_cursor = None
+                    self.center_drag_start = None
                 elif event.type == pygame.MOUSEMOTION:
                     if self.config.get('drag_adjust_mode', False):
                         self.drag_handle_hover = self.drag_handle_rect.collidepoint(event.pos)
                     if self.dragging and self.config.get('drag_adjust_mode', False):
-                        self._move_window(event.pos)
+                        # 使用相对位移来移动可视化中心，避免 DPI / 全局坐标问题
+                        self._move_window(event)
 
             # 清屏
             self.screen.fill(self.transparent_color)

@@ -931,7 +931,7 @@ class VisualizerControlUI(QWidget):
                 QMessageBox.warning(self, "错误", "可视化进程启动失败")
                 return
 
-            self.status_timer.start(100)
+            self.status_timer.start(1000)  # 降低到1秒，减少对用户输入的干扰
         except Exception as e:
             QMessageBox.critical(self, "错误", f"启动失败: {e}")
 
@@ -1052,7 +1052,8 @@ class VisualizerControlUI(QWidget):
                 if 'k2' in st:
                     self.k2_lbl.setText(f"{st['k2']:.2f}")
                 if 'pos_x' in st and 'pos_y' in st:
-                    if self.config.get('drag_adjust_mode', False):
+                    # 只有在用户没有聚焦pos控件时才更新显示，避免干扰用户输入
+                    if not (self.pos_x_spin.hasFocus() or self.pos_y_spin.hasFocus()):
                         self.pos_x_spin.blockSignals(True)
                         self.pos_y_spin.blockSignals(True)
                         self.pos_x_spin.setValue(st['pos_x'])
