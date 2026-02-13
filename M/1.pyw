@@ -35,6 +35,7 @@ CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
     'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
+    'drag_adjust_mode': False,
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
@@ -138,23 +139,17 @@ class CircularVisualizerWindow:
         self.window_alpha = self.config['alpha']
         self.ui_bg_alpha = self.config['ui_alpha']
 
-        # 锁定按钮（居中）
-        self.lock_button_size = 50
-        self.lock_button_rect = pygame.Rect(
-            self.WIDTH // 2 - self.lock_button_size // 2,
-            self.HEIGHT // 2 - self.lock_button_size // 2,
-            self.lock_button_size, self.lock_button_size
-        )
-        self.lock_button_visible = False
-        self.lock_button_hover = False
-        self.is_locked = True
-        self.hover_timer = 0.0
-        self.hide_delay = 2.0
-        self.lock_center_hover_radius = 80  # 悬停检测半径
-
         # 窗口拖动
         self.dragging = False
         self.drag_offset = (0, 0)
+        self.drag_handle_size = 92
+        self.drag_handle_rect = pygame.Rect(
+            self.WIDTH // 2 - self.drag_handle_size // 2,
+            self.HEIGHT // 2 - self.drag_handle_size // 2,
+            self.drag_handle_size,
+            self.drag_handle_size,
+        )
+        self.drag_handle_hover = False
 
         # 设置透明置顶
         self._setup_transparent_window()
@@ -423,7 +418,9 @@ class CircularVisualizerWindow:
             GWL_EXSTYLE = -20
             user32 = ctypes.windll.user32
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | 0x00080000 | 0x00000008)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | 0x00080000)
+
+            self._set_click_through(not self.config.get('drag_adjust_mode', False))
 
             if self.config.get('bg_transparent', True):
                 ck = self.transparent_color[0] | (self.transparent_color[1] << 8) | (self.transparent_color[2] << 16)
@@ -442,6 +439,49 @@ class CircularVisualizerWindow:
             print("✓ 透明悬浮窗口设置成功")
         except Exception as e:
             print(f"警告: 设置透明窗口失败: {e}")
+
+    def _set_click_through(self, enabled):
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if enabled:
+                style |= WS_EX_TRANSPARENT
+            else:
+                style &= ~WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+        except Exception as e:
+            print(f"警告: 切换点击穿透失败: {e}")
+
+    def _draw_drag_handle(self):
+        if not self.config.get('drag_adjust_mode', False):
+            return
+        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        self.drag_handle_rect = pygame.Rect(
+            cx - self.drag_handle_size // 2,
+            cy - self.drag_handle_size // 2,
+            self.drag_handle_size,
+            self.drag_handle_size,
+        )
+
+        bg = pygame.Surface((self.drag_handle_size, self.drag_handle_size), pygame.SRCALPHA)
+        bg.fill((60, 60, 60, 190) if not self.drag_handle_hover else (100, 100, 100, 220))
+        self.screen.blit(bg, self.drag_handle_rect.topleft)
+
+        pygame.draw.rect(
+            self.screen,
+            (230, 230, 230) if self.drag_handle_hover else (170, 170, 170),
+            self.drag_handle_rect,
+            2,
+        )
+
+        title = pygame.font.Font(None, 28).render("拖动区", True, (255, 255, 255))
+        hint = pygame.font.Font(None, 20).render("按住左键拖动", True, (235, 235, 235))
+        self.screen.blit(title, title.get_rect(center=(cx, cy - 10)))
+        self.screen.blit(hint, hint.get_rect(center=(cx, cy + 14)))
 
     def _center_window(self):
         try:
@@ -466,64 +506,6 @@ class CircularVisualizerWindow:
             user32.SetWindowPos(hwnd, -1, pt.x - self.drag_offset[0], pt.y - self.drag_offset[1], 0, 0, 0x0001 | 0x0040)
         except:
             pass
-
-    # ── 锁定按钮（居中悬停） ─────────────────────────────
-
-    def _draw_lock_button(self):
-        if not self.lock_button_visible:
-            return
-        # 按钮始终在画面中心
-        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
-        self.lock_button_rect = pygame.Rect(
-            cx - self.lock_button_size // 2,
-            cy - self.lock_button_size // 2,
-            self.lock_button_size, self.lock_button_size)
-        bg = pygame.Surface((self.lock_button_size, self.lock_button_size), pygame.SRCALPHA)
-        bg.fill((120, 120, 120, 240) if self.lock_button_hover else (60, 60, 60, 200))
-        self.screen.blit(bg, self.lock_button_rect.topleft)
-        pygame.draw.rect(
-            self.screen,
-            (200, 200, 200) if self.lock_button_hover else (100, 100, 100),
-            self.lock_button_rect, 2,
-        )
-        icon_text = "🔒" if self.is_locked else "🔓"
-        icon = pygame.font.Font(None, 32).render(icon_text, True, (255, 255, 255))
-        self.screen.blit(icon, icon.get_rect(center=self.lock_button_rect.center))
-
-        if self.lock_button_hover:
-            txt = "点击解锁拖动" if self.is_locked else "点击锁定"
-            surf = pygame.font.Font(None, 20).render(txt, True, (255, 255, 255))
-            r = surf.get_rect(centerx=cx, top=self.lock_button_rect.bottom + 8)
-            hint_bg = pygame.Surface((r.width + 12, r.height + 6), pygame.SRCALPHA)
-            hint_bg.fill((30, 30, 30, 220))
-            self.screen.blit(hint_bg, (r.left - 6, r.top - 3))
-            self.screen.blit(surf, r)
-
-    def _check_lock_hover(self, pos):
-        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
-        dx, dy = pos[0] - cx, pos[1] - cy
-        dist = (dx * dx + dy * dy) ** 0.5
-        if dist <= self.lock_center_hover_radius:
-            self.lock_button_visible = True
-            self.hover_timer = time.time()
-            self.lock_button_hover = self.lock_button_rect.collidepoint(pos)
-        else:
-            self.lock_button_hover = False
-            # 锁定状态下 2 秒后自动隐藏
-            if self.is_locked and time.time() - self.hover_timer > self.hide_delay:
-                self.lock_button_visible = False
-
-    def _handle_lock_click(self, pos):
-        if not self.lock_button_visible:
-            return False
-        if self.lock_button_rect.collidepoint(pos):
-            self.is_locked = not self.is_locked
-            if self.is_locked:
-                self.hover_timer = time.time()  # 锁定后开始隐藏倒计时
-            else:
-                self.lock_button_visible = True  # 解锁时保持可见
-            return True
-        return False
 
     # ── 辅助：NURBS / 轮廓 / 条形 ──────────────────────────
 
@@ -775,6 +757,11 @@ class CircularVisualizerWindow:
 
                 self.ui_bg_alpha = new.get('ui_alpha', 180)
 
+                # 点击穿透 / 拖动调整模式
+                if new.get('drag_adjust_mode', False) != old.get('drag_adjust_mode', False):
+                    self._set_click_through(not new.get('drag_adjust_mode', False))
+                    self.dragging = False
+
                 # 颜色变化
                 if (new.get('color_scheme') != old.get('color_scheme') or
                         new.get('gradient_points') != old.get('gradient_points')):
@@ -818,16 +805,16 @@ class CircularVisualizerWindow:
                     if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self._handle_lock_click(event.pos):
-                        continue
-                    if not self.is_locked:
-                        self.dragging = True
-                        self.drag_offset = event.pos
+                    if self.config.get('drag_adjust_mode', False):
+                        if self.drag_handle_rect.collidepoint(event.pos):
+                            self.dragging = True
+                            self.drag_offset = event.pos
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     self.dragging = False
                 elif event.type == pygame.MOUSEMOTION:
-                    self._check_lock_hover(event.pos)
-                    if self.dragging and not self.is_locked:
+                    if self.config.get('drag_adjust_mode', False):
+                        self.drag_handle_hover = self.drag_handle_rect.collidepoint(event.pos)
+                    if self.dragging and self.config.get('drag_adjust_mode', False):
                         self._move_window(event.pos)
 
             # 清屏
@@ -856,8 +843,8 @@ class CircularVisualizerWindow:
             # 绘制圆形频谱
             self._draw_circular_spectrum(bar_values)
 
-            # 锁定按钮
-            self._draw_lock_button()
+            # 拖动区域提示
+            self._draw_drag_handle()
 
             pygame.display.flip()
             self.clock.tick(60)

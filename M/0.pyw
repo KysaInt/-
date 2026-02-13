@@ -15,16 +15,19 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
+    QInputDialog,
     QFrame, QMessageBox, QColorDialog, QScrollArea,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor, QPalette
 
 CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
+PRESETS_DIR = Path(__file__).parent / 'presets'
 
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
     'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
+    'drag_adjust_mode': False,
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
@@ -125,11 +128,13 @@ class VisualizerControlUI(QWidget):
         self.status_queue = None
         self.viz_process = None
         self.current_a1 = 0.0
+        self._applying_config = False
 
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
 
         self._init_ui()
+        self._refresh_preset_list()
 
         # 自动启动
         QTimer.singleShot(100, self._start_visualizer)
@@ -168,11 +173,13 @@ class VisualizerControlUI(QWidget):
 
     def _update_cfg(self, key, value):
         self.config[key] = value
+        if self._applying_config:
+            return
         self._send_config()
         self._save_config()
 
     def _send_config(self):
-        if not self.config_queue or self.config_queue.full():
+        if not self.config_queue:
             return
         try:
             while not self.config_queue.empty():
@@ -180,7 +187,10 @@ class VisualizerControlUI(QWidget):
                     self.config_queue.get_nowait()
                 except:
                     break
-            self.config_queue.put(self.config)
+            try:
+                self.config_queue.put_nowait(self.config)
+            except:
+                pass
         except:
             pass
 
@@ -202,6 +212,7 @@ class VisualizerControlUI(QWidget):
         vlay.setSpacing(2); vlay.setContentsMargins(4, 4, 4, 4)
 
         self._build_control_section(vlay)
+        self._build_preset_section(vlay)
         self._build_color_section(vlay)
         self._build_physics_section(vlay)
         self._build_window_section(vlay)
@@ -261,6 +272,11 @@ class VisualizerControlUI(QWidget):
         h_pos.addWidget(QLabel("X")); h_pos.addWidget(self.pos_x_spin)
         h_pos.addWidget(QLabel("Y")); h_pos.addWidget(self.pos_y_spin)
         g.addLayout(h_pos, r, 1, 1, 2); r += 1
+
+        self.drag_adjust_check = QCheckBox("拖动调整位置（开启后可在频谱窗口直接拖动）")
+        self.drag_adjust_check.setChecked(self.config.get('drag_adjust_mode', False))
+        self.drag_adjust_check.toggled.connect(lambda v: self._update_cfg('drag_adjust_mode', v))
+        g.addWidget(self.drag_adjust_check, r, 0, 1, 3); r += 1
 
         # ── 通用 ──
         _sh0 = QLabel("── 通用 ──")
@@ -381,6 +397,103 @@ class VisualizerControlUI(QWidget):
 
         s.add_layout(g)
         vlay.addWidget(s)
+
+    # ── 预设管理 ──────────────────────────────────────────
+
+    def _build_preset_section(self, vlay):
+        s = _Collapsible("预设管理", expanded=False)
+        g = QGridLayout(); g.setSpacing(4); g.setContentsMargins(0, 0, 0, 0)
+
+        g.addWidget(QLabel("预设:"), 0, 0)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setEditable(False)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        g.addWidget(self.preset_combo, 0, 1, 1, 3)
+
+        b_save = QPushButton("💾 另存为")
+        b_save.clicked.connect(self._save_preset_as)
+        g.addWidget(b_save, 1, 0)
+
+        b_reload = QPushButton("🔄 刷新列表")
+        b_reload.clicked.connect(self._refresh_preset_list)
+        g.addWidget(b_reload, 1, 1)
+
+        s.add_layout(g)
+        vlay.addWidget(s)
+
+    def _ensure_presets_dir(self):
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _safe_preset_name(name: str):
+        invalid = '<>:"/\\|?*'
+        clean = ''.join('_' if ch in invalid else ch for ch in name).strip().strip('.')
+        return clean
+
+    def _refresh_preset_list(self):
+        self._ensure_presets_dir()
+        current_fp = self.preset_combo.currentData()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        files = sorted(PRESETS_DIR.glob('*.json'), key=lambda p: p.name.lower())
+        selected_idx = -1
+        for fp in files:
+            self.preset_combo.addItem(fp.stem, str(fp))
+            if current_fp and str(fp) == str(current_fp):
+                selected_idx = self.preset_combo.count() - 1
+        if selected_idx >= 0:
+            self.preset_combo.setCurrentIndex(selected_idx)
+        self.preset_combo.blockSignals(False)
+
+    def _on_preset_changed(self, _idx):
+        self._load_selected_preset(show_message=False)
+
+    def _save_preset_as(self):
+        name, ok = QInputDialog.getText(self, "保存预设", "请输入预设名称:")
+        if not ok:
+            return
+        safe_name = self._safe_preset_name(name)
+        if not safe_name:
+            QMessageBox.warning(self, "无效名称", "预设名称不能为空或仅包含非法字符")
+            return
+
+        self._ensure_presets_dir()
+        fp = PRESETS_DIR / f"{safe_name}.json"
+        if fp.exists():
+            if QMessageBox.question(
+                self,
+                "覆盖确认",
+                f"预设 {safe_name} 已存在，是否覆盖？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
+
+        try:
+            with open(fp, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            self._refresh_preset_list()
+            idx = self.preset_combo.findText(safe_name)
+            if idx >= 0:
+                self.preset_combo.setCurrentIndex(idx)
+            QMessageBox.information(self, "成功", f"预设已保存: {safe_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存预设失败: {e}")
+
+    def _load_selected_preset(self, show_message=False):
+        fp = self.preset_combo.currentData()
+        if not fp:
+            return
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            cfg = _get_defaults()
+            cfg.update(data)
+            self._apply_config_to_ui(cfg)
+            if show_message:
+                QMessageBox.information(self, "成功", f"已加载预设: {Path(fp).stem}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载预设失败: {e}")
 
     # ── 颜色 ──────────────────────────────────────────
 
@@ -843,64 +956,89 @@ class VisualizerControlUI(QWidget):
             except:
                 pass
 
+    def _apply_config_to_ui(self, cfg):
+        d = _get_defaults()
+        d.update(cfg)
+
+        self._applying_config = True
+        try:
+            self.config = d
+
+            # 基础 UI
+            self.master_visible_check.setChecked(d.get('master_visible', True))
+            self.scale_spin.setValue(d.get('global_scale', 1.0))
+            self.pos_x_spin.setValue(d.get('pos_x', -1)); self.pos_y_spin.setValue(d.get('pos_y', -1))
+            self.drag_adjust_check.setChecked(d.get('drag_adjust_mode', False))
+            self.width_spin.setValue(d.get('width', 0)); self.height_spin.setValue(d.get('height', 0))
+            self.bars_spin.setValue(d.get('num_bars', 64)); self.smooth_slider.setValue(int(d.get('smoothing', 0.7) * 100))
+            self.alpha_slider.setValue(d.get('alpha', 255)); self.ui_alpha_slider.setValue(d.get('ui_alpha', 180))
+            schemes = ['rainbow', 'fire', 'ice', 'neon', 'custom']
+            scheme = d.get('color_scheme', 'rainbow')
+            self.color_combo.setCurrentIndex(schemes.index(scheme) if scheme in schemes else 0)
+            self.damp_slider.setValue(int(d.get('damping', 0.85) * 100))
+            self.spring_slider.setValue(int(d.get('spring_strength', 0.3) * 100))
+            self.grav_slider.setValue(int(d.get('gravity', 0.5) * 100))
+            self.hmin_spin.setValue(d.get('bar_height_min', 0)); self.hmax_spin.setValue(d.get('bar_height_max', 500))
+            self.radius_spin.setValue(d.get('circle_radius', 150)); self.seg_spin.setValue(d.get('circle_segments', 1))
+            self.a1rot_check.setChecked(d.get('circle_a1_rotation', True)); self.a1rad_check.setChecked(d.get('circle_a1_radius', True))
+            self.rdamp_slider.setValue(int(d.get('radius_damping', 0.92) * 100))
+            self.rspring_slider.setValue(int(d.get('radius_spring', 0.15) * 100))
+            self.rgrav_slider.setValue(int(d.get('radius_gravity', 0.3) * 100))
+            self.freq_min_spin.setValue(d.get('freq_min', 20)); self.freq_max_spin.setValue(d.get('freq_max', 20000))
+            self.bar_len_min_spin.setValue(d.get('bar_length_min', 0)); self.bar_len_max_spin.setValue(d.get('bar_length_max', 300))
+            self.a1_spin.setValue(d.get('a1_time_window', 10.0))
+            self.k2_check.setChecked(d.get('k2_enabled', False))
+            self.k2_pow_spin.setValue(d.get('k2_pow', 1.0))
+            self.trans_check.setChecked(d.get('bg_transparent', True)); self.top_check.setChecked(d.get('always_on_top', True))
+
+            # 颜色/渐变
+            self.grad_check.setChecked(d.get('gradient_enabled', True))
+            self.grad_mode_combo.setCurrentIndex(0 if d.get('gradient_mode', 'frequency') == 'frequency' else 1)
+            self.dyn_check.setChecked(d.get('color_dynamic', False))
+            self.cyc_spd_slider.setValue(int(d.get('color_cycle_speed', 1.0) * 100))
+            self.cyc_pow_slider.setValue(int(d.get('color_cycle_pow', 2.0) * 100))
+            self.cyc_a1_check.setChecked(d.get('color_cycle_a1', True))
+            self._rebuild_gradient_ui()
+
+            # 五层轮廓
+            for li in range(1, 6):
+                getattr(self, f'c{li}_on_check').setChecked(d.get(f'c{li}_on', False))
+                cc = d.get(f'c{li}_color', (255, 255, 255))
+                getattr(self, f'c{li}_color_btn').setStyleSheet(
+                    f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
+                getattr(self, f'c{li}_thick_spin').setValue(d.get(f'c{li}_thick', 2))
+                getattr(self, f'c{li}_alpha_slider').setValue(d.get(f'c{li}_alpha', 180))
+                getattr(self, f'c{li}_fill_check').setChecked(d.get(f'c{li}_fill', False))
+                getattr(self, f'c{li}_fill_alpha_slider').setValue(d.get(f'c{li}_fill_alpha', 50))
+                if hasattr(self, f'c{li}_step_spin'):
+                    getattr(self, f'c{li}_step_spin').setValue(d.get(f'c{li}_step', 2))
+                if hasattr(self, f'c{li}_decay_slider'):
+                    getattr(self, f'c{li}_decay_slider').setValue(int(d.get(f'c{li}_decay', 0.995) * 1000))
+                getattr(self, f'c{li}_rot_speed_slider').setValue(int(d.get(f'c{li}_rot_speed', 1.0) * 100))
+                getattr(self, f'c{li}_rot_pow_slider').setValue(int(d.get(f'c{li}_rot_pow', 0.5) * 100))
+
+            # 四层条形
+            for key in ('b12', 'b23', 'b34', 'b45'):
+                getattr(self, f'{key}_on_check').setChecked(d.get(f'{key}_on', False))
+                getattr(self, f'{key}_thick_spin').setValue(d.get(f'{key}_thick', 3))
+                getattr(self, f'{key}_fixed_check').setChecked(d.get(f'{key}_fixed', False))
+                getattr(self, f'{key}_fixed_len_spin').setValue(d.get(f'{key}_fixed_len', 30))
+                getattr(self, f'{key}_start_check').setChecked(d.get(f'{key}_from_start', True))
+                getattr(self, f'{key}_end_check').setChecked(d.get(f'{key}_from_end', False))
+                getattr(self, f'{key}_center_check').setChecked(d.get(f'{key}_from_center', False))
+                getattr(self, f'{key}_mode_widget').setVisible(d.get(f'{key}_fixed', False))
+        finally:
+            self._applying_config = False
+
+        self._save_config()
+        if self.viz_process and self.viz_process.is_alive():
+            self._send_config()
+
     def _reset_all(self):
         if QMessageBox.question(self, "确认", "确定要将所有参数复位到默认值吗？",
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-
-        self.config = _get_defaults()
-        d = self.config
-
-        # 基础 UI
-        self.master_visible_check.setChecked(True)
-        self.scale_spin.setValue(1.0)
-        self.pos_x_spin.setValue(-1); self.pos_y_spin.setValue(-1)
-        self.width_spin.setValue(0); self.height_spin.setValue(0)
-        self.bars_spin.setValue(64); self.smooth_slider.setValue(70)
-        self.alpha_slider.setValue(255); self.ui_alpha_slider.setValue(180)
-        self.color_combo.setCurrentIndex(0)
-        self.damp_slider.setValue(85); self.spring_slider.setValue(30); self.grav_slider.setValue(50)
-        self.hmin_spin.setValue(0); self.hmax_spin.setValue(500)
-        self.radius_spin.setValue(150); self.seg_spin.setValue(1)
-        self.a1rot_check.setChecked(True); self.a1rad_check.setChecked(True)
-        self.rdamp_slider.setValue(92); self.rspring_slider.setValue(15); self.rgrav_slider.setValue(30)
-        self.freq_min_spin.setValue(20); self.freq_max_spin.setValue(20000)
-        self.bar_len_min_spin.setValue(0); self.bar_len_max_spin.setValue(300)
-        self.a1_spin.setValue(10.0)
-        self.k2_check.setChecked(False)
-        self.k2_pow_spin.setValue(1.0)
-        self.trans_check.setChecked(True); self.top_check.setChecked(True)
-
-        # 五层轮廓
-        for li in range(1, 6):
-            getattr(self, f'c{li}_on_check').setChecked(d.get(f'c{li}_on', False))
-            cc = d.get(f'c{li}_color', (255,255,255))
-            getattr(self, f'c{li}_color_btn').setStyleSheet(
-                f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
-            getattr(self, f'c{li}_thick_spin').setValue(d.get(f'c{li}_thick', 2))
-            getattr(self, f'c{li}_alpha_slider').setValue(d.get(f'c{li}_alpha', 180))
-            getattr(self, f'c{li}_fill_check').setChecked(d.get(f'c{li}_fill', False))
-            getattr(self, f'c{li}_fill_alpha_slider').setValue(d.get(f'c{li}_fill_alpha', 50))
-            if hasattr(self, f'c{li}_step_spin'):
-                getattr(self, f'c{li}_step_spin').setValue(d.get(f'c{li}_step', 2))
-            if hasattr(self, f'c{li}_decay_slider'):
-                getattr(self, f'c{li}_decay_slider').setValue(int(d.get(f'c{li}_decay', 0.995) * 1000))
-            getattr(self, f'c{li}_rot_speed_slider').setValue(int(d.get(f'c{li}_rot_speed', 1.0) * 100))
-            getattr(self, f'c{li}_rot_pow_slider').setValue(int(d.get(f'c{li}_rot_pow', 0.5) * 100))
-
-        # 四层条形
-        for key in ('b12', 'b23', 'b34', 'b45'):
-            getattr(self, f'{key}_on_check').setChecked(d.get(f'{key}_on', False))
-            getattr(self, f'{key}_thick_spin').setValue(d.get(f'{key}_thick', 3))
-            getattr(self, f'{key}_fixed_check').setChecked(d.get(f'{key}_fixed', False))
-            getattr(self, f'{key}_fixed_len_spin').setValue(d.get(f'{key}_fixed_len', 30))
-            getattr(self, f'{key}_start_check').setChecked(d.get(f'{key}_from_start', True))
-            getattr(self, f'{key}_end_check').setChecked(d.get(f'{key}_from_end', False))
-            getattr(self, f'{key}_center_check').setChecked(d.get(f'{key}_from_center', False))
-            getattr(self, f'{key}_mode_widget').setVisible(d.get(f'{key}_fixed', False))
-
-        if self.viz_process and self.viz_process.is_alive():
-            self._send_config()
+        self._apply_config_to_ui(_get_defaults())
 
     def _update_status(self):
         if not self.status_queue:
@@ -914,12 +1052,13 @@ class VisualizerControlUI(QWidget):
                 if 'k2' in st:
                     self.k2_lbl.setText(f"{st['k2']:.2f}")
                 if 'pos_x' in st and 'pos_y' in st:
-                    self.pos_x_spin.blockSignals(True)
-                    self.pos_y_spin.blockSignals(True)
-                    self.pos_x_spin.setValue(st['pos_x'])
-                    self.pos_y_spin.setValue(st['pos_y'])
-                    self.pos_x_spin.blockSignals(False)
-                    self.pos_y_spin.blockSignals(False)
+                    if self.config.get('drag_adjust_mode', False):
+                        self.pos_x_spin.blockSignals(True)
+                        self.pos_y_spin.blockSignals(True)
+                        self.pos_x_spin.setValue(st['pos_x'])
+                        self.pos_y_spin.setValue(st['pos_y'])
+                        self.pos_x_spin.blockSignals(False)
+                        self.pos_y_spin.blockSignals(False)
         except:
             pass
 

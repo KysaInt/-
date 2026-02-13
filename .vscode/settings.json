@@ -1,6 +1,10 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:system",
     "python-envs.pythonProjects": [],
-    "github.copilot.chat.commitMessageInstruction": "请使用中文撰写简洁、清晰的提交信息，概述主要改动。",
+    "github.copilot.chat.commitMessageGeneration.instructions": [
+        {
+            "text": "请使用中文撰写简洁、清晰的提交信息，概述主要改动。"
+        }
+    ],
     "qtForPython.qmlls.enabled": false
 }
