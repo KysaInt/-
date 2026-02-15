@@ -9,14 +9,17 @@ import json
 import time
 import random
 import re
+import colorsys
+import threading
 import multiprocessing as mp
+from urllib import request, parse
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
-    QInputDialog,
+    QInputDialog, QDialog, QListWidget,
     QFrame, QMessageBox, QColorDialog, QScrollArea,
     QStackedWidget,
     QTreeWidget, QTreeWidgetItem,
@@ -27,6 +30,7 @@ from PySide6.QtGui import QFont, QColor, QPalette, QPainter, QPen
 
 CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 PRESETS_DIR = Path(__file__).parent / 'presets'
+SECTION_PRESETS_DIR = Path(__file__).parent / 'section_presets'
 
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
@@ -35,6 +39,7 @@ _DEFAULT_CONFIG = {
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
+    'rotation_base': 1.0, 'main_radius_scale': 1.0,
     'bar_height_min': 0, 'bar_height_max': 500,
     'color_scheme': 'rainbow',
     'gradient_points': [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))],
@@ -75,6 +80,9 @@ _DEFAULT_CONFIG = {
     'b45_on': False, 'b45_thick': 2,
     'b45_fixed': False, 'b45_fixed_len': 30, 'b45_from_start': True, 'b45_from_end': False, 'b45_from_center': False,
     'random_checked': [],
+    'random_object_count_min': 1,
+    'random_object_count_max': 9,
+    'preset_order': [],
     'preset_auto_switch': False,
     'preset_switch_interval': 10.0,
     'preset_interval_random_enabled': False,
@@ -176,6 +184,36 @@ class _YellowCheckBoxStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
+class _SoftRangeSpinBox(QSpinBox):
+    """软范围数值框：滚轮/步进限制在软范围，手动输入可超出软范围（但仍受硬范围限制）。"""
+
+    def __init__(self, soft_min: int, soft_max: int, hard_min: int, hard_max: int, parent=None):
+        super().__init__(parent)
+        self._soft_min = int(soft_min)
+        self._soft_max = int(soft_max)
+        self.setRange(int(hard_min), int(hard_max))
+
+    def stepBy(self, steps: int):
+        if steps == 0:
+            return
+
+        cur = self.value()
+        step = self.singleStep() or 1
+
+        if steps > 0:
+            if cur < self._soft_min:
+                target = self._soft_min
+            else:
+                target = min(cur + steps * step, self._soft_max)
+        else:
+            if cur > self._soft_max:
+                target = self._soft_max
+            else:
+                target = max(cur + steps * step, self._soft_min)
+
+        self.setValue(int(target))
+
+
 class VisualizerControlUI(QWidget):
     """音频可视化主控制台"""
 
@@ -192,6 +230,9 @@ class VisualizerControlUI(QWidget):
         self._applying_config = False
         self._syncing_preset_combo = False
         self._last_random_apply_ts = None
+        self._palette_cache = []
+        self._palette_refill_running = False
+        self._section_preset_combos = {}
 
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
@@ -209,6 +250,7 @@ class VisualizerControlUI(QWidget):
 
         self._init_ui()
         self._refresh_preset_list()
+        self._start_palette_refill_async()
 
         # 自动启动
         QTimer.singleShot(100, self._start_visualizer)
@@ -247,6 +289,8 @@ class VisualizerControlUI(QWidget):
 
     def _update_cfg(self, key, value):
         self.config[key] = value
+        if key in {'color_scheme', 'gradient_enabled', 'gradient_points'} or re.match(r'^c[1-5]_color$', str(key)):
+            self._update_color_preview_strip()
         if self._applying_config:
             return
         self._schedule_config_commit()
@@ -318,15 +362,90 @@ class VisualizerControlUI(QWidget):
         tg.addWidget(self.k2_lbl, r, 9)
         r += 1
 
-        tg.addWidget(QLabel("快速预设:"), r, 0)
-        self.quick_preset_combo = QComboBox()
-        self.quick_preset_combo.setEditable(False)
-        self.quick_preset_combo.currentIndexChanged.connect(self._on_quick_preset_changed)
-        tg.addWidget(self.quick_preset_combo, r, 1, 1, 4)
+        tg.addWidget(QLabel("预设管理:"), r, 0)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setEditable(False)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        tg.addWidget(self.preset_combo, r, 1, 1, 3)
 
-        tg.addWidget(QLabel("当前预览:"), r, 5)
-        self.quick_preset_preview_lbl = QLabel("（未选择）")
-        tg.addWidget(self.quick_preset_preview_lbl, r, 6, 1, 4)
+        b_save = QPushButton("另存为")
+        b_save.setMinimumHeight(24)
+        b_save.clicked.connect(self._save_preset_as)
+        tg.addWidget(b_save, r, 4)
+
+        b_reload = QPushButton("刷新")
+        b_reload.setMinimumHeight(24)
+        b_reload.clicked.connect(self._refresh_preset_list)
+        tg.addWidget(b_reload, r, 5)
+
+        b_delete_current = QPushButton("删除当前")
+        b_delete_current.setMinimumHeight(24)
+        b_delete_current.clicked.connect(self._delete_current_preset)
+        tg.addWidget(b_delete_current, r, 6)
+
+        b_manage = QPushButton("管理")
+        b_manage.setMinimumHeight(24)
+        b_manage.clicked.connect(self._open_preset_manager)
+        tg.addWidget(b_manage, r, 7)
+        r += 1
+
+        preset_row = QHBoxLayout(); preset_row.setSpacing(8)
+        self.preset_auto_check = QCheckBox("自动随机切换")
+        self.preset_auto_check.setChecked(self.config.get('preset_auto_switch', False))
+        self.preset_auto_check.toggled.connect(self._on_preset_auto_toggled)
+        preset_row.addWidget(self.preset_auto_check)
+
+        preset_row.addWidget(QLabel("间隔"))
+        self.preset_interval_spin = QDoubleSpinBox()
+        self.preset_interval_spin.setDecimals(2)
+        self.preset_interval_spin.setSingleStep(0.01)
+        self.preset_interval_spin.setRange(0.01, 3600.0)
+        self.preset_interval_spin.setSuffix(" 秒")
+        self.preset_interval_spin.setValue(self.config.get('preset_switch_interval', 10.0))
+        self.preset_interval_spin.valueChanged.connect(self._on_preset_interval_changed)
+        preset_row.addWidget(self.preset_interval_spin)
+
+        self.preset_interval_random_check = QCheckBox("随机间隔随机")
+        self.preset_interval_random_check.setChecked(self.config.get('preset_interval_random_enabled', False))
+        self.preset_interval_random_check.toggled.connect(self._on_preset_interval_random_toggled)
+        preset_row.addWidget(self.preset_interval_random_check)
+
+        preset_row.addWidget(QLabel("下限"))
+        self.preset_interval_min_spin = QDoubleSpinBox()
+        self.preset_interval_min_spin.setDecimals(2)
+        self.preset_interval_min_spin.setSingleStep(0.01)
+        self.preset_interval_min_spin.setRange(0.01, 3600.0)
+        self.preset_interval_min_spin.setSuffix(" 秒")
+        self.preset_interval_min_spin.setValue(self.config.get('preset_switch_interval_min', 1.0))
+        self.preset_interval_min_spin.valueChanged.connect(self._on_preset_interval_min_changed)
+        preset_row.addWidget(self.preset_interval_min_spin)
+
+        preset_row.addWidget(QLabel("上限"))
+        self.preset_interval_max_spin = QDoubleSpinBox()
+        self.preset_interval_max_spin.setDecimals(2)
+        self.preset_interval_max_spin.setSingleStep(0.01)
+        self.preset_interval_max_spin.setRange(0.01, 3600.0)
+        self.preset_interval_max_spin.setSuffix(" 秒")
+        self.preset_interval_max_spin.setValue(self.config.get('preset_switch_interval_max', 10.0))
+        self.preset_interval_max_spin.valueChanged.connect(self._on_preset_interval_max_changed)
+        preset_row.addWidget(self.preset_interval_max_spin)
+        preset_row.addStretch()
+        tg.addLayout(preset_row, r, 0, 1, 10)
+        self._update_preset_interval_mode_ui()
+        r += 1
+
+        tg.addWidget(QLabel("颜色方案:"), r, 0)
+        self.palette_preview_cells = []
+        palette_row = QHBoxLayout(); palette_row.setSpacing(4)
+        for _ in range(8):
+            cell = QFrame()
+            cell.setFixedSize(24, 16)
+            cell.setFrameShape(QFrame.StyledPanel)
+            cell.setStyleSheet("border:1px solid #666; border-radius:2px;")
+            self.palette_preview_cells.append(cell)
+            palette_row.addWidget(cell)
+        palette_row.addStretch()
+        tg.addLayout(palette_row, r, 1, 1, 9)
         r += 1
 
         brow = QHBoxLayout(); brow.setSpacing(8)
@@ -401,12 +520,9 @@ class VisualizerControlUI(QWidget):
 
         pages = [
             ("控制", self._build_control_section()),
-            ("预设管理", self._build_preset_section()),
             ("颜色方案", self._build_color_section()),
-            ("物理动画", self._build_physics_section()),
-            ("窗口行为", self._build_window_section()),
-            ("五层轮廓 (L1~L5)", self._build_contour_section()),
-            ("四层条形 (B12~B45)", self._build_bars_section()),
+            ("运动表现", self._build_physics_section()),
+            ("图元设置", self._build_graphics_section()),
             ("高级控制", self._build_k1_section()),
             ("🎲 随机", self._build_random_section()),
         ]
@@ -433,6 +549,11 @@ class VisualizerControlUI(QWidget):
         if self.nav_tree.topLevelItemCount() > 0:
             self.nav_tree.setCurrentItem(self.nav_tree.topLevelItem(0))
 
+        if self.config.get('preset_auto_switch', False):
+            self._schedule_next_preset_switch()
+
+        self._update_color_preview_strip()
+
     def _on_nav_changed(self, current, _previous):
         if not current:
             return
@@ -453,7 +574,7 @@ class VisualizerControlUI(QWidget):
         g.addWidget(_sh0, r, 0, 1, 3); r += 1
 
         g.addWidget(QLabel("频谱条:"), r, 0)
-        self.bars_spin = QSpinBox(); self.bars_spin.setRange(4, 1024); self.bars_spin.setSingleStep(8)
+        self.bars_spin = _SoftRangeSpinBox(3, 12, 1, 4096); self.bars_spin.setSingleStep(1)
         self.bars_spin.setValue(self.config['num_bars'])
         self.bars_spin.valueChanged.connect(lambda v: self._update_cfg('num_bars', v))
         g.addWidget(self.bars_spin, r, 1); r += 1
@@ -470,7 +591,7 @@ class VisualizerControlUI(QWidget):
         g.addWidget(self.radius_spin, r, 1); g.addWidget(QLabel("px"), r, 2); r += 1
 
         g.addWidget(QLabel("段数:"), r, 0)
-        self.seg_spin = QSpinBox(); self.seg_spin.setRange(1, 16)
+        self.seg_spin = _SoftRangeSpinBox(1, 11, 1, 999)
         self.seg_spin.setValue(self.config['circle_segments'])
         self.seg_spin.valueChanged.connect(lambda v: self._update_cfg('circle_segments', v))
         g.addWidget(self.seg_spin, r, 1); r += 1
@@ -556,6 +677,16 @@ class VisualizerControlUI(QWidget):
         b_reload.setMinimumHeight(26)
         b_reload.clicked.connect(self._refresh_preset_list)
         row1.addWidget(b_reload)
+
+        b_delete_current = QPushButton("删除当前")
+        b_delete_current.setMinimumHeight(26)
+        b_delete_current.clicked.connect(self._delete_current_preset)
+        row1.addWidget(b_delete_current)
+
+        b_manage = QPushButton("管理")
+        b_manage.setMinimumHeight(26)
+        b_manage.clicked.connect(self._open_preset_manager)
+        row1.addWidget(b_manage)
         v.addLayout(row1)
 
         row2 = QHBoxLayout(); row2.setSpacing(10)
@@ -623,60 +754,173 @@ class VisualizerControlUI(QWidget):
         clean = ''.join('_' if ch in invalid else ch for ch in name).strip().strip('.')
         return clean
 
+    def _get_ordered_preset_files(self):
+        files = sorted(PRESETS_DIR.glob('*.json'), key=lambda p: p.name.lower())
+        order = [str(x) for x in self.config.get('preset_order', []) if str(x).strip()]
+        if not order:
+            return files
+        by_stem = {fp.stem: fp for fp in files}
+        ordered = [by_stem[s] for s in order if s in by_stem]
+        ordered.extend([fp for fp in files if fp.stem not in order])
+        return ordered
+
+    def _save_preset_order(self, stems):
+        self.config['preset_order'] = [str(s) for s in stems if str(s).strip()]
+        self._schedule_config_commit()
+
     def _refresh_preset_list(self):
         self._ensure_presets_dir()
-        current_fp = self.preset_combo.currentData() or self.quick_preset_combo.currentData()
+        current_fp = self.preset_combo.currentData()
         self.preset_combo.blockSignals(True)
-        self.quick_preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.quick_preset_combo.clear()
-        files = sorted(PRESETS_DIR.glob('*.json'), key=lambda p: p.name.lower())
+        files = self._get_ordered_preset_files()
         selected_idx = -1
         for fp in files:
             self.preset_combo.addItem(fp.stem, str(fp))
-            self.quick_preset_combo.addItem(fp.stem, str(fp))
             if current_fp and str(fp) == str(current_fp):
                 selected_idx = self.preset_combo.count() - 1
+        # 清理不存在的排序项
+        normalized_order = [Path(self.preset_combo.itemData(i)).stem for i in range(self.preset_combo.count())]
+        if normalized_order != self.config.get('preset_order', []):
+            self.config['preset_order'] = normalized_order
+            self._schedule_config_commit()
         if selected_idx >= 0:
             self.preset_combo.setCurrentIndex(selected_idx)
-            self.quick_preset_combo.setCurrentIndex(selected_idx)
         self.preset_combo.blockSignals(False)
-        self.quick_preset_combo.blockSignals(False)
         self._update_preset_preview()
 
     def _sync_preset_combo_from(self, source: str):
-        if self._syncing_preset_combo:
-            return
-        self._syncing_preset_combo = True
-        try:
-            if source == 'main':
-                idx = self.preset_combo.currentIndex()
-                self.quick_preset_combo.blockSignals(True)
-                self.quick_preset_combo.setCurrentIndex(idx)
-                self.quick_preset_combo.blockSignals(False)
-            else:
-                idx = self.quick_preset_combo.currentIndex()
-                self.preset_combo.blockSignals(True)
-                self.preset_combo.setCurrentIndex(idx)
-                self.preset_combo.blockSignals(False)
-        finally:
-            self._syncing_preset_combo = False
+        return
 
     def _update_preset_preview(self):
-        name = self.preset_combo.currentText().strip() if self.preset_combo.count() > 0 else ""
-        self.quick_preset_preview_lbl.setText(name if name else "（未选择）")
+        return
 
     def _set_info_bar(self, text: str):
         self.info_bar_lbl.setText(text)
 
-    def _on_preset_changed(self, _idx):
-        self._sync_preset_combo_from('main')
-        self._update_preset_preview()
-        self._load_selected_preset(show_message=False)
+    def _open_preset_manager(self):
+        self._ensure_presets_dir()
 
-    def _on_quick_preset_changed(self, _idx):
-        self._sync_preset_combo_from('quick')
-        self._update_preset_preview()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("预设快速管理")
+        dlg.resize(420, 360)
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        lw = QListWidget()
+        root.addWidget(lw, 1)
+
+        def _reload_list(select_stem=None):
+            lw.clear()
+            for fp in self._get_ordered_preset_files():
+                lw.addItem(fp.stem)
+            if lw.count() == 0:
+                return
+            idx = 0
+            if select_stem:
+                for i in range(lw.count()):
+                    if lw.item(i).text() == select_stem:
+                        idx = i
+                        break
+            lw.setCurrentRow(idx)
+
+        def _save_order_from_list():
+            stems = [lw.item(i).text() for i in range(lw.count())]
+            self._save_preset_order(stems)
+            self._refresh_preset_list()
+
+        def _move(delta):
+            row = lw.currentRow()
+            if row < 0:
+                return
+            target = row + delta
+            if target < 0 or target >= lw.count():
+                return
+            item = lw.takeItem(row)
+            lw.insertItem(target, item)
+            lw.setCurrentRow(target)
+            _save_order_from_list()
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
+        b_up = QPushButton("上移")
+        b_up.clicked.connect(lambda: _move(-1))
+        btn_row.addWidget(b_up)
+        b_down = QPushButton("下移")
+        b_down.clicked.connect(lambda: _move(1))
+        btn_row.addWidget(b_down)
+
+        b_rename = QPushButton("重命名")
+        def _rename():
+            row = lw.currentRow()
+            if row < 0:
+                return
+            old_stem = lw.item(row).text()
+            new_name, ok = QInputDialog.getText(dlg, "重命名预设", "新名称:", text=old_stem)
+            if not ok:
+                return
+            safe = self._safe_preset_name(new_name)
+            if not safe:
+                QMessageBox.warning(dlg, "无效名称", "预设名称不能为空或仅包含非法字符")
+                return
+            old_fp = PRESETS_DIR / f"{old_stem}.json"
+            new_fp = PRESETS_DIR / f"{safe}.json"
+            if not old_fp.exists():
+                QMessageBox.warning(dlg, "失败", "原预设文件不存在")
+                _reload_list()
+                return
+            if new_fp.exists() and new_fp != old_fp:
+                QMessageBox.warning(dlg, "失败", "目标名称已存在")
+                return
+            try:
+                old_fp.rename(new_fp)
+                stems = [lw.item(i).text() for i in range(lw.count())]
+                stems[row] = safe
+                self._save_preset_order(stems)
+                self._refresh_preset_list()
+                _reload_list(select_stem=safe)
+            except Exception as e:
+                QMessageBox.critical(dlg, "错误", f"重命名失败: {e}")
+
+        b_rename.clicked.connect(_rename)
+        btn_row.addWidget(b_rename)
+
+        b_delete = QPushButton("删除")
+        def _delete():
+            row = lw.currentRow()
+            if row < 0:
+                return
+            stem = lw.item(row).text()
+            if QMessageBox.question(dlg, "确认删除", f"确定删除预设 {stem} 吗？",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            fp = PRESETS_DIR / f"{stem}.json"
+            try:
+                if fp.exists():
+                    fp.unlink()
+                stems = [lw.item(i).text() for i in range(lw.count()) if i != row]
+                self._save_preset_order(stems)
+                self._refresh_preset_list()
+                _reload_list()
+            except Exception as e:
+                QMessageBox.critical(dlg, "错误", f"删除失败: {e}")
+
+        b_delete.clicked.connect(_delete)
+        btn_row.addWidget(b_delete)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        b_close = QPushButton("关闭")
+        b_close.clicked.connect(dlg.accept)
+        close_row.addWidget(b_close)
+        root.addLayout(close_row)
+
+        _reload_list()
+        dlg.exec()
+
+    def _on_preset_changed(self, _idx):
         self._load_selected_preset(show_message=False)
 
     def _on_preset_auto_toggled(self, v):
@@ -781,6 +1025,33 @@ class VisualizerControlUI(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存预设失败: {e}")
 
+    def _delete_current_preset(self):
+        fp = self.preset_combo.currentData()
+        if not fp:
+            QMessageBox.warning(self, "提示", "当前没有可删除的预设")
+            return
+
+        stem = Path(fp).stem
+        if QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除当前预设 {stem} 吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        try:
+            p = Path(fp)
+            if p.exists():
+                p.unlink()
+            self.config['preset_order'] = [s for s in self.config.get('preset_order', []) if s != stem]
+            self._schedule_config_commit()
+            self._refresh_preset_list()
+            self._set_info_bar(f"已删除预设: {stem}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"删除预设失败: {e}")
+
     def _load_selected_preset(self, show_message=False):
         fp = self.preset_combo.currentData()
         if not fp:
@@ -794,6 +1065,9 @@ class VisualizerControlUI(QWidget):
             runtime_keep_keys = (
                 'pos_x', 'pos_y',
                 'random_checked',
+                'random_object_count_min',
+                'random_object_count_max',
+                'preset_order',
                 'preset_auto_switch',
                 'preset_switch_interval',
                 'preset_interval_random_enabled',
@@ -813,6 +1087,7 @@ class VisualizerControlUI(QWidget):
     def _build_color_section(self):
         s = _Collapsible("颜色方案", expanded=False)
         g = QVBoxLayout(); g.setContentsMargins(0, 0, 0, 0); g.setSpacing(6)
+        g.addLayout(self._build_section_action_row('color'))
 
         hr = QHBoxLayout()
         hr.addWidget(QLabel("方案:"))
@@ -888,8 +1163,26 @@ class VisualizerControlUI(QWidget):
     # ── 物理动画 ──────────────────────────────────────────
 
     def _build_physics_section(self):
-        s = _Collapsible("物理动画", expanded=False)
+        s = _Collapsible("运动表现", expanded=False)
+        w = QWidget()
+        v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('physics'))
+
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
+
+        g.addWidget(QLabel("旋转基值:"), r, 0)
+        self.rotation_base_spin = QDoubleSpinBox(); self.rotation_base_spin.setRange(0.0, 10.0)
+        self.rotation_base_spin.setDecimals(2); self.rotation_base_spin.setSingleStep(0.05)
+        self.rotation_base_spin.setValue(float(self.config.get('rotation_base', 1.0)))
+        self.rotation_base_spin.valueChanged.connect(lambda v: self._update_cfg('rotation_base', v))
+        g.addWidget(self.rotation_base_spin, r, 1); r += 1
+
+        g.addWidget(QLabel("主半径缩放:"), r, 0)
+        self.main_radius_scale_spin = QDoubleSpinBox(); self.main_radius_scale_spin.setRange(0.1, 10.0)
+        self.main_radius_scale_spin.setDecimals(2); self.main_radius_scale_spin.setSingleStep(0.05)
+        self.main_radius_scale_spin.setValue(float(self.config.get('main_radius_scale', 1.0)))
+        self.main_radius_scale_spin.valueChanged.connect(lambda v: self._update_cfg('main_radius_scale', v))
+        g.addWidget(self.main_radius_scale_spin, r, 1); r += 1
 
         for lbl_t, attr, sl_range, cfg_key, default in [
             ("阻尼:", "damp", (0, 200), 'damping', 0.85),
@@ -918,7 +1211,8 @@ class VisualizerControlUI(QWidget):
         hh.addWidget(QLabel("px"))
         g.addLayout(hh, r, 1, 1, 2); r += 1
 
-        s.add_layout(g)
+        v.addLayout(g)
+        s.add_widget(w)
         return s
 
     # ── 窗口行为 ──────────────────────────────────────────
@@ -936,6 +1230,238 @@ class VisualizerControlUI(QWidget):
         g.addWidget(self.top_check)
         s.add_layout(g)
         return s
+
+    def _build_graphics_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('graphics'))
+        v.addWidget(self._build_contour_section())
+        v.addWidget(self._build_bars_section())
+        v.addStretch()
+        return w
+
+    def _build_section_action_row(self, section: str):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        btn_rand = QPushButton("🎲 随机")
+        btn_rand.setMinimumHeight(26)
+        btn_rand.clicked.connect(lambda: self._randomize_section(section))
+        row.addWidget(btn_rand)
+        btn_reset = QPushButton("↺ 恢复默认")
+        btn_reset.setMinimumHeight(26)
+        btn_reset.clicked.connect(lambda: self._reset_section_to_default(section))
+        row.addWidget(btn_reset)
+        sec_combo = QComboBox()
+        sec_combo.setMinimumWidth(150)
+        row.addWidget(sec_combo)
+        self._section_preset_combos[section] = sec_combo
+        btn_save = QPushButton("💾 保存")
+        btn_save.setMinimumHeight(26)
+        btn_save.clicked.connect(lambda: self._save_section_preset(section))
+        row.addWidget(btn_save)
+        btn_load = QPushButton("📥 读取")
+        btn_load.setMinimumHeight(26)
+        btn_load.clicked.connect(lambda: self._load_section_preset(section))
+        row.addWidget(btn_load)
+        self._refresh_section_preset_combo(section)
+        row.addStretch()
+        return row
+
+    @staticmethod
+    def _section_keys(section: str):
+        if section == 'color':
+            return [
+                'color_scheme', 'gradient_enabled', 'gradient_mode', 'gradient_points',
+                'color_dynamic', 'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'
+            ]
+        if section == 'physics':
+            return [
+                'rotation_base', 'main_radius_scale',
+                'damping', 'spring_strength', 'gravity', 'bar_height_min', 'bar_height_max'
+            ]
+        if section == 'graphics':
+            keys = []
+            for li in range(1, 6):
+                keys.extend([
+                    f'c{li}_on', f'c{li}_color', f'c{li}_alpha', f'c{li}_thick',
+                    f'c{li}_fill', f'c{li}_fill_alpha', f'c{li}_rot_speed', f'c{li}_rot_pow'
+                ])
+                if li in (1, 2, 4, 5):
+                    keys.append(f'c{li}_step')
+                if li in (1, 5):
+                    keys.append(f'c{li}_decay')
+            for key in ('b12', 'b23', 'b34', 'b45'):
+                keys.extend([
+                    f'{key}_on', f'{key}_thick', f'{key}_fixed', f'{key}_fixed_len',
+                    f'{key}_from_start', f'{key}_from_end', f'{key}_from_center'
+                ])
+            return keys
+        return []
+
+    def _randomize_section(self, section: str):
+        if section == 'color':
+            palette = self._get_designer_palette(8)
+            self.config['color_scheme'] = 'custom'
+            self.config['gradient_enabled'] = True
+            self.config['gradient_mode'] = random.choice(['frequency', 'height'])
+            self.config['color_dynamic'] = random.choice([True, False])
+            self.config['color_cycle_speed'] = round(random.uniform(0.2, 2.5), 3)
+            self.config['color_cycle_pow'] = round(random.uniform(0.5, 3.5), 3)
+            self.config['color_cycle_a1'] = random.choice([True, False])
+
+            gp = []
+            for i in range(4):
+                pos = round(i / 3, 2)
+                gp.append((pos, palette[i]))
+            self.config['gradient_points'] = gp
+
+            for li in range(1, 6):
+                self.config[f'c{li}_color'] = palette[(li - 1) % len(palette)]
+
+            self._apply_config_to_ui(self.config)
+            return
+
+        key_set = set(self._section_keys(section))
+        if not key_set:
+            return
+
+        prop_map = {}
+        for _cat, props in self._get_randomizable_props():
+            for prop_def in props:
+                prop_map[prop_def[1]] = prop_def
+
+        color_count = 0
+        for key in key_set:
+            pd = prop_map.get(key)
+            if pd and pd[2] == 'color':
+                color_count += 1
+        color_pool = self._get_designer_palette(color_count) if color_count > 0 else []
+
+        changed = False
+        for key in key_set:
+            pd = prop_map.get(key)
+            if not pd:
+                continue
+            ptype = pd[2]
+            if ptype == 'bool':
+                self.config[key] = random.choice([True, False])
+            elif ptype == 'int':
+                self.config[key] = random.randint(pd[3], pd[4])
+            elif ptype == 'float':
+                self.config[key] = round(random.uniform(pd[3], pd[4]), 3)
+            elif ptype == 'color':
+                self.config[key] = color_pool.pop(0) if color_pool else tuple(self._generate_harmony_palette(1)[0])
+            elif ptype == 'choice':
+                self.config[key] = random.choice(pd[3])
+            changed = True
+
+        if changed:
+            if section == 'physics':
+                hmin = int(self.config.get('bar_height_min', 0))
+                hmax = int(self.config.get('bar_height_max', 500))
+                if hmin > hmax:
+                    self.config['bar_height_min'], self.config['bar_height_max'] = hmax, hmin
+            if section == 'graphics':
+                self._enforce_random_object_count()
+            self._apply_config_to_ui(self.config)
+
+    def _reset_section_to_default(self, section: str):
+        keys = self._section_keys(section)
+        if not keys:
+            return
+        defaults = _get_defaults()
+        for key in keys:
+            if key in defaults:
+                self.config[key] = defaults[key]
+        self._apply_config_to_ui(self.config)
+
+    def _ensure_section_presets_dir(self):
+        SECTION_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _section_preset_path(self, section: str):
+        self._ensure_section_presets_dir()
+        return SECTION_PRESETS_DIR / f"{section}.json"
+
+    def _read_section_presets(self, section: str):
+        fp = self._section_preset_path(section)
+        if not fp.exists():
+            return {}
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_section_presets(self, section: str, data: dict):
+        fp = self._section_preset_path(section)
+        with open(fp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def _refresh_section_preset_combo(self, section: str):
+        combo = self._section_preset_combos.get(section)
+        if combo is None:
+            return
+        presets = self._read_section_presets(section)
+        names = sorted(presets.keys(), key=lambda s: s.lower())
+        cur = combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        for name in names:
+            combo.addItem(name)
+        if cur and cur in names:
+            combo.setCurrentText(cur)
+        combo.blockSignals(False)
+
+    def _save_section_preset(self, section: str):
+        keys = self._section_keys(section)
+        if not keys:
+            return
+        combo = self._section_preset_combos.get(section)
+        default_name = combo.currentText().strip() if combo else ""
+        name, ok = QInputDialog.getText(self, "保存分区预设", "请输入名称:", text=default_name)
+        if not ok:
+            return
+        safe = self._safe_preset_name(name)
+        if not safe:
+            QMessageBox.warning(self, "无效名称", "名称不能为空或仅包含非法字符")
+            return
+
+        presets = self._read_section_presets(section)
+        presets[safe] = {k: self.config.get(k) for k in keys}
+        try:
+            self._write_section_presets(section, presets)
+            self._refresh_section_preset_combo(section)
+            if combo is not None:
+                combo.setCurrentText(safe)
+            self._set_info_bar(f"已保存{section}分区预设: {safe}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存分区预设失败: {e}")
+
+    def _load_section_preset(self, section: str):
+        keys = self._section_keys(section)
+        if not keys:
+            return
+        combo = self._section_preset_combos.get(section)
+        if combo is None:
+            return
+        name = combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "请先选择分区预设")
+            return
+        presets = self._read_section_presets(section)
+        data = presets.get(name)
+        if not isinstance(data, dict):
+            QMessageBox.warning(self, "提示", "分区预设不存在或已损坏")
+            self._refresh_section_preset_combo(section)
+            return
+        for key in keys:
+            if key in data:
+                self.config[key] = data[key]
+        self._apply_config_to_ui(self.config)
+        self._set_info_bar(f"已读取{section}分区预设: {name}")
 
     # ── 五层轮廓 ──────────────────────────────────────────
 
@@ -1161,6 +1687,21 @@ class VisualizerControlUI(QWidget):
         row2.addStretch()
         v.addLayout(row2)
 
+        row3 = QHBoxLayout(); row3.setSpacing(8)
+        row3.addWidget(QLabel("图元数范围"))
+        self.random_obj_min_spin = QSpinBox(); self.random_obj_min_spin.setRange(1, 9)
+        self.random_obj_min_spin.setValue(int(self.config.get('random_object_count_min', 1)))
+        self.random_obj_min_spin.valueChanged.connect(self._on_random_obj_min_changed)
+        self.random_obj_max_spin = QSpinBox(); self.random_obj_max_spin.setRange(1, 9)
+        self.random_obj_max_spin.setValue(int(self.config.get('random_object_count_max', 9)))
+        self.random_obj_max_spin.valueChanged.connect(self._on_random_obj_max_changed)
+        row3.addWidget(self.random_obj_min_spin)
+        row3.addWidget(QLabel("~"))
+        row3.addWidget(self.random_obj_max_spin)
+        row3.addWidget(QLabel("(总计 9 个图元)"))
+        row3.addStretch()
+        v.addLayout(row3)
+
         self.random_tree = QTreeWidget()
         self.random_tree.setHeaderHidden(True)
         self.random_tree.setMinimumHeight(180)
@@ -1189,11 +1730,11 @@ class VisualizerControlUI(QWidget):
             ("控制 · 通用", [
                 ("总开关", "master_visible", "bool"),
                 ("缩放", "global_scale", "float", 0.1, 5.0),
-                ("频谱条数", "num_bars", "int", 4, 256),
+                ("频谱条数", "num_bars", "int", 3, 12),
             ]),
             ("频谱", [
                 ("半径", "circle_radius", "int", 10, 500),
-                ("段数", "circle_segments", "int", 1, 8),
+                ("段数", "circle_segments", "int", 1, 11),
                 ("K1旋转", "circle_a1_rotation", "bool"),
                 ("K1半径", "circle_a1_radius", "bool"),
                 ("半径阻尼", "radius_damping", "float", 0.5, 0.99),
@@ -1213,7 +1754,9 @@ class VisualizerControlUI(QWidget):
                 ("循环指数", "color_cycle_pow", "float", 0.01, 5.0),
                 ("K1色相控制", "color_cycle_a1", "bool"),
             ]),
-            ("物理动画", [
+            ("运动表现", [
+                ("旋转基值", "rotation_base", "float", 0.0, 3.0),
+                ("主半径缩放", "main_radius_scale", "float", 0.1, 3.0),
                 ("阻尼", "damping", "float", 0.0, 2.0),
                 ("弹性", "spring_strength", "float", 0.0, 3.0),
                 ("重力", "gravity", "float", 0.0, 2.0),
@@ -1288,6 +1831,26 @@ class VisualizerControlUI(QWidget):
         self.config['random_checked'] = checked
         self._save_config()
 
+    def _on_random_obj_min_changed(self, v):
+        max_v = self.random_obj_max_spin.value()
+        if v > max_v:
+            self.random_obj_max_spin.blockSignals(True)
+            self.random_obj_max_spin.setValue(v)
+            self.random_obj_max_spin.blockSignals(False)
+            max_v = v
+            self._update_cfg('random_object_count_max', int(max_v))
+        self._update_cfg('random_object_count_min', int(v))
+
+    def _on_random_obj_max_changed(self, v):
+        min_v = self.random_obj_min_spin.value()
+        if v < min_v:
+            self.random_obj_min_spin.blockSignals(True)
+            self.random_obj_min_spin.setValue(v)
+            self.random_obj_min_spin.blockSignals(False)
+            min_v = v
+            self._update_cfg('random_object_count_min', int(min_v))
+        self._update_cfg('random_object_count_max', int(v))
+
     def _next_random_quick_preset_name(self, stay_seconds: int):
         self._ensure_presets_dir()
         pattern = re.compile(rf"^R{stay_seconds}_(\d+)$", re.IGNORECASE)
@@ -1320,11 +1883,133 @@ class VisualizerControlUI(QWidget):
         stay_seconds = int(time.time() - self._last_random_apply_ts)
         self._save_quick_random_preset(stay_seconds)
 
+    @staticmethod
+    def _fetch_json_url(url: str, timeout: float = 1.6):
+        req = request.Request(url, headers={'User-Agent': 'AYE-Visualizer/1.0'})
+        with request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8', errors='ignore'))
+
+    @staticmethod
+    def _fetch_json_post(url: str, payload: dict, timeout: float = 1.6):
+        body = json.dumps(payload).encode('utf-8')
+        req = request.Request(
+            url,
+            data=body,
+            headers={'Content-Type': 'application/json', 'User-Agent': 'AYE-Visualizer/1.0'},
+            method='POST'
+        )
+        with request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8', errors='ignore'))
+
+    def _fetch_palette_from_thecolorapi(self, count: int):
+        base = f"{random.randint(0, 0xFFFFFF):06x}"
+        mode = random.choice(['analogic', 'analogic-complement', 'triad', 'quad', 'monochrome'])
+        q = parse.urlencode({'hex': base, 'mode': mode, 'count': max(3, int(count))})
+        data = self._fetch_json_url(f"https://www.thecolorapi.com/scheme?{q}")
+        colors = data.get('colors', []) if isinstance(data, dict) else []
+        out = []
+        for c in colors:
+            rgb = (((c or {}).get('rgb') or {}).get('r'), ((c or {}).get('rgb') or {}).get('g'), ((c or {}).get('rgb') or {}).get('b'))
+            if all(isinstance(v, int) for v in rgb):
+                out.append((int(rgb[0]), int(rgb[1]), int(rgb[2])))
+        return out
+
+    def _fetch_palette_from_colormind(self):
+        data = self._fetch_json_post("http://colormind.io/api/", {'model': 'default'})
+        result = data.get('result', []) if isinstance(data, dict) else []
+        out = []
+        for row in result:
+            if isinstance(row, list) and len(row) >= 3:
+                r, g, b = row[0], row[1], row[2]
+                if all(isinstance(v, (int, float)) for v in (r, g, b)):
+                    out.append((int(r), int(g), int(b)))
+        return out
+
+    def _start_palette_refill_async(self, need: int = 16):
+        if self._palette_refill_running:
+            return
+        self._palette_refill_running = True
+
+        def _worker():
+            fetched = []
+            try:
+                fetched = self._fetch_palette_from_thecolorapi(max(need, 8))
+            except Exception:
+                fetched = []
+            if not fetched:
+                try:
+                    fetched = self._fetch_palette_from_colormind()
+                except Exception:
+                    fetched = []
+            if fetched:
+                self._palette_cache.extend(fetched)
+            self._palette_refill_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _generate_harmony_palette(count: int):
+        n = max(1, int(count))
+        base_h = random.random()
+        sat = random.uniform(0.55, 0.9)
+        val = random.uniform(0.75, 0.98)
+        out = []
+        for i in range(n):
+            h = (base_h + (i / max(1, n)) * random.choice([0.18, 0.22, 0.28, 0.33])) % 1.0
+            s = min(1.0, max(0.0, sat + random.uniform(-0.12, 0.10)))
+            v = min(1.0, max(0.0, val + random.uniform(-0.10, 0.08)))
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            out.append((int(r * 255), int(g * 255), int(b * 255)))
+        return out
+
+    def _get_designer_palette(self, count: int):
+        need = max(1, int(count))
+        out = []
+
+        if self._palette_cache:
+            take = min(len(self._palette_cache), need)
+            out.extend(self._palette_cache[:take])
+            self._palette_cache = self._palette_cache[take:]
+
+        if len(out) < need:
+            out.extend(self._generate_harmony_palette(need - len(out)))
+
+        if len(self._palette_cache) < 8:
+            self._start_palette_refill_async()
+
+        return out
+
+    def _enforce_random_object_count(self):
+        object_keys = ['c1_on', 'c2_on', 'c3_on', 'c4_on', 'c5_on', 'b12_on', 'b23_on', 'b34_on', 'b45_on']
+        total = len(object_keys)
+        min_v = int(self.config.get('random_object_count_min', 1))
+        max_v = int(self.config.get('random_object_count_max', total))
+        low = max(1, min(total, min(min_v, max_v)))
+        high = max(1, min(total, max(min_v, max_v)))
+        target = random.randint(low, high)
+
+        chosen = set(random.sample(object_keys, k=target))
+        for key in object_keys:
+            self.config[key] = key in chosen
+
     def _randomize_selected(self):
         """随机化所有被选中的属性"""
         now = time.time()
 
         changed = False
+        color_count = 0
+        for i in range(self.random_tree.topLevelItemCount()):
+            cat_item = self.random_tree.topLevelItem(i)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                if child.checkState(0) != Qt.Checked:
+                    continue
+                prop_def = child.data(0, Qt.UserRole)
+                if prop_def and prop_def[2] == "color":
+                    color_count += 1
+
+        color_pool = self._get_designer_palette(color_count) if color_count > 0 else []
+
         for i in range(self.random_tree.topLevelItemCount()):
             cat_item = self.random_tree.topLevelItem(i)
             for j in range(cat_item.childCount()):
@@ -1342,17 +2027,47 @@ class VisualizerControlUI(QWidget):
                 elif ptype == "float":
                     self.config[cfg_key] = round(random.uniform(prop_def[3], prop_def[4]), 3)
                 elif ptype == "color":
-                    self.config[cfg_key] = (
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                    )
+                    if color_pool:
+                        self.config[cfg_key] = color_pool.pop(0)
+                    else:
+                        self.config[cfg_key] = tuple(self._generate_harmony_palette(1)[0])
                 elif ptype == "choice":
                     self.config[cfg_key] = random.choice(prop_def[3])
                 changed = True
         if changed:
+            self.config['color_scheme'] = 'custom'
+            self._enforce_random_object_count()
             self._apply_config_to_ui(self.config)
             self._last_random_apply_ts = now
+
+    def _update_color_preview_strip(self):
+        if not hasattr(self, 'palette_preview_cells'):
+            return
+        previews = []
+        if self.config.get('color_scheme', 'rainbow') == 'custom':
+            if self.config.get('gradient_enabled', True):
+                pts = self.config.get('gradient_points', []) or []
+                for p in pts[:8]:
+                    c = p[1] if isinstance(p, (list, tuple)) and len(p) >= 2 else None
+                    if isinstance(c, (list, tuple)) and len(c) >= 3:
+                        previews.append((int(c[0]), int(c[1]), int(c[2])))
+            if len(previews) < 8:
+                for i in range(1, 6):
+                    c = self.config.get(f'c{i}_color', (255, 255, 255))
+                    previews.append((int(c[0]), int(c[1]), int(c[2])))
+                    if len(previews) >= 8:
+                        break
+        else:
+            previews = self._generate_harmony_palette(8)
+
+        while len(previews) < 8:
+            previews.append((60, 60, 60))
+
+        for i, cell in enumerate(self.palette_preview_cells):
+            c = previews[i]
+            cell.setStyleSheet(
+                f"background:rgb({c[0]},{c[1]},{c[2]}); border:1px solid #666; border-radius:2px;"
+            )
 
     # ═══════════════════════════════════════════════════════
     #  颜色控制回调
@@ -1517,6 +2232,8 @@ class VisualizerControlUI(QWidget):
             self.damp_slider.setValue(int(d.get('damping', 0.85) * 100))
             self.spring_slider.setValue(int(d.get('spring_strength', 0.3) * 100))
             self.grav_slider.setValue(int(d.get('gravity', 0.5) * 100))
+            self.rotation_base_spin.setValue(float(d.get('rotation_base', 1.0)))
+            self.main_radius_scale_spin.setValue(float(d.get('main_radius_scale', 1.0)))
             self.hmin_spin.setValue(d.get('bar_height_min', 0)); self.hmax_spin.setValue(d.get('bar_height_max', 500))
             self.radius_spin.setValue(d.get('circle_radius', 150)); self.seg_spin.setValue(d.get('circle_segments', 1))
             self.a1rot_check.setChecked(d.get('circle_a1_rotation', True)); self.a1rad_check.setChecked(d.get('circle_a1_radius', True))
@@ -1528,7 +2245,6 @@ class VisualizerControlUI(QWidget):
             self.a1_spin.setValue(d.get('a1_time_window', 10.0))
             self.k2_check.setChecked(d.get('k2_enabled', False))
             self.k2_pow_spin.setValue(d.get('k2_pow', 1.0))
-            self.trans_check.setChecked(d.get('bg_transparent', True)); self.top_check.setChecked(d.get('always_on_top', True))
 
             # 预设自动切换
             self.preset_auto_check.setChecked(d.get('preset_auto_switch', False))
@@ -1538,6 +2254,10 @@ class VisualizerControlUI(QWidget):
             self.preset_interval_max_spin.setValue(float(d.get('preset_switch_interval_max', 10.0)))
             self._update_preset_interval_mode_ui()
             self._update_preset_preview()
+            if hasattr(self, 'random_obj_min_spin'):
+                self.random_obj_min_spin.setValue(int(d.get('random_object_count_min', 1)))
+            if hasattr(self, 'random_obj_max_spin'):
+                self.random_obj_max_spin.setValue(int(d.get('random_object_count_max', 9)))
 
             # 颜色/渐变
             self.grad_check.setChecked(d.get('gradient_enabled', True))
@@ -1578,6 +2298,7 @@ class VisualizerControlUI(QWidget):
         finally:
             self._applying_config = False
 
+        self._update_color_preview_strip()
         self._save_config()
         if self.preset_auto_check.isChecked():
             self._schedule_next_preset_switch()

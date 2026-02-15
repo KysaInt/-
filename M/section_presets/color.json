@@ -1,0 +1,45 @@
+{
+  "1": {
+    "color_scheme": "custom",
+    "gradient_enabled": true,
+    "gradient_mode": "height",
+    "gradient_points": [
+      [
+        0.0,
+        [
+          152,
+          167,
+          231
+        ]
+      ],
+      [
+        0.33,
+        [
+          165,
+          178,
+          234
+        ]
+      ],
+      [
+        0.67,
+        [
+          177,
+          189,
+          237
+        ]
+      ],
+      [
+        1.0,
+        [
+          190,
+          200,
+          240
+        ]
+      ]
+    ],
+    "color_dynamic": false,
+    "color_cycle_speed": 0.78,
+    "color_cycle_pow": 2.57,
+    "color_cycle_a1": true
+  }
+}

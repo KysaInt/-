@@ -39,6 +39,7 @@ _DEFAULT_CONFIG = {
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
     'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
+    'rotation_base': 1.0, 'main_radius_scale': 1.0,
     'bar_height_min': 0, 'bar_height_max': 500,
     'color_scheme': 'rainbow',
     'gradient_points': [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))],
@@ -654,7 +655,9 @@ class CircularVisualizerWindow:
         cx = int(getattr(self, 'center_x', self.WIDTH // 2))
         cy = int(getattr(self, 'center_y', self.HEIGHT // 2))
         scale = self.config.get('global_scale', 1.0)
-        base_radius = self.config.get('circle_radius', 150) * scale
+        main_radius_scale = float(self.config.get('main_radius_scale', 1.0))
+        rotation_base = float(self.config.get('rotation_base', 1.0))
+        base_radius = self.config.get('circle_radius', 150) * scale * main_radius_scale
         segments = self.config.get('circle_segments', 1)
         seg_angle = 2 * np.pi / segments
 
@@ -702,9 +705,9 @@ class CircularVisualizerWindow:
                     factor = pow(norm_delta + 0.001, pw)
                 else:
                     factor = max(0.0, 1.0 - pow(norm_delta, abs(pw)))
-                self.layer_rotations[li] += spd * factor * 2.0
+                self.layer_rotations[li] += spd * factor * 2.0 * rotation_base
             else:
-                self.layer_rotations[li] += spd * 0.1
+                self.layer_rotations[li] += spd * 0.1 * rotation_base
             self.layer_rotations[li] %= 360
         rot = {i: self.layer_rotations[i] * np.pi / 180 for i in range(1, 6)}
 
