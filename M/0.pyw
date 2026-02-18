@@ -19,13 +19,13 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
-    QInputDialog, QDialog, QListWidget,
+    QInputDialog, QDialog, QListWidget, QLineEdit,
     QFrame, QMessageBox, QColorDialog, QScrollArea,
     QStackedWidget,
     QTreeWidget, QTreeWidgetItem,
     QProxyStyle, QStyle,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QColor, QPalette, QPainter, QPen
 
 CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
@@ -212,6 +212,103 @@ class _SoftRangeSpinBox(QSpinBox):
                 target = max(cur + steps * step, self._soft_min)
 
         self.setValue(int(target))
+
+
+class QuickColorPicker(QDialog):
+    """小型快速颜色选择窗口：预设色块 + 十六进制输入 + 打开完整颜色对话框"""
+    colorSelected = Signal(tuple)
+
+    def __init__(self, parent=None, initial=(255, 255, 255), presets=None):
+        super().__init__(parent)
+        self.selected_rgb = None
+        self.setWindowTitle("快速颜色选择")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setModal(True)
+        self.setFixedSize(260, 140)
+
+        layout = QVBoxLayout(self)
+        grid = QGridLayout(); grid.setSpacing(6)
+
+        if presets is None:
+            presets = []
+            if isinstance(parent, object) and hasattr(parent, '_get_designer_palette'):
+                try:
+                    presets = parent._get_designer_palette(12)
+                except Exception:
+                    presets = []
+        if not presets:
+            presets = [
+                (255, 255, 255), (255, 0, 0), (0, 255, 0), (0, 0, 255),
+                (255, 255, 0), (255, 0, 255), (0, 255, 255), (128, 128, 128),
+                (200, 100, 50), (50, 150, 200), (100, 200, 150), (220, 180, 80)
+            ]
+
+        for i, c in enumerate(presets[:12]):
+            btn = QPushButton()
+            btn.setFixedSize(36, 22)
+            btn.setStyleSheet(f"background:rgb({c[0]},{c[1]},{c[2]}); border:1px solid #666; border-radius:3px;")
+            btn.clicked.connect(lambda _, col=c: self._choose(col))
+            grid.addWidget(btn, i // 6, i % 6)
+
+        layout.addLayout(grid)
+
+        h = QHBoxLayout()
+        self.hex_edit = QLineEdit()
+        self.hex_edit.setPlaceholderText("#RRGGBB")
+        self.hex_edit.returnPressed.connect(self._on_hex_enter)
+        try:
+            self.hex_edit.setText('#%02x%02x%02x' % tuple(initial))
+        except Exception:
+            self.hex_edit.setText('#ffffff')
+        h.addWidget(self.hex_edit)
+        more = QPushButton("更多…")
+        more.clicked.connect(self._on_more)
+        h.addWidget(more)
+        layout.addLayout(h)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        b_ok = QPushButton("确定")
+        b_ok.clicked.connect(self._on_ok)
+        close_row.addWidget(b_ok)
+        b_cancel = QPushButton("取消")
+        b_cancel.clicked.connect(self.reject)
+        close_row.addWidget(b_cancel)
+        layout.addLayout(close_row)
+
+    def _choose(self, col):
+        self.selected_rgb = (int(col[0]), int(col[1]), int(col[2]))
+        self.accept()
+
+    def _on_hex_enter(self):
+        t = self.hex_edit.text().strip().lstrip('#')
+        if len(t) == 6:
+            try:
+                r = int(t[0:2], 16); g = int(t[2:4], 16); b = int(t[4:6], 16)
+                self.selected_rgb = (r, g, b)
+                self.accept()
+            except Exception:
+                pass
+
+    def _on_more(self):
+        cur = self.selected_rgb or (255, 255, 255)
+        c = QColorDialog.getColor(QColor(*cur), self, "更多颜色")
+        if c.isValid():
+            self.selected_rgb = (c.red(), c.green(), c.blue())
+            self.accept()
+
+    def _on_ok(self):
+        t = self.hex_edit.text().strip().lstrip('#')
+        if len(t) == 6:
+            try:
+                r = int(t[0:2], 16); g = int(t[2:4], 16); b = int(t[4:6], 16)
+                self.selected_rgb = (r, g, b)
+            except Exception:
+                self.selected_rgb = None
+        if self.selected_rgb:
+            self.accept()
+        else:
+            self.reject()
 
 
 class VisualizerControlUI(QWidget):
@@ -443,6 +540,12 @@ class VisualizerControlUI(QWidget):
             cell.setFrameShape(QFrame.StyledPanel)
             cell.setStyleSheet("border:1px solid #666; border-radius:2px;")
             self.palette_preview_cells.append(cell)
+            idx = len(self.palette_preview_cells) - 1
+            # allow clicking the small preview cell to edit color
+            cell.setCursor(Qt.PointingHandCursor)
+            def _make_handler(i):
+                return lambda ev: self._on_palette_cell_clicked(i)
+            cell.mousePressEvent = _make_handler(idx)
             palette_row.addWidget(cell)
         palette_row.addStretch()
         tg.addLayout(palette_row, r, 1, 1, 9)
@@ -2069,6 +2172,43 @@ class VisualizerControlUI(QWidget):
                 f"background:rgb({c[0]},{c[1]},{c[2]}); border:1px solid #666; border-radius:2px;"
             )
 
+    def _on_palette_cell_clicked(self, idx: int):
+        # 点击主色带上的小色块以快速编辑颜色
+        if idx < 0 or idx >= len(self.palette_preview_cells):
+            return
+        # 读取当前 displayed color
+        style = self.palette_preview_cells[idx].styleSheet()
+        m = re.search(r'rgb\((\d+),(\d+),(\d+)\)', style)
+        if m:
+            cur = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        else:
+            cur = (255, 255, 255)
+
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
+        if picker.exec() != QDialog.Accepted or not picker.selected_rgb:
+            return
+        new_col = picker.selected_rgb
+
+        # 如果当前为自定义渐变并且存在对应控制点，则更新控制点
+        if self.config.get('color_scheme', 'rainbow') == 'custom' and self.config.get('gradient_enabled', True):
+            pts = list(self.config.get('gradient_points', []))
+            if idx < len(pts):
+                pts[idx] = (pts[idx][0], new_col)
+            else:
+                # append at end with guessed position
+                pos = min(1.0, max(0.0, idx / max(1, len(self.palette_preview_cells) - 1)))
+                pts.append((pos, new_col))
+            self._update_cfg('gradient_points', pts)
+        else:
+            # 否则映射到 c1..c5
+            li = (idx % 5) + 1
+            key = f'c{li}_color'
+            self._update_cfg(key, new_col)
+
+        # 立即刷新 UI 与渲染
+        self._update_color_preview_strip()
+        self._apply_config_to_ui(self.config)
+
     # ═══════════════════════════════════════════════════════
     #  颜色控制回调
     # ═══════════════════════════════════════════════════════
@@ -2081,9 +2221,9 @@ class VisualizerControlUI(QWidget):
     def _pick_layer_color(self, layer_idx):
         key = f'c{layer_idx}_color'
         cur = self.config.get(key, (255, 255, 255))
-        c = QColorDialog.getColor(QColor(*cur), self, f"L{layer_idx} 颜色")
-        if c.isValid():
-            rgb = (c.red(), c.green(), c.blue())
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
+        if picker.exec() == QDialog.Accepted and picker.selected_rgb:
+            rgb = picker.selected_rgb
             btn = getattr(self, f'c{layer_idx}_color_btn')
             btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
             self._update_cfg(key, rgb)
@@ -2133,9 +2273,9 @@ class VisualizerControlUI(QWidget):
         if idx >= len(pts):
             return
         cur = pts[idx][1]
-        c = QColorDialog.getColor(QColor(*cur), self, "选择颜色")
-        if c.isValid():
-            rgb = (c.red(), c.green(), c.blue())
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
+        if picker.exec() == QDialog.Accepted and picker.selected_rgb:
+            rgb = picker.selected_rgb
             btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
             pts[idx] = (pts[idx][0], rgb)
             self._update_cfg('gradient_points', pts)

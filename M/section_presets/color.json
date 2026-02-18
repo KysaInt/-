@@ -41,5 +41,48 @@
     "color_cycle_speed": 0.78,
     "color_cycle_pow": 2.57,
     "color_cycle_a1": true
+  },
+  "2": {
+    "color_scheme": "custom",
+    "gradient_enabled": true,
+    "gradient_mode": "frequency",
+    "gradient_points": [
+      [
+        0.0,
+        [
+          219,
+          62,
+          29
+        ]
+      ],
+      [
+        0.33,
+        [
+          195,
+          107,
+          52
+        ]
+      ],
+      [
+        0.67,
+        [
+          202,
+          135,
+          37
+        ]
+      ],
+      [
+        1.0,
+        [
+          215,
+          202,
+          58
+        ]
+      ]
+    ],
+    "color_dynamic": true,
+    "color_cycle_speed": 1.48,
+    "color_cycle_pow": 2.97,
+    "color_cycle_a1": false
   }
 }

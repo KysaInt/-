@@ -234,7 +234,7 @@
     "b45_from_center"
   ],
   "random_object_count_min": 2,
-  "random_object_count_max": 4,
+  "random_object_count_max": 3,
   "preset_order": [
     "A1",
     "A2",

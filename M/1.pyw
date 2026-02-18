@@ -783,7 +783,7 @@ class CircularVisualizerWindow:
         if not self.config_queue:
             return
         try:
-            while not self.config_queue.empty():
+            while True:
                 new = self.config_queue.get_nowait()
 
                 # 特殊命令
@@ -806,6 +806,7 @@ class CircularVisualizerWindow:
                     self.peak_inner_heights = np.zeros(self.NUM_BARS)
                     n = min(len(old_h), self.NUM_BARS)
                     self.bar_heights[:n] = old_h[:n]
+                    self._update_colors()
 
                 # 实时参数
                 self.smoothing_factor = new.get('smoothing', 0.7)
@@ -821,9 +822,17 @@ class CircularVisualizerWindow:
                     self._set_click_through(not new.get('drag_adjust_mode', False))
                     self.dragging = False
 
-                # 颜色变化
-                if (new.get('color_scheme') != old.get('color_scheme') or
-                        new.get('gradient_points') != old.get('gradient_points')):
+                # 颜色变化（分区预设读取时也需要立即生效）
+                if (
+                    new.get('color_scheme') != old.get('color_scheme') or
+                    new.get('gradient_points') != old.get('gradient_points') or
+                    new.get('gradient_enabled') != old.get('gradient_enabled') or
+                    new.get('gradient_mode') != old.get('gradient_mode') or
+                    new.get('color_dynamic') != old.get('color_dynamic') or
+                    new.get('color_cycle_speed') != old.get('color_cycle_speed') or
+                    new.get('color_cycle_pow') != old.get('color_cycle_pow') or
+                    new.get('color_cycle_a1') != old.get('color_cycle_a1')
+                ):
                     self._update_colors()
 
                 # 位置同步（来自控制台手动设置，可视化中心点）
