@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsItem, QGraphicsPathItem, QGraphicsProxyWidget,
     QLineEdit, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox,
     QSplitter, QSizePolicy, QTabWidget, QListWidget,
-    QDialog, QScrollBar,
+    QDialog, QScrollBar, QFormLayout, QDialogButtonBox, QComboBox,
 )
 from PySide6.QtCore import (
     Qt, QRectF, QPointF, QPropertyAnimation, QEasingCurve,
@@ -104,6 +104,7 @@ NODE_DEFINITIONS = {
     "Boolean":      ([], ["Value"]),
     "String":       ([], ["Value"]),
     "Slider":       ([], ["Value"]),
+    "Num Slider":   ([], ["Value"]),
     # ── 输出 Output ──
     "Viewer":       (["Data"], []),
     "Print":        (["Value"], []),
@@ -176,6 +177,7 @@ NODE_EVAL_FUNCS = {
     "Boolean":      lambda i, w: {"Value": bool(w) if w is not None else False},
     "String":       lambda i, w: {"Value": w if w is not None else ""},
     "Slider":       lambda i, w: {"Value": w if w is not None else 50},
+    "Num Slider":   lambda i, w: {"Value": w if w is not None else 0.0},
     # Output (无输出端口，在 evaluate 中特殊处理)
     "Viewer":       lambda i, w: {},
     "Print":        lambda i, w: {},
@@ -242,7 +244,7 @@ NODE_EVAL_FUNCS = {
 }
 
 NODE_CATEGORIES = {
-    "输入":   ["Number", "Integer", "Boolean", "String", "Slider"],
+    "输入":   ["Number", "Integer", "Boolean", "String", "Slider", "Num Slider"],
     "输出":   ["Viewer", "Print"],
     "数学":   ["Add", "Subtract", "Multiply", "Divide", "Power", "Modulo",
                "Absolute", "Negate", "Sqrt", "Sin", "Cos", "Tan",
@@ -358,7 +360,341 @@ class CollapsibleBox(QWidget):
         self.anim.start()
 
     def _update_arrow(self, ex):
-        self.toggle_button.setText(("▼ " if ex else "► ") + self._title)
+        self.toggle_button.setText((("▼ " if ex else "► ") + self._title))
+
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  DragNumberWidget — GH 风格可拖拽数值控件                           ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+class NumSliderSettingsDialog(QDialog):
+    """
+    GH 风格 Slider 详细设置对话框。
+    """
+    _QSS = """
+        QDialog { background:#252525; }
+        QLabel  { color:#bbb; font-size:11px; }
+        QDoubleSpinBox, QSpinBox {
+            background:#1a1a1a; color:#ddd; border:1px solid #555;
+            border-radius:3px; padding:2px 6px; font-size:11px;
+            min-width:90px;
+        }
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+        QSpinBox::up-button,       QSpinBox::down-button {
+            width:16px; background:#333; border:1px solid #555;
+        }
+        QPushButton {
+            background:#3a3a3a; color:#ddd; border:1px solid #555;
+            border-radius:3px; padding:4px 14px; font-size:11px;
+        }
+        QPushButton:hover   { background:#4a4a4a; }
+        QPushButton:pressed { background:#2a82da; }
+        QLabel#hint {
+            color:#666; font-size:9px;
+        }
+    """
+
+    def __init__(self, parent, value, min_val, max_val, decimals, step):
+        super().__init__(parent)
+        self.setWindowTitle("Num Slider 设置")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setStyleSheet(self._QSS)
+        self.setFixedWidth(300)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 10)
+        lay.setSpacing(10)
+
+        title = QLabel("<b>Num Slider 详细设置</b>")
+        title.setStyleSheet("color:#2a82da;font-size:13px;")
+        lay.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setSpacing(6)
+
+        def _dspin(lo, hi, dec, val):
+            sb = QDoubleSpinBox()
+            sb.setRange(lo, hi); sb.setDecimals(dec); sb.setValue(val)
+            sb.setButtonSymbols(QDoubleSpinBox.UpDownArrows)
+            return sb
+
+        self.sb_min  = _dspin(-1e9, 1e9, 6, min_val)
+        self.sb_max  = _dspin(-1e9, 1e9, 6, max_val)
+        self.sb_val  = _dspin(-1e9, 1e9, 6, value)
+        self.sb_step = _dspin(0,    1e9, 6, step)
+
+        self.sp_dec = QSpinBox()
+        self.sp_dec.setRange(0, 10); self.sp_dec.setValue(decimals)
+        self.sp_dec.setButtonSymbols(QSpinBox.UpDownArrows)
+
+        form.addRow("最小值 (Min)",  self.sb_min)
+        form.addRow("最大値 (Max)",  self.sb_max)
+        form.addRow("当前値",       self.sb_val)
+        form.addRow("最小步进 (Step)", self.sb_step)
+        form.addRow("小数位 (Decimals)", self.sp_dec)
+        lay.addLayout(form)
+
+        # 快速输入提示
+        hint = QLabel(
+            "快捷输入: 在拖拽条双击后输入\n"
+            "  .1 → 整数 (step=1, dec=0)　　.01 → 1位小数\n"
+            "  .0···1 → N位小数 (N个零后加一个非零数字)"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.setStyleSheet("")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def result_values(self):
+        lo  = self.sb_min.value()
+        hi  = self.sb_max.value()
+        if lo >= hi: hi = lo + 1
+        return (
+            self.sb_val.value(),
+            lo, hi,
+            self.sp_dec.value(),
+            self.sb_step.value(),
+        )
+
+
+class DragNumberWidget(QWidget):
+    """
+    Grasshopper Number Slider 风格数值控件。
+
+    拖动操作
+    ────────
+    · 左右拖动          — 改变数值，每步对齐到 step
+    · Ctrl  + 拖             — 精细 (×0.1)
+    · Shift + 拖             — 粗调 (×10)
+
+    键盘输入 (双击后弹出 overlay)
+    ────────────────────────
+    · 直接输入数字         — 设置宽定数値
+    · .1                  — step=1,  dec=0 (整数)
+    · .01                 — step=0.1, dec=1
+    · .001                — step=0.01, dec=2  … 以此类推
+    · (小数点后 N 个零尾随一个非零数字 = N 位小数精度)
+
+    双击标题栏按鈕 — 开启详细设置对话框
+    ────────────────────────
+    Min / Max / 当前値 / 最小步进 / 小数位
+    """
+    valueChanged = Signal(float)
+
+    # 拖动每象素对应的 scene 单位中，拖多少像素改变多少幅度
+    _PIXELS_PER_UNIT = 4      # 每 4px 运动改变 1*step
+
+    def __init__(self, value=0.0, min_val=0.0, max_val=10.0,
+                 decimals=2, step=0.01, parent=None):
+        super().__init__(parent)
+        self._value    = float(value)
+        self._min      = float(min_val)
+        self._max      = float(max_val)
+        self._decimals = int(decimals)     # 显示小数位
+        self._step     = float(step)       # 拖动对齐单位
+
+        self._drag_x  = None
+        self._drag_v0 = 0.0
+        self._editing = False              # overlay 是否显示中
+
+        self.setCursor(Qt.SizeHorCursor)
+        self.setFixedHeight(28)
+        self.setMinimumWidth(160)
+
+        # 精确输入 overlay
+        self._edit = QLineEdit(self)
+        self._edit.setAlignment(Qt.AlignCenter)
+        self._edit.setStyleSheet(
+            "background:#111;color:#eee;border:1px solid #2a82da;"
+            "border-radius:3px;font-size:11px;padding:0;")
+        self._edit.hide()
+        self._edit.installEventFilter(self)
+        self._edit.returnPressed.connect(self._commit)
+
+    # ── 公开接口 ─────────────────────────────────────────────────────
+    def value(self):    return self._value
+    def minimum(self):  return self._min
+    def maximum(self):  return self._max
+    def decimals(self): return self._decimals
+    def step(self):     return self._step
+
+    def setValue(self, v):
+        if self._step > 0:
+            import math as _m
+            v = round(round(v / self._step) * self._step, 12)
+        v = max(self._min, min(self._max, float(v)))
+        # 小数拆舍对齐
+        v = round(v, self._decimals)
+        changed = (v != self._value)
+        self._value = v
+        self.update()
+        if changed:
+            self.valueChanged.emit(self._value)
+
+    def configure(self, value, min_val, max_val, decimals, step):
+        """一次性设置五个参数，只发一次 valueChanged。"""
+        self._min      = float(min_val)
+        self._max      = float(max_val)
+        self._decimals = max(0, int(decimals))
+        self._step     = max(0.0, float(step))
+        self.setValue(value)
+
+    # ── 绘制 ─────────────────────────────────────────────────────────
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+
+        bg = QPainterPath(); bg.addRoundedRect(r, 4, 4)
+        p.setBrush(QColor(22, 22, 22)); p.setPen(Qt.NoPen)
+        p.drawPath(bg)
+
+        span = self._max - self._min
+        ratio = (self._value - self._min) / span if span else 0.0
+        ratio = max(0.0, min(1.0, ratio))
+        fill_w = ratio * r.width()
+        if fill_w > 0.5:
+            fill_rect = QRectF(0, 0, fill_w, r.height())
+            fp = QPainterPath(); fp.addRoundedRect(fill_rect, 4, 4)
+            if ratio < 1.0:
+                clip = QPainterPath()
+                clip.addRect(QRectF(0, 0, fill_w, r.height()))
+                fp = fp.intersected(clip)
+            p.setBrush(QColor(36, 106, 170, 210)); p.setPen(Qt.NoPen)
+            p.drawPath(fp)
+
+        # 零点线
+        if span and self._min < 0 < self._max:
+            zx = (-self._min / span) * r.width()
+            p.setPen(QPen(QColor(255, 255, 255, 50), 1))
+            p.drawLine(QPointF(zx, 2), QPointF(zx, r.height() - 2))
+
+        # tick 刻度（每 10% 一条小刻度）
+        p.setPen(QPen(QColor(80, 80, 80, 120), 1))
+        for i in range(1, 10):
+            tx = r.width() * i / 10
+            p.drawLine(QPointF(tx, r.height()-4), QPointF(tx, r.height()-1))
+
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(65, 65, 65), 1))
+        p.drawPath(bg)
+
+        # 主数値
+        fmt = f"{{:.{self._decimals}f}}"
+        val_txt = fmt.format(self._value)
+        font = self.font(); font.setPointSize(10); font.setBold(True)
+        p.setFont(font); p.setPen(QColor(235, 235, 235))
+        p.drawText(self.rect(), Qt.AlignCenter, val_txt)
+
+        # min / max 角落小字
+        font.setBold(False); font.setPointSize(7); p.setFont(font)
+        p.setPen(QColor(100, 100, 100))
+        mn = fmt.format(self._min); mx = fmt.format(self._max)
+        p.drawText(QRectF(4, 0, 55, r.height()), Qt.AlignVCenter|Qt.AlignLeft,  mn)
+        p.drawText(QRectF(r.width()-59, 0, 55, r.height()), Qt.AlignVCenter|Qt.AlignRight, mx)
+
+        # step 小标记（右下角）
+        step_txt = f"±{self._step:.{self._decimals}f}"
+        font.setPointSize(6); p.setFont(font)
+        p.setPen(QColor(80, 80, 80))
+        p.drawText(QRectF(0, r.height()-13, r.width()-4, 13),
+                   Qt.AlignVCenter|Qt.AlignRight, step_txt)
+
+    # ── 鼠标 ─────────────────────────────────────────────────────────
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and not self._editing:
+            self._drag_x  = ev.position().x()
+            self._drag_v0 = self._value
+        ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_x is not None and not self._editing:
+            dx    = ev.position().x() - self._drag_x
+            step  = self._step if self._step > 0 else 0.01
+            if ev.modifiers() & Qt.ControlModifier:
+                step *= 0.1
+            elif ev.modifiers() & Qt.ShiftModifier:
+                step *= 10.0
+            # dx / _PIXELS_PER_UNIT ≈ 步数
+            n_steps = dx / self._PIXELS_PER_UNIT
+            self.setValue(self._drag_v0 + n_steps * step)
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        self._drag_x = None
+        ev.accept()
+
+    def mouseDoubleClickEvent(self, ev):
+        """*双击拖拽条* 开启详细设置对话框。"""
+        self._open_settings_dialog()
+        ev.accept()
+
+    # ── overlay 输入框 ──────────────────────────────────────────────
+    def open_inline_edit(self):
+        """在拖拽条内显示输入框。"""
+        self._editing = True
+        self._edit.setGeometry(self.rect())
+        self._edit.setText(f"{self._value:.{self._decimals}f}")
+        self._edit.selectAll()
+        self._edit.show(); self._edit.setFocus()
+
+    def eventFilter(self, obj, ev):
+        if obj is self._edit and ev.type() == ev.Type.KeyPress:
+            if ev.key() == Qt.Key_Escape:
+                self._edit.hide(); self._editing = False; return True
+        return super().eventFilter(obj, ev)
+
+    def _commit(self):
+        txt = self._edit.text().strip()
+        self._edit.hide(); self._editing = False
+
+        # 快捷语法: ".XXX" — 小数点后全是零尾随一个 1（可选）
+        # .1    → step=1,     dec=0
+        # .01   → step=0.1,   dec=1
+        # .001  → step=0.01,  dec=2
+        # .0001 → step=0.001, dec=3
+        import re
+        m = re.fullmatch(r"\.(0*)(\d?)", txt)
+        if m:
+            zeros = len(m.group(1))
+            # dec = zeros 个零后的一位小数→ zeros 位小数
+            dec  = zeros
+            step = 10 ** (-zeros)   # .1→1, .01→0.1, .001→0.01 …
+            self._decimals = dec
+            self._step     = step
+            self.update()
+            self.valueChanged.emit(self._value)
+            return
+
+        try:
+            self.setValue(float(txt))
+        except ValueError:
+            pass
+
+    # ── 详细设置对话框 ────────────────────────────────────────────
+    def _open_settings_dialog(self):
+        dlg = NumSliderSettingsDialog(
+            self,
+            value    = self._value,
+            min_val  = self._min,
+            max_val  = self._max,
+            decimals = self._decimals,
+            step     = self._step,
+        )
+        dlg.move(self.mapToGlobal(QPointF(0, self.height()).toPoint()))
+        if dlg.exec() == QDialog.Accepted:
+            v, lo, hi, dec, step = dlg.result_values()
+            self.configure(v, lo, hi, dec, step)
+
+    def resizeEvent(self, ev):
+        self._edit.setGeometry(self.rect())
+
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -373,9 +709,9 @@ class NodeEdge(QGraphicsPathItem):
         self.source_pos = QPointF()
         self.dest_pos = QPointF()
         self.setZValue(-1)
-        self._pen_default  = QPen(QColor(170,170,170,220), 2.0, cap=Qt.RoundCap)
-        self._pen_selected = QPen(QColor(255,200,50,255), 2.5, cap=Qt.RoundCap)
-        self._pen_drag     = QPen(QColor(255,255,255,140), 2.0, Qt.DashLine, cap=Qt.RoundCap)
+        self._pen_default  = QPen(QColor(170,170,170,220), 2.0, Qt.SolidLine, Qt.RoundCap)
+        self._pen_selected = QPen(QColor(255,200,50,255), 2.5, Qt.SolidLine, Qt.RoundCap)
+        self._pen_drag     = QPen(QColor(255,255,255,140), 2.0, Qt.DashLine,  Qt.RoundCap)
         self.setFlags(QGraphicsItem.ItemIsSelectable)
 
     def update_positions(self):
@@ -549,6 +885,37 @@ class NodeItem(QGraphicsItem):
             w = container; h = 20
             self._slider_ref = sl
 
+        elif self.title == "Num Slider":
+            # 加宽节点以便拖拽控件有足够空间
+            self.width = 220
+            for s in self.outputs:          # 同步 output socket x 位置
+                s.setPos(self.width, s.pos().y())
+
+            # 外包容器：拖拽条 + 设置按鈕
+            container = QWidget()
+            container.setObjectName("sliderContainer")
+            vl = QVBoxLayout(container)
+            vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(2)
+
+            dw = DragNumberWidget(value=0.0, min_val=0.0, max_val=10.0,
+                                  decimals=2, step=0.01)
+            dw.valueChanged.connect(self._on_widget_changed)
+            vl.addWidget(dw)
+
+            btn = QPushButton("⚙ 设置")
+            btn.setFixedHeight(18)
+            btn.setStyleSheet(
+                "QPushButton{background:#2a2a2a;color:#888;border:1px solid #444;"
+                "border-radius:2px;font-size:9px;padding:0 4px;}"
+                "QPushButton:hover{background:#3a3a3a;color:#bbb;}"
+                "QPushButton:pressed{background:#2a82da;color:#fff;}")
+            btn.clicked.connect(lambda: dw._open_settings_dialog())
+            vl.addWidget(btn)
+
+            self._drag_number_widget = dw
+            w = container
+            h = 28 + 20   # 拖拽条 + 按鈕
+
         elif self.title == "Expression":
             w = QLineEdit(); w.setPlaceholderText("x + y"); w.setText("x + y")
             w.textChanged.connect(self._on_widget_changed)
@@ -562,10 +929,15 @@ class NodeItem(QGraphicsItem):
         if w is None:
             return
 
-        w.setStyleSheet(NODE_WIDGET_QSS)
-        w.setFixedHeight(h)
         ww = self.width - 16
+        # Num Slider 容器不套用全局 QSS（内部已有独立样式）
+        if self.title != "Num Slider":
+            w.setStyleSheet(NODE_WIDGET_QSS)
+        w.setFixedHeight(h)
         w.setFixedWidth(ww)
+        # 同步内部 DragNumberWidget 宽度
+        if hasattr(self, '_drag_number_widget'):
+            self._drag_number_widget.setFixedWidth(ww)
 
         proxy = QGraphicsProxyWidget(self)
         proxy.setWidget(w)
@@ -588,6 +960,9 @@ class NodeItem(QGraphicsItem):
         if isinstance(w, QSpinBox): return w.value()
         if isinstance(w, QCheckBox): return w.isChecked()
         if isinstance(w, QLineEdit): return w.text()
+        if isinstance(w, DragNumberWidget): return w.value()
+        # Num Slider 包装在 container 里
+        if hasattr(self, '_drag_number_widget'): return self._drag_number_widget.value()
         if hasattr(self, '_slider_ref'): return self._slider_ref.value()
         return None
 
@@ -635,6 +1010,12 @@ class NodeItem(QGraphicsItem):
                     e.dest_socket.value = s.value
                     e.dest_socket.node.evaluate(_visited)
 
+        # 根调用完成后刷新属性面板（仅在该节点被选中时）
+        if len(_visited) == 1 and self.isSelected():
+            sc = self.scene()
+            if sc and hasattr(sc, 'main_window') and sc.main_window:
+                sc.main_window._on_selection_changed()
+
     # ── 绘制 ─────────────────────────────────────────────────────────
     def boundingRect(self):
         pad = NodeSocket.R + 2
@@ -652,14 +1033,21 @@ class NodeItem(QGraphicsItem):
         painter.setPen(QPen(bc, 2.0 if self.isSelected() else 1.2))
         painter.drawPath(bp)
 
-        # 标题栏
-        tr = QRectF(0, 0, self.width, self.title_h)
-        tp = QPainterPath(); tp.addRoundedRect(tr, 6, 6)
-        tp.addRect(0, self.title_h - 6, self.width, 6)
+        # 标题栏 — 手动构造路径：顶部圆角，底部直角，彻底消除碎屑
+        r6 = 6.0
+        tp = QPainterPath()
+        tp.moveTo(0, self.title_h)                                    # 左下
+        tp.lineTo(0, r6)                                              # 左边
+        tp.arcTo(QRectF(0, 0, r6*2, r6*2), 180, -90)                 # 左上圆角
+        tp.lineTo(self.width - r6, 0)                                 # 顶边
+        tp.arcTo(QRectF(self.width - r6*2, 0, r6*2, r6*2), 90, -90)  # 右上圆角
+        tp.lineTo(self.width, self.title_h)                           # 右边
+        tp.closeSubpath()                                             # 底边直线闭合
         painter.setBrush(QBrush(self.title_color))
         painter.setPen(Qt.NoPen)
         painter.drawPath(tp)
 
+        tr = QRectF(0, 0, self.width, self.title_h)   # 标题文字区域
         font = painter.font()
         font.setBold(True); font.setPointSize(9); painter.setFont(font)
         painter.setPen(QPen(QColor(240,240,240)))
@@ -690,7 +1078,10 @@ class NodeItem(QGraphicsItem):
 class NodeSearchPopup(QDialog):
     node_selected = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title="搜索节点…", filter_names=None):
+        """
+        filter_names: 若给定 set/list，则只显示此范围内的节点名称。
+        """
         super().__init__(parent)
         self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
         self.setFixedSize(260, 320)
@@ -703,7 +1094,7 @@ class NodeSearchPopup(QDialog):
             QListWidget::item:hover{background:#3a3a3a;}
         """)
         l = QVBoxLayout(self); l.setContentsMargins(0,0,0,0); l.setSpacing(0)
-        self.sb = QLineEdit(); self.sb.setPlaceholderText("搜索节点…")
+        self.sb = QLineEdit(); self.sb.setPlaceholderText(title)
         self.sb.textChanged.connect(self._filter)
         self.lw = QListWidget()
         self.lw.itemActivated.connect(self._accept)
@@ -712,7 +1103,8 @@ class NodeSearchPopup(QDialog):
         self._items = []
         for cat, ns in NODE_CATEGORIES.items():
             for n in ns:
-                self._items.append((n, cat))
+                if filter_names is None or n in filter_names:
+                    self._items.append((n, cat))
         self._items.sort(key=lambda x: x[0])
         for name, cat in self._items:
             self.lw.addItem(f"{name}  [{cat}]")
@@ -791,8 +1183,10 @@ class NodeView(QGraphicsView):
         self._zoom_range = (-8, 12)
         self._zf = 1.15
         self._cur_edge = None
+        self._drag_origin_for_connect = None   # 拖线到空白时记录来源 socket
         self._panning = False
         self._pan_pos = QPointF()
+        self._clipboard = []                   # Ctrl+C/V 剪贴板
 
     # ── 键盘 ─────────────────────────────────────────────────────────
     def keyPressEvent(self, ev):
@@ -800,7 +1194,52 @@ class NodeView(QGraphicsView):
             self._open_search(); ev.accept(); return
         if ev.key() == Qt.Key_Delete:
             self._del_selected(); ev.accept(); return
+        if ev.modifiers() & Qt.ControlModifier:
+            if ev.key() == Qt.Key_C:
+                self._copy_selected(); ev.accept(); return
+            if ev.key() == Qt.Key_V:
+                self._paste_nodes(); ev.accept(); return
         super().keyPressEvent(ev)
+
+    # ── 复制 / 粘贴 ──────────────────────────────────────────────────
+    def _copy_selected(self):
+        self._clipboard.clear()
+        for item in self.scene().selectedItems():
+            if isinstance(item, NodeItem):
+                self._clipboard.append({
+                    "title": item.title,
+                    "pos":   (item.pos().x(), item.pos().y()),
+                })
+        sc = self.scene()
+        if sc and hasattr(sc, 'main_window') and sc.main_window and self._clipboard:
+            sc.main_window.log(f"📋 已复制 {len(self._clipboard)} 个节点")
+
+    def _paste_nodes(self):
+        if not self._clipboard:
+            return
+        sc = self.scene()
+        # 清除旧选中，粘贴后选中新节点
+        for item in sc.selectedItems():
+            item.setSelected(False)
+        offset = 40
+        for info in self._clipboard:
+            title = info["title"]
+            if title not in NODE_DEFINITIONS:
+                continue
+            ox, oy = info["pos"]
+            mw = sc.main_window if hasattr(sc, 'main_window') else None
+            if mw:
+                ins, outs = NODE_DEFINITIONS[title]
+                cat = _NODE_TO_CAT.get(title, "")
+                node = NodeItem(title, cat)
+                for n in ins:  node.add_input(n)
+                for n in outs: node.add_output(n)
+                node.setup_widget()
+                node.setPos(ox + offset, oy + offset)
+                sc.addItem(node)
+                node.setSelected(True)
+        if sc and hasattr(sc, 'main_window') and sc.main_window:
+            sc.main_window.log(f"📌 已粘贴 {len(self._clipboard)} 个节点")
 
     def _open_search(self):
         p = NodeSearchPopup(self)
@@ -836,21 +1275,33 @@ class NodeView(QGraphicsView):
             self._zoom -= 1; self.scale(1/self._zf, 1/self._zf)
 
     # ── 辅助：查找点击处的 NodeSocket ────────────────────────────────
-    def _socket_at(self, vpos):
-        """在视图坐标 vpos(QPoint) 处查找 NodeSocket (带容差)。"""
-        # 1) 精确点击检测
-        for item in self.items(vpos):
+    def _socket_at(self, vpos, exclude_edge=None):
+        """在视图坐标 vpos(QPoint) 处查找 NodeSocket (带容差)。
+        exclude_edge: 临时从场景排除的拖拽 edge，避免路径遮挡检测。
+        """
+        scene_pt = self.mapToScene(vpos)
+
+        # 缩放感知容差（保证视觉像素约 14px）
+        scale = self.transform().m11() if self.transform().m11() > 0 else 1.0
+        tol_scene = max(NodeSocket.HIT_R, int(14 / scale))
+
+        # 1) 精确场景坐标检测
+        for item in self.scene().items(scene_pt):
+            if item is exclude_edge:
+                continue
             if isinstance(item, NodeSocket):
                 return item
-        # 2) 容差矩形检测 (±10px)
-        tol = 10
-        from PySide6.QtCore import QRect
-        rect = QRect(vpos.x() - tol, vpos.y() - tol, tol * 2, tol * 2)
+
+        # 2) 容差矩形检测（场景坐标）
+        from PySide6.QtCore import QRectF
+        tol_rect = QRectF(scene_pt.x() - tol_scene, scene_pt.y() - tol_scene,
+                          tol_scene * 2, tol_scene * 2)
         candidates = []
-        scene_pt = self.mapToScene(vpos)
-        for item in self.items(rect):
+        for item in self.scene().items(tol_rect):
+            if item is exclude_edge:
+                continue
             if isinstance(item, NodeSocket):
-                d = (item.scenePos() - scene_pt)
+                d = item.scenePos() - scene_pt
                 dist = (d.x()**2 + d.y()**2) ** 0.5
                 candidates.append((dist, item))
         if candidates:
@@ -884,14 +1335,34 @@ class NodeView(QGraphicsView):
                 sock = self._socket_at(vp)
                 if sock is not None:
                     self.setDragMode(QGraphicsView.NoDrag)   # 禁用 rubber band
+
+                    # ── 若点击的是已连接的输入端口，拾取已有连线重新拖拽 ──
+                    if sock.is_input and sock.edges:
+                        old_edge = sock.edges[0]          # 取第一条线
+                        out_s = old_edge.source_socket
+                        # 断开输入端
+                        sock.remove_edge(old_edge)
+                        old_edge.dest_socket = None
+                        # 以 output socket 为起点继续拖拽
+                        edge = old_edge
+                        edge._drag_origin = out_s
+                        edge.source_pos = out_s.scenePos() if out_s else self.mapToScene(vp)
+                        edge.dest_pos   = self.mapToScene(vp)
+                        edge._rebuild()
+                        self._cur_edge = edge
+                        self._drag_origin_for_connect = out_s
+                        ev.accept(); return
+
                     edge = NodeEdge()
                     edge._drag_origin = sock
                     edge.source_pos = sock.scenePos()
-                    edge.dest_pos = self.mapToScene(vp)
+                    edge.dest_pos   = self.mapToScene(vp)
                     self.scene().addItem(edge)
                     edge._rebuild()
                     self._cur_edge = edge
+                    self._drag_origin_for_connect = sock
                     ev.accept(); return
+                # 未命中 socket → 交给 super 处理节点选择/移动
         except Exception:
             self._log_error("mousePressEvent", traceback.format_exc())
         super().mousePressEvent(ev)
@@ -915,16 +1386,30 @@ class NodeView(QGraphicsView):
             if self._panning and ev.button() in (Qt.MiddleButton, Qt.LeftButton):
                 self._panning = False; self.setCursor(Qt.ArrowCursor); ev.accept(); return
 
-            if self._cur_edge:
+            if self._cur_edge and ev.button() == Qt.LeftButton:
                 edge = self._cur_edge
                 self._cur_edge = None
                 origin = edge._drag_origin
-                target = self._socket_at(ev.position().toPoint())
 
-                if isinstance(target, NodeSocket) and target is not origin and target.is_input != origin.is_input:
+                # 临时隐藏拖拽 edge，避免 bezier 路径遮挡目标 socket 检测
+                edge.setVisible(False)
+                target = self._socket_at(ev.position().toPoint(), exclude_edge=edge)
+                edge.setVisible(True)
+
+                connected = False
+                if (isinstance(target, NodeSocket)
+                        and target is not origin
+                        and target.is_input != origin.is_input):
                     # 规范化: source=output, dest=input
                     out_s = origin if not origin.is_input else target
                     in_s  = target if target.is_input else origin
+
+                    # ── 若 input 端口已有连线，先断开旧线 ──
+                    for old_e in list(in_s.edges):
+                        if old_e.source_socket:
+                            old_e.source_socket.remove_edge(old_e)
+                        in_s.remove_edge(old_e)
+                        self.scene().removeItem(old_e)
 
                     edge.source_socket = out_s
                     edge.dest_socket   = in_s
@@ -935,6 +1420,7 @@ class NodeView(QGraphicsView):
                     # 传值并求值
                     in_s.value = out_s.value
                     in_s.node.evaluate()
+                    connected = True
 
                     # 在 UI 日志中确认
                     sc = self.scene()
@@ -942,15 +1428,108 @@ class NodeView(QGraphicsView):
                         sc.main_window.log(
                             f"🔗 {out_s.node.title}.{out_s.name} → {in_s.node.title}.{in_s.name}"
                         )
-                else:
+
+                if not connected:
                     self.scene().removeItem(edge)
+                    # ── 拖线到空白处：弹出兼容节点选择弹窗 ──
+                    from_sock = self._drag_origin_for_connect
+                    if from_sock is not None:
+                        self._show_connect_popup(from_sock, ev.position().toPoint())
+
+                self._drag_origin_for_connect = None
 
                 self.setDragMode(QGraphicsView.RubberBandDrag)  # 恢复 rubber band
                 ev.accept(); return
         except Exception:
             self._log_error("mouseReleaseEvent", traceback.format_exc())
+            if self._cur_edge:
+                try: self.scene().removeItem(self._cur_edge)
+                except Exception: pass
+                self._cur_edge = None
             self.setDragMode(QGraphicsView.RubberBandDrag)
+            ev.accept(); return   # 异常后也不透传给 super，避免误触发节点移动
         super().mouseReleaseEvent(ev)
+
+    # ── 拖线到空白处弹出兼容节点弹窗 ────────────────────────────────
+    def _show_connect_popup(self, from_sock, vpos):
+        """
+        from_sock: 拖拽起点 socket。
+        根据其方向过滤出兼容节点（output→需要input端口的节点，input→需要output端口的节点）。
+        """
+        # 确定哪些节点有兼容端口
+        compatible = []
+        for name, (ins, outs) in NODE_DEFINITIONS.items():
+            if from_sock.is_input:
+                # 起点是 input，目标节点需要有 output
+                if outs:
+                    compatible.append(name)
+            else:
+                # 起点是 output，目标节点需要有 input
+                if ins:
+                    compatible.append(name)
+
+        if not compatible:
+            return
+
+        drop_scene = self.mapToScene(vpos)
+        popup = NodeSearchPopup(
+            self,
+            title="连接到…",
+            filter_names=set(compatible),
+        )
+
+        def _on_selected(node_name):
+            sc = self.scene()
+            mw = sc.main_window if hasattr(sc, 'main_window') else None
+            if not mw:
+                return
+            # 添加新节点
+            mw.add_node(node_name, drop_scene)
+            # 找到刚添加的节点（最后一个同名节点）
+            new_node = None
+            for item in sc.items():
+                if isinstance(item, NodeItem) and item.title == node_name:
+                    new_node = item
+                    break  # scene.items() 最后加入的排最前
+            if new_node is None:
+                return
+            # 自动连线：找第一个方向兼容的端口
+            if from_sock.is_input:
+                # 起点是 input → 连接新节点第一个 output
+                if new_node.outputs:
+                    tgt = new_node.outputs[0]
+                    out_s, in_s = tgt, from_sock
+                else:
+                    return
+            else:
+                # 起点是 output → 连接新节点第一个 input
+                if new_node.inputs:
+                    tgt = new_node.inputs[0]
+                    out_s, in_s = from_sock, tgt
+                else:
+                    return
+            # 断开旧连线
+            for old_e in list(in_s.edges):
+                if old_e.source_socket:
+                    old_e.source_socket.remove_edge(old_e)
+                in_s.remove_edge(old_e)
+                sc.removeItem(old_e)
+            new_edge = NodeEdge(out_s, in_s)
+            new_edge.source_pos = out_s.scenePos()
+            new_edge.dest_pos   = in_s.scenePos()
+            sc.addItem(new_edge)
+            out_s.add_edge(new_edge)
+            in_s.add_edge(new_edge)
+            new_edge.update_positions()
+            in_s.value = out_s.value
+            in_s.node.evaluate()
+            if mw:
+                mw.log(f"🔗 {out_s.node.title}.{out_s.name} → {in_s.node.title}.{in_s.name}")
+
+        popup.node_selected.connect(_on_selected)
+        popup.move(QCursor.pos())
+        popup.show()
+        popup.sb.setFocus()
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -997,10 +1576,13 @@ class NodeEditorWindow(QMainWindow):
         # 属性面板
         self.propsBox = CollapsibleBox("属性")
         self.propsBox.toggle_button.setChecked(True)
+        self.propsBox._update_arrow(True)
         pg = QGridLayout(); pg.setContentsMargins(6,6,6,6)
         self.propLabel = QLabel("选择节点以查看属性")
         pg.addWidget(self.propLabel, 0, 0)
         self.propsBox.setContentLayout(pg)
+        # 初始展开
+        self.propsBox.content_area.setMaximumHeight(60)
         ll.addWidget(self.propsBox)
 
         # 日志
@@ -1012,6 +1594,7 @@ class NodeEditorWindow(QMainWindow):
         # ── 右侧画布 ────────────────────────────────────────────────
         self.scene = NodeScene(); self.scene.main_window = self
         self.view = NodeView(self.scene)
+        self.scene.selectionChanged.connect(self._on_selection_changed)
 
         splitter.addWidget(left); splitter.addWidget(self.view)
         splitter.setSizes([320, 1080])
@@ -1023,6 +1606,58 @@ class NodeEditorWindow(QMainWindow):
 
     def _on_list_dbl(self, item):
         self.add_node(item.text())
+
+    def _on_selection_changed(self):
+        """选中变化时刷新左侧属性面板。"""
+        nodes = [i for i in self.scene.selectedItems() if isinstance(i, NodeItem)]
+        lay = self.propsBox.content_area.layout()
+        # 清空旧内容
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget(): it.widget().deleteLater()
+
+        if not nodes:
+            lay.addWidget(QLabel("未选中节点"), 0, 0)
+            return
+
+        if len(nodes) == 1:
+            node = nodes[0]
+            cat  = node.category or "未分类"
+            color = CATEGORY_COLORS.get(cat, QColor(120,120,120))
+
+            # 标题
+            title_lbl = QLabel(f"<b>{node.title}</b>")
+            title_lbl.setStyleSheet(f"color:{color.name()};font-size:12px;")
+            lay.addWidget(title_lbl, 0, 0, 1, 2)
+
+            lay.addWidget(QLabel(f"类别: {cat}"), 1, 0, 1, 2)
+
+            row = 2
+            if node.inputs:
+                lay.addWidget(QLabel("<b>输入端口</b>"), row, 0, 1, 2); row += 1
+                for s in node.inputs:
+                    v = s.value
+                    v_str = str(round(v, 4)) if isinstance(v, float) else str(v) if v is not None else "—"
+                    lay.addWidget(QLabel(f"  {s.name}"), row, 0)
+                    lay.addWidget(QLabel(v_str), row, 1)
+                    row += 1
+            if node.outputs:
+                lay.addWidget(QLabel("<b>输出端口</b>"), row, 0, 1, 2); row += 1
+                for s in node.outputs:
+                    v = s.value
+                    v_str = str(round(v, 4)) if isinstance(v, float) else str(v) if v is not None else "—"
+                    lay.addWidget(QLabel(f"  {s.name}"), row, 0)
+                    lay.addWidget(QLabel(v_str), row, 1)
+                    row += 1
+        else:
+            lay.addWidget(QLabel(f"已选 {len(nodes)} 个节点"), 0, 0, 1, 2)
+            for idx, node in enumerate(nodes):
+                lay.addWidget(QLabel(f"  {node.title}"), idx + 1, 0, 1, 2)
+
+        # 动画重算高度
+        if self.propsBox.toggle_button.isChecked():
+            h = lay.sizeHint().height() + 12
+            self.propsBox.content_area.setMaximumHeight(h)
 
     def add_node(self, title, pos=None):
         if title not in NODE_DEFINITIONS:
