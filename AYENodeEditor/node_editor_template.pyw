@@ -26,257 +26,20 @@ from PySide6.QtGui import (
     QPainter, QCursor,
 )
 
-# ╔══════════════════════════════════════════════════════════════════════╗
-# ║  辅助函数 — 节点求值时安全取值                                      ║
-# ╚══════════════════════════════════════════════════════════════════════╝
+# ── 节点注册表（自动加载 node_defs/*_nodes.py）─────────────────────────
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
-def _n(i, k, d=0):
-    """取数值，无法转换时返回默认值。"""
-    v = i.get(k)
-    if v is None: return d
-    try: return float(v)
-    except (TypeError, ValueError): return d
+from node_defs import (
+    NODE_DEFINITIONS,
+    NODE_EVAL_FUNCS,
+    NODE_CATEGORIES,
+    CATEGORY_COLORS_RGB as _COLORS_RGB,
+    _NODE_TO_CAT,
+    register_pack,         # 供外部程序动态注册节点使用
+)
 
-def _s(i, k, d=""):
-    v = i.get(k)
-    return str(v) if v is not None else d
-
-def _b(i, k, d=False):
-    return bool(i.get(k, d))
-
-def _l(i, k):
-    v = i.get(k)
-    return list(v) if isinstance(v, (list, tuple)) else []
-
-def _safe_eval(expr, ctx):
-    allowed = {
-        "sin": math.sin, "cos": math.cos, "tan": math.tan,
-        "sqrt": math.sqrt, "abs": abs, "min": min, "max": max,
-        "pow": pow, "round": round, "int": int, "float": float,
-        "pi": math.pi, "e": math.e, "log": math.log, "log10": math.log10,
-    }
-    allowed.update(ctx)
-    try:
-        return eval(expr, {"__builtins__": {}}, allowed)
-    except Exception:
-        return 0
-
-def _eval_range(i, _w):
-    s, e, st = int(_n(i,"Start",0)), int(_n(i,"End",10)), int(_n(i,"Step",1))
-    if st == 0: st = 1
-    if abs((e - s) / st) > 10000: return {"List": []}
-    return {"List": list(range(s, e, st))}
-
-def _eval_series(i, _w):
-    s, st, c = _n(i,"Start",0), _n(i,"Step",1), int(_n(i,"Count",10))
-    return {"List": [s + st * j for j in range(max(0, min(c, 10000)))]}
-
-def _eval_switch(i, _w):
-    idx = int(_n(i,"Index",0))
-    for k in ["A","B","C","D"]:
-        if idx == 0: return {"Result": i.get(k)}
-        idx -= 1
-    return {"Result": None}
-
-def _eval_expression(i, w):
-    expr = w if isinstance(w, str) and w.strip() else "0"
-    return {"Result": _safe_eval(expr, {"x": _n(i,"x"), "y": _n(i,"y"), "z": _n(i,"z")})}
-
-def _merge(i, _w):
-    r = []
-    for k in sorted(i.keys()):
-        v = i.get(k)
-        if v is None: continue
-        if isinstance(v, (list, tuple)): r.extend(v)
-        else: r.append(v)
-    return {"Result": r}
-
-# ╔══════════════════════════════════════════════════════════════════════╗
-# ║  节点注册表                                                         ║
-# ║  格式: "名称": ([输入端口], [输出端口])                               ║
-# ║  扩展: 只需在这里添加一行并在 NODE_EVAL_FUNCS 中注册求值函数          ║
-# ╚══════════════════════════════════════════════════════════════════════╝
-
-NODE_DEFINITIONS = {
-    # ── 输入 Input ──
-    "Number":       ([], ["Value"]),
-    "Integer":      ([], ["Value"]),
-    "Boolean":      ([], ["Value"]),
-    "String":       ([], ["Value"]),
-    "Slider":       ([], ["Value"]),
-    "Num Slider":   ([], ["Value"]),
-    # ── 输出 Output ──
-    "Viewer":       (["Data"], []),
-    "Print":        (["Value"], []),
-    # ── 数学 Math ──
-    "Add":          (["A", "B"], ["Result"]),
-    "Subtract":     (["A", "B"], ["Result"]),
-    "Multiply":     (["A", "B"], ["Result"]),
-    "Divide":       (["A", "B"], ["Result"]),
-    "Power":        (["Base", "Exp"], ["Result"]),
-    "Modulo":       (["A", "B"], ["Result"]),
-    "Absolute":     (["Value"], ["Result"]),
-    "Negate":       (["Value"], ["Result"]),
-    "Sqrt":         (["Value"], ["Result"]),
-    "Sin":          (["Angle"], ["Result"]),
-    "Cos":          (["Angle"], ["Result"]),
-    "Tan":          (["Angle"], ["Result"]),
-    "Pi":           ([], ["Value"]),
-    "E":            ([], ["Value"]),
-    "Round":        (["Value"], ["Result"]),
-    "Floor":        (["Value"], ["Result"]),
-    "Ceiling":      (["Value"], ["Result"]),
-    "Clamp":        (["Value", "Min", "Max"], ["Result"]),
-    # ── 逻辑 Logic ──
-    "And":          (["A", "B"], ["Result"]),
-    "Or":           (["A", "B"], ["Result"]),
-    "Not":          (["A"], ["Result"]),
-    "Xor":          (["A", "B"], ["Result"]),
-    "Equals":       (["A", "B"], ["Result"]),
-    "Not Equals":   (["A", "B"], ["Result"]),
-    "Greater":      (["A", "B"], ["Result"]),
-    "Less":         (["A", "B"], ["Result"]),
-    "Gate":         (["Condition", "Value"], ["Result"]),
-    # ── 文本 Text ──
-    "Concatenate":  (["A", "B"], ["Result"]),
-    "Text Split":   (["Text", "Sep"], ["Result"]),
-    "Text Replace": (["Text", "Old", "New"], ["Result"]),
-    "Text Length":  (["Text"], ["Result"]),
-    "To Upper":     (["Text"], ["Result"]),
-    "To Lower":     (["Text"], ["Result"]),
-    "Contains":     (["Text", "Search"], ["Result"]),
-    "Join":         (["List", "Sep"], ["Result"]),
-    # ── 列表 List ──
-    "Create List":  (["Item 0", "Item 1", "Item 2"], ["List"]),
-    "List Length":  (["List"], ["Result"]),
-    "List Item":    (["List", "Index"], ["Result"]),
-    "List Append":  (["List", "Item"], ["Result"]),
-    "List Remove":  (["List", "Index"], ["Result"]),
-    "List Reverse": (["List"], ["Result"]),
-    "List Sort":    (["List"], ["Result"]),
-    "Range":        (["Start", "End", "Step"], ["List"]),
-    "Series":       (["Start", "Step", "Count"], ["List"]),
-    "Merge":        (["A", "B", "C"], ["Result"]),
-    # ── 控制 Control ──
-    "Branch":       (["Condition", "True", "False"], ["Result"]),
-    "Switch":       (["Index", "A", "B", "C"], ["Result"]),
-    # ── 转换 Convert ──
-    "To String":    (["Value"], ["Result"]),
-    "To Integer":   (["Value"], ["Result"]),
-    "To Float":     (["Value"], ["Result"]),
-    "To Boolean":   (["Value"], ["Result"]),
-    # ── 工具 Utility ──
-    "Relay":        (["In"], ["Out"]),
-    "Expression":   (["x", "y", "z"], ["Result"]),
-}
-
-NODE_EVAL_FUNCS = {
-    # Input (widget value → output)
-    "Number":       lambda i, w: {"Value": w if w is not None else 0.0},
-    "Integer":      lambda i, w: {"Value": int(w) if w is not None else 0},
-    "Boolean":      lambda i, w: {"Value": bool(w) if w is not None else False},
-    "String":       lambda i, w: {"Value": w if w is not None else ""},
-    "Slider":       lambda i, w: {"Value": w if w is not None else 50},
-    "Num Slider":   lambda i, w: {"Value": w if w is not None else 0.0},
-    # Output (无输出端口，在 evaluate 中特殊处理)
-    "Viewer":       lambda i, w: {},
-    "Print":        lambda i, w: {},
-    # Math
-    "Add":          lambda i, w: {"Result": _n(i,"A") + _n(i,"B")},
-    "Subtract":     lambda i, w: {"Result": _n(i,"A") - _n(i,"B")},
-    "Multiply":     lambda i, w: {"Result": _n(i,"A") * _n(i,"B")},
-    "Divide":       lambda i, w: {"Result": _n(i,"A") / _n(i,"B") if _n(i,"B") != 0 else 0},
-    "Power":        lambda i, w: {"Result": _n(i,"Base") ** _n(i,"Exp")},
-    "Modulo":       lambda i, w: {"Result": _n(i,"A") % _n(i,"B") if _n(i,"B") != 0 else 0},
-    "Absolute":     lambda i, w: {"Result": abs(_n(i,"Value"))},
-    "Negate":       lambda i, w: {"Result": -_n(i,"Value")},
-    "Sqrt":         lambda i, w: {"Result": math.sqrt(max(0, _n(i,"Value")))},
-    "Sin":          lambda i, w: {"Result": math.sin(_n(i,"Angle"))},
-    "Cos":          lambda i, w: {"Result": math.cos(_n(i,"Angle"))},
-    "Tan":          lambda i, w: {"Result": math.tan(_n(i,"Angle")) if math.cos(_n(i,"Angle")) != 0 else 0},
-    "Pi":           lambda i, w: {"Value": math.pi},
-    "E":            lambda i, w: {"Value": math.e},
-    "Round":        lambda i, w: {"Result": round(_n(i,"Value"))},
-    "Floor":        lambda i, w: {"Result": math.floor(_n(i,"Value"))},
-    "Ceiling":      lambda i, w: {"Result": math.ceil(_n(i,"Value"))},
-    "Clamp":        lambda i, w: {"Result": max(_n(i,"Min",0), min(_n(i,"Max",1), _n(i,"Value")))},
-    # Logic
-    "And":          lambda i, w: {"Result": _b(i,"A") and _b(i,"B")},
-    "Or":           lambda i, w: {"Result": _b(i,"A") or _b(i,"B")},
-    "Not":          lambda i, w: {"Result": not _b(i,"A")},
-    "Xor":          lambda i, w: {"Result": _b(i,"A") ^ _b(i,"B")},
-    "Equals":       lambda i, w: {"Result": i.get("A") == i.get("B")},
-    "Not Equals":   lambda i, w: {"Result": i.get("A") != i.get("B")},
-    "Greater":      lambda i, w: {"Result": _n(i,"A") > _n(i,"B")},
-    "Less":         lambda i, w: {"Result": _n(i,"A") < _n(i,"B")},
-    "Gate":         lambda i, w: {"Result": i.get("Value") if _b(i,"Condition") else None},
-    # Text
-    "Concatenate":  lambda i, w: {"Result": _s(i,"A") + _s(i,"B")},
-    "Text Split":   lambda i, w: {"Result": _s(i,"Text").split(_s(i,"Sep") or None)},
-    "Text Replace": lambda i, w: {"Result": _s(i,"Text").replace(_s(i,"Old"), _s(i,"New"))},
-    "Text Length":  lambda i, w: {"Result": len(_s(i,"Text"))},
-    "To Upper":     lambda i, w: {"Result": _s(i,"Text").upper()},
-    "To Lower":     lambda i, w: {"Result": _s(i,"Text").lower()},
-    "Contains":     lambda i, w: {"Result": _s(i,"Search") in _s(i,"Text")},
-    "Join":         lambda i, w: {"Result": _s(i,"Sep"," ").join(str(x) for x in _l(i,"List"))},
-    # List
-    "Create List":  lambda i, w: {"List": [v for k, v in sorted(i.items()) if v is not None]},
-    "List Length":  lambda i, w: {"Result": len(_l(i,"List"))},
-    "List Item":    lambda i, w: {"Result": _l(i,"List")[int(_n(i,"Index"))] if 0 <= int(_n(i,"Index")) < len(_l(i,"List")) else None},
-    "List Append":  lambda i, w: {"Result": _l(i,"List") + [i.get("Item")]},
-    "List Remove":  lambda i, w: {"Result": [x for j,x in enumerate(_l(i,"List")) if j != int(_n(i,"Index"))]},
-    "List Reverse": lambda i, w: {"Result": list(reversed(_l(i,"List")))},
-    "List Sort":    lambda i, w: {"Result": sorted(_l(i,"List"), key=lambda x: (str(type(x).__name__), x))},
-    "Range":        _eval_range,
-    "Series":       _eval_series,
-    "Merge":        _merge,
-    # Control
-    "Branch":       lambda i, w: {"Result": i.get("True") if _b(i,"Condition") else i.get("False")},
-    "Switch":       _eval_switch,
-    # Conversion
-    "To String":    lambda i, w: {"Result": str(i.get("Value",""))},
-    "To Integer":   lambda i, w: {"Result": int(_n(i,"Value"))},
-    "To Float":     lambda i, w: {"Result": float(_n(i,"Value"))},
-    "To Boolean":   lambda i, w: {"Result": bool(i.get("Value"))},
-    # Utility
-    "Relay":        lambda i, w: {"Out": i.get("In")},
-    "Expression":   _eval_expression,
-}
-
-NODE_CATEGORIES = {
-    "输入":   ["Number", "Integer", "Boolean", "String", "Slider", "Num Slider"],
-    "输出":   ["Viewer", "Print"],
-    "数学":   ["Add", "Subtract", "Multiply", "Divide", "Power", "Modulo",
-               "Absolute", "Negate", "Sqrt", "Sin", "Cos", "Tan",
-               "Pi", "E", "Round", "Floor", "Ceiling", "Clamp"],
-    "逻辑":   ["And", "Or", "Not", "Xor", "Equals", "Not Equals",
-               "Greater", "Less", "Gate"],
-    "文本":   ["Concatenate", "Text Split", "Text Replace", "Text Length",
-               "To Upper", "To Lower", "Contains", "Join"],
-    "列表":   ["Create List", "List Length", "List Item", "List Append",
-               "List Remove", "List Reverse", "List Sort",
-               "Range", "Series", "Merge"],
-    "控制":   ["Branch", "Switch"],
-    "转换":   ["To String", "To Integer", "To Float", "To Boolean"],
-    "工具":   ["Relay", "Expression"],
-}
-
-CATEGORY_COLORS = {
-    "输入": QColor(83, 148, 80),
-    "输出": QColor(180, 80, 80),
-    "数学": QColor(100, 130, 180),
-    "逻辑": QColor(170, 130, 80),
-    "文本": QColor(140, 110, 170),
-    "列表": QColor(80, 160, 160),
-    "控制": QColor(190, 180, 60),
-    "转换": QColor(160, 120, 100),
-    "工具": QColor(110, 110, 140),
-}
-
-_NODE_TO_CAT = {}
-for _c, _ns in NODE_CATEGORIES.items():
-    for _n_ in _ns:
-        _NODE_TO_CAT[_n_] = _c
+CATEGORY_COLORS = {k: QColor(*v) for k, v in _COLORS_RGB.items()}
 
 # 嵌入控件的节点样式
 NODE_WIDGET_QSS = """
@@ -697,6 +460,40 @@ class DragNumberWidget(QWidget):
 
 
 
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  SceneSlider — 修复 QGraphicsProxyWidget 中 QSlider 位置不同步      ║
+# ║  QSlider handle 位置依赖 QStyle::subControlRect，在 QGraphicsView    ║
+# ║  缩放/平移时坐标计算失准。子类直接从鼠标 X 位置线性映射值，彻底修复。  ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+class SceneSlider(QSlider):
+    """直接从鼠标 X 坐标线性计算值，与视图缩放/平移无关。"""
+
+    def _x_to_value(self, x: float) -> int:
+        w = self.width()
+        if w <= 0:
+            return self.minimum()
+        ratio = max(0.0, min(1.0, x / w))
+        return round(self.minimum() + ratio * (self.maximum() - self.minimum()))
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.setValue(self._x_to_value(ev.position().x()))
+            ev.accept()
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if ev.buttons() & Qt.LeftButton:
+            self.setValue(self._x_to_value(ev.position().x()))
+            ev.accept()
+        else:
+            super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        ev.accept()
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  NodeEdge — 贝塞尔连线                                              ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -877,7 +674,7 @@ class NodeItem(QGraphicsItem):
         elif self.title == "Slider":
             container = QWidget(); container.setObjectName("sliderContainer")
             hl = QHBoxLayout(container); hl.setContentsMargins(0,0,0,0); hl.setSpacing(4)
-            sl = QSlider(Qt.Horizontal); sl.setRange(0, 100); sl.setValue(50)
+            sl = SceneSlider(Qt.Horizontal); sl.setRange(0, 100); sl.setValue(50)
             lbl = QLabel("50"); lbl.setObjectName("sliderVal")
             sl.valueChanged.connect(lambda v: lbl.setText(str(v)))
             sl.valueChanged.connect(self._on_widget_changed)

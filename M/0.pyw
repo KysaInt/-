@@ -480,10 +480,10 @@ class VisualizerControlUI(QWidget):
         b_delete_current.clicked.connect(self._delete_current_preset)
         tg.addWidget(b_delete_current, r, 6)
 
-        b_manage = QPushButton("管理")
-        b_manage.setMinimumHeight(24)
-        b_manage.clicked.connect(self._open_preset_manager)
-        tg.addWidget(b_manage, r, 7)
+        b_rename_current = QPushButton("重命名")
+        b_rename_current.setMinimumHeight(24)
+        b_rename_current.clicked.connect(self._rename_current_preset)
+        tg.addWidget(b_rename_current, r, 7)
         r += 1
 
         preset_row = QHBoxLayout(); preset_row.setSpacing(8)
@@ -786,10 +786,10 @@ class VisualizerControlUI(QWidget):
         b_delete_current.clicked.connect(self._delete_current_preset)
         row1.addWidget(b_delete_current)
 
-        b_manage = QPushButton("管理")
-        b_manage.setMinimumHeight(26)
-        b_manage.clicked.connect(self._open_preset_manager)
-        row1.addWidget(b_manage)
+        b_rename_current = QPushButton("重命名")
+        b_rename_current.setMinimumHeight(26)
+        b_rename_current.clicked.connect(self._rename_current_preset)
+        row1.addWidget(b_rename_current)
         v.addLayout(row1)
 
         row2 = QHBoxLayout(); row2.setSpacing(10)
@@ -1127,6 +1127,50 @@ class VisualizerControlUI(QWidget):
             QMessageBox.information(self, "成功", f"预设已保存: {safe_name}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存预设失败: {e}")
+
+    def _rename_current_preset(self):
+        fp = self.preset_combo.currentData()
+        if not fp:
+            QMessageBox.warning(self, "提示", "当前没有可重命名的预设")
+            return
+
+        old_fp = Path(fp)
+        old_stem = old_fp.stem
+        new_name, ok = QInputDialog.getText(self, "重命名预设", "新名称:", text=old_stem)
+        if not ok:
+            return
+
+        safe_name = self._safe_preset_name(new_name)
+        if not safe_name:
+            QMessageBox.warning(self, "无效名称", "预设名称不能为空或仅包含非法字符")
+            return
+        if safe_name == old_stem:
+            return
+
+        self._ensure_presets_dir()
+        new_fp = PRESETS_DIR / f"{safe_name}.json"
+        if not old_fp.exists():
+            QMessageBox.warning(self, "失败", "原预设文件不存在")
+            self._refresh_preset_list()
+            return
+        if new_fp.exists() and new_fp != old_fp:
+            QMessageBox.warning(self, "失败", "目标名称已存在")
+            return
+
+        try:
+            old_fp.rename(new_fp)
+            self.config['preset_order'] = [
+                safe_name if s == old_stem else s
+                for s in self.config.get('preset_order', [])
+            ]
+            self._schedule_config_commit()
+            self._refresh_preset_list()
+            idx = self.preset_combo.findText(safe_name)
+            if idx >= 0:
+                self.preset_combo.setCurrentIndex(idx)
+            self._set_info_bar(f"已重命名预设: {old_stem} → {safe_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"重命名预设失败: {e}")
 
     def _delete_current_preset(self):
         fp = self.preset_combo.currentData()
