@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AYE LiteGraph Editor</title>
+<link rel="stylesheet" href="https://unpkg.com/litegraph.js@0.7.18/css/litegraph.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden;
+               background: #1e1e1e; color: #ddd; font-family: 'Segoe UI', sans-serif; }
+
+  /* ── 工具栏 ─────────────────────────────────────────── */
+  #toolbar {
+    display: flex; align-items: center; gap: 6px;
+    height: 36px; padding: 0 10px;
+    background: #2d2d2d; border-bottom: 1px solid #3a3a3a;
+    user-select: none;
+  }
+  #toolbar .sep { width: 1px; height: 20px; background: #444; margin: 0 2px; }
+  #toolbar .spacer { flex: 1; }
+  #toolbar button {
+    height: 26px; padding: 0 12px;
+    background: #3a3a3a; color: #ddd;
+    border: 1px solid #555; border-radius: 3px;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  #toolbar button:hover  { background: #4a4a4a; }
+  #toolbar button:active { background: #2a82da; border-color: #1a6ab8; }
+  #toolbar button.run    { background: #1d6b2a; border-color: #2a8a3a; }
+  #toolbar button.run:hover { background: #267a33; }
+  #toolbar select {
+    height: 26px; padding: 0 6px; background: #3a3a3a; color: #ddd;
+    border: 1px solid #555; border-radius: 3px; font-size: 12px; cursor: pointer;
+  }
+  #toolbar label { font-size: 12px; color: #aaa; }
+
+  /* ── 画布区域 ────────────────────────────────────────── */
+  #canvas-wrap {
+    position: absolute; top: 36px; bottom: 22px; left: 0; right: 0;
+  }
+  #mycanvas {
+    display: block; width: 100%; height: 100%;
+    background: #1a1a1a;
+  }
+
+  /* ── 状态栏 ─────────────────────────────────────────── */
+  #statusbar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: 22px; line-height: 22px;
+    padding: 0 10px; font-size: 11px; color: #888;
+    background: #252525; border-top: 1px solid #333;
+  }
+  #statusbar span { margin-right: 16px; }
+  #statusbar #status-msg { color: #7acf7a; }
+
+  /* ── 右键菜单覆盖 ────────────────────────────────────── */
+  .litegraph.litecontextmenu {
+    background: #2a2a2a !important; border: 1px solid #444 !important;
+    box-shadow: 2px 4px 12px rgba(0,0,0,.6) !important;
+  }
+  .litegraph.litecontextmenu .litemenu-entry {
+    color: #ddd !important; font-size: 12px !important;
+  }
+  .litegraph.litecontextmenu .litemenu-entry:hover {
+    background: #2a82da !important;
+  }
+</style>
+</head>
+<body>
+
+<!-- ■ 工具栏 -->
+<div id="toolbar">
+  <button onclick="newGraph()">☐ 新建</button>
+  <div class="sep"></div>
+  <button onclick="pyBridge('openFile')">📂 打开</button>
+  <button onclick="saveGraph()">💾 保存</button>
+  <button onclick="pyBridge('saveAs')">另存为…</button>
+  <div class="sep"></div>
+  <button onclick="addExampleNodes()">＋ 示例节点</button>
+  <div class="sep"></div>
+  <label>缩放:</label>
+  <select onchange="setZoom(this.value)">
+    <option value="0.5">50%</option>
+    <option value="0.75">75%</option>
+    <option value="1.0" selected>100%</option>
+    <option value="1.25">125%</option>
+    <option value="1.5">150%</option>
+    <option value="2.0">200%</option>
+  </select>
+  <div class="sep"></div>
+  <button onclick="graph.arrange()">⟳ 整理布局</button>
+  <div class="spacer"></div>
+  <button class="run" onclick="runGraph()">▶ 运行</button>
+</div>
+
+<!-- ■ 画布 -->
+<div id="canvas-wrap">
+  <canvas id="mycanvas"></canvas>
+</div>
+
+<!-- ■ 状态栏 -->
+<div id="statusbar">
+  <span id="status-msg">就绪</span>
+  <span id="status-nodes">节点: 0</span>
+  <span id="status-links">连线: 0</span>
+  <span id="status-zoom">缩放: 100%</span>
+</div>
+
+<script src="https://unpkg.com/litegraph.js@0.7.18/build/litegraph.js"></script>
+<script>
+// ── QWebChannel 桥接 ─────────────────────────────────────────────────
+let _pyBridge = null;
+function _initChannel() {
+  if (typeof QWebChannel === 'undefined') return;
+  new QWebChannel(qt.webChannelTransport, ch => {
+    _pyBridge = ch.objects.bridge;
+    // 接收 Python 发来的图数据
+    _pyBridge.loadGraphData.connect(data => {
+      try {
+        graph.configure(JSON.parse(data));
+        applyThemeToGraphNodes();
+        graphCanvas.draw(true, true);
+        statusMsg('图已加载');
+        updateStats();
+      }
+      catch(e) { statusMsg('加载失败: ' + e, true); }
+    });
+    // 接收保存路径
+    _pyBridge.saveGraphData.connect(path => {
+      if (!path) return;
+      const data = JSON.stringify(graph.serialize(), null, 2);
+      _pyBridge.writeFile(path, data);
+      statusMsg('已保存到: ' + path);
+    });
+  });
+}
+function pyBridge(action, payload) {
+  if (_pyBridge) _pyBridge.action(action, payload || '');
+  else { if (action==='openFile') statusMsg('[无 Python 环境] 请直接通过启动器使用'); }
+}
+// 页面加载后尝试初始化
+window.addEventListener('load', () => { try { _initChannel(); } catch(e) {} });
+
+// ── LiteGraph 初始化 ─────────────────────────────────────────────────
+LiteGraph.CANVAS_GRID_SIZE = 20;
+LiteGraph.NODE_TITLE_COLOR = '#efefef';
+LiteGraph.NODE_SELECTED_TITLE_COLOR = '#ffffff';
+LiteGraph.NODE_TEXT_COLOR = '#c8c8c8';
+LiteGraph.NODE_TEXT_SIZE = 12;
+LiteGraph.NODE_SUBTEXT_SIZE = 10;
+LiteGraph.LINK_COLOR = 'rgba(170,170,170,0.86)';
+LiteGraph.CONNECTING_LINK_COLOR = 'rgba(255,255,255,0.55)';
+LiteGraph.EVENT_LINK_COLOR = 'rgba(170,170,170,0.86)';
+LiteGraph.WIDGET_BGCOLOR = '#1a1a1a';
+LiteGraph.WIDGET_OUTLINE_COLOR = '#555';
+LiteGraph.WIDGET_TEXT_COLOR = '#ddd';
+LiteGraph.NODE_DEFAULT_COLOR = '#6e6e6e';
+LiteGraph.NODE_DEFAULT_BGCOLOR = '#262626';
+LiteGraph.NODE_DEFAULT_BOXCOLOR = '#505050';
+LiteGraph.NODE_SLOT_HEIGHT = 22;
+
+const NODE_THEME = Object.freeze({
+  highlight: '#2a82da',
+  body: '#262626',
+  border: '#505050',
+  socketBorder: '#8c8c8c',
+  link: 'rgba(170,170,170,0.86)',
+  linkSelected: 'rgba(255,200,50,1.0)'
+});
+
+const CATEGORY_THEME = Object.freeze({
+  输入: '#539450',
+  输出: '#b45050',
+  数学: '#6482b4',
+  逻辑: '#aa8250',
+  字符串: '#8c6eaa',
+  默认: '#6e6e6e'
+});
+
+function applyNodeTheme(node, category) {
+  const c = CATEGORY_THEME[category || node.category] || CATEGORY_THEME.默认;
+  node.color = c;
+  node.bgcolor = NODE_THEME.body;
+  node.boxcolor = NODE_THEME.border;
+  node.shape = LiteGraph.ROUND_SHAPE;
+}
+
+function applyThemeToGraphNodes() {
+  graph._nodes.forEach(node => applyNodeTheme(node));
+}
+
+const graph = new LGraph();
+const canvas = document.getElementById('mycanvas');
+// 让 canvas 填满容器
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  if (graphCanvas) graphCanvas.draw(true, true);
+}
+window.addEventListener('resize', resizeCanvas);
+
+const graphCanvas = new LGraphCanvas('#mycanvas', graph);
+graphCanvas.background_image = null;
+graphCanvas.clear_background = true;
+graphCanvas.render_shadows = false;
+graphCanvas.use_gradients = false;
+graphCanvas.always_render_background = true;
+graphCanvas.background_color = [0.10, 0.10, 0.10, 1];
+graphCanvas.links_render_mode = LiteGraph.SPLINE_LINK;
+graphCanvas.connections_width = 2.0;
+graphCanvas.render_connection_arrows = false;
+graphCanvas.render_connections_border = false;
+graphCanvas.highquality_render = true;
+graphCanvas.default_link_color = NODE_THEME.link;
+
+// 绘制覆写：半圆端口 + 更接近 node 模板的连线曲线
+(function installNodeStyleOverrides() {
+  const _drawNodeBase = LGraphCanvas.prototype.drawNode;
+  const _renderLinkBase = LGraphCanvas.prototype.renderLink;
+
+  function drawHalfSocket(ctx, x, y, isInput, connectedOrHover) {
+    const r = 6;
+
+    // 覆盖默认圆形端口
+    ctx.beginPath();
+    ctx.fillStyle = NODE_THEME.body;
+    ctx.arc(x, y, r + 0.9, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    if (isInput) {
+      // 左半圆
+      ctx.arc(x, y, r, -Math.PI / 2, Math.PI / 2, true);
+    } else {
+      // 右半圆
+      ctx.arc(x, y, r, -Math.PI / 2, Math.PI / 2, false);
+    }
+    ctx.closePath();
+
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = connectedOrHover ? NODE_THEME.highlight : NODE_THEME.socketBorder;
+    if (connectedOrHover) {
+      ctx.fillStyle = NODE_THEME.highlight;
+      ctx.fill();
+    }
+    ctx.stroke();
+  }
+
+  function isSlotHover(canvas, pos, isInput) {
+    const hp = isInput ? canvas._highlight_input : canvas._highlight_output;
+    if (!hp) return false;
+    const dx = hp[0] - pos[0];
+    const dy = hp[1] - pos[1];
+    return (dx * dx + dy * dy) <= 1.0;
+  }
+
+  function controlPoint(x, y, dir, d) {
+    if (dir === LiteGraph.LEFT)  return [x - d, y];
+    if (dir === LiteGraph.RIGHT) return [x + d, y];
+    if (dir === LiteGraph.UP)    return [x, y - d];
+    if (dir === LiteGraph.DOWN)  return [x, y + d];
+    return [x + d, y];
+  }
+
+  LGraphCanvas.prototype.drawNode = function(node, ctx) {
+    _drawNodeBase.call(this, node, ctx);
+
+    if (!node || (node.flags && node.flags.collapsed) || (this.ds && this.ds.scale < 0.35)) {
+      return;
+    }
+
+    const pos = [0, 0];
+    ctx.save();
+    if (node.inputs) {
+      for (let i = 0; i < node.inputs.length; i++) {
+        const slot = node.inputs[i];
+        node.getConnectionPos(true, i, pos);
+        const connected = slot.link != null;
+        drawHalfSocket(ctx, pos[0], pos[1], true, connected || isSlotHover(this, pos, true));
+      }
+    }
+    if (node.outputs) {
+      for (let i = 0; i < node.outputs.length; i++) {
+        const slot = node.outputs[i];
+        node.getConnectionPos(false, i, pos);
+        const connected = slot.links && slot.links.length > 0;
+        drawHalfSocket(ctx, pos[0], pos[1], false, connected || isSlotHover(this, pos, false));
+      }
+    }
+    ctx.restore();
+  };
+
+  LGraphCanvas.prototype.renderLink = function(
+    ctx, a, b, link, skip_border, flow, color, start_dir, end_dir, num_sublines
+  ) {
+    if (!a || !b) {
+      return _renderLinkBase.call(this, ctx, a, b, link, skip_border, flow, color, start_dir, end_dir, num_sublines);
+    }
+
+    if (link) {
+      this.visible_links.push(link);
+    }
+
+    let lineColor = color || (link && (link.color || LGraphCanvas.link_type_colors[link.type])) || NODE_THEME.link;
+    if (link && this.highlighted_links && this.highlighted_links[link.id]) {
+      lineColor = NODE_THEME.linkSelected;
+    }
+
+    start_dir = start_dir || LiteGraph.RIGHT;
+    end_dir = end_dir || LiteGraph.LEFT;
+    const subLines = num_sublines || 1;
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    for (let i = 0; i < subLines; i += 1) {
+      const offsetY = (i - (subLines - 1) * 0.5) * 4;
+      const ax = a[0], ay = a[1] + offsetY;
+      const bx = b[0], by = b[1] + offsetY;
+
+      const d = Math.max(Math.abs(bx - ax) * 0.5, 60);
+      const c1 = controlPoint(ax, ay, start_dir, d);
+      const c2 = controlPoint(bx, by, end_dir, d);
+
+      if (!skip_border && this.ds.scale > 0.6) {
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.bezierCurveTo(c1[0], c1[1], c2[0], c2[1], bx, by);
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth = (this.connections_width || 2) + 1.2;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.bezierCurveTo(c1[0], c1[1], c2[0], c2[1], bx, by);
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = this.connections_width || 2;
+      ctx.stroke();
+    }
+
+    const center = this.computeConnectionPoint(a, b, 0.5, start_dir, end_dir);
+    if (link && link._pos) {
+      link._pos[0] = center[0];
+      link._pos[1] = center[1];
+    }
+
+    ctx.restore();
+  };
+})();
+
+// 节点注册时自动套用主题（不改功能，只改视觉属性）
+(function installAutoThemeForRegisteredNodes() {
+  const _registerNodeType = LiteGraph.registerNodeType.bind(LiteGraph);
+  LiteGraph.registerNodeType = function(type, ctor) {
+    const _onAdded = ctor.prototype.onAdded;
+    ctor.prototype.onAdded = function(...args) {
+      if (_onAdded) _onAdded.apply(this, args);
+      applyNodeTheme(this, this.category || ctor.category);
+    };
+
+    const _onConfigure = ctor.prototype.onConfigure;
+    ctor.prototype.onConfigure = function(...args) {
+      if (_onConfigure) _onConfigure.apply(this, args);
+      applyNodeTheme(this, this.category || ctor.category);
+    };
+
+    return _registerNodeType(type, ctor);
+  };
+})();
+
+resizeCanvas();
+
+// ── 内置节点注册 ─────────────────────────────────────────────────────
+// —— 数学节点 ——
+(function(){
+  function mathNode(name, op, inputs, outputs, compute) {
+    function N() { this.addInputs(inputs); this.addOutputs(outputs); this.size = [140, 60]; }
+    N.title = name; N.category = '数学';
+    N.prototype.onExecute = compute;
+    LiteGraph.registerNodeType('math/' + name, N);
+  }
+  mathNode('加法', 'add',
+    [['A','number'],['B','number']], [['和','number']],
+    function(){ this.setOutputData(0, (this.getInputData(0)||0) + (this.getInputData(1)||0)); });
+  mathNode('减法', 'sub',
+    [['A','number'],['B','number']], [['差','number']],
+    function(){ this.setOutputData(0, (this.getInputData(0)||0) - (this.getInputData(1)||0)); });
+  mathNode('乘法', 'mul',
+    [['A','number'],['B','number']], [['积','number']],
+    function(){ this.setOutputData(0, (this.getInputData(0)||0) * (this.getInputData(1)||0)); });
+  mathNode('除法', 'div',
+    [['A','number'],['B','number']], [['商','number']],
+    function(){
+      const b = this.getInputData(1)||1;
+      this.setOutputData(0, b !== 0 ? (this.getInputData(0)||0) / b : 0);
+    });
+  mathNode('绝对值', 'abs', [['x','number']], [['|x|','number']],
+    function(){ this.setOutputData(0, Math.abs(this.getInputData(0)||0)); });
+  mathNode('取余', 'mod',
+    [['A','number'],['B','number']], [['余','number']],
+    function(){ const b=this.getInputData(1)||1; this.setOutputData(0,(this.getInputData(0)||0)%b); });
+  mathNode('平方根', 'sqrt', [['x','number']], [['√x','number']],
+    function(){ this.setOutputData(0, Math.sqrt(Math.abs(this.getInputData(0)||0))); });
+  mathNode('幂', 'pow',
+    [['底数','number'],['指数','number']], [['结果','number']],
+    function(){ this.setOutputData(0, Math.pow(this.getInputData(0)||0, this.getInputData(1)||2)); });
+  mathNode('正弦', 'sin', [['rad','number']], [['sin','number']],
+    function(){ this.setOutputData(0, Math.sin(this.getInputData(0)||0)); });
+  mathNode('余弦', 'cos', [['rad','number']], [['cos','number']],
+    function(){ this.setOutputData(0, Math.cos(this.getInputData(0)||0)); });
+  mathNode('对数', 'log', [['x','number']], [['ln(x)','number']],
+    function(){ const x=this.getInputData(0)||1; this.setOutputData(0, x>0?Math.log(x):0); });
+  mathNode('夹紧', 'clamp',
+    [['值','number'],['最小','number'],['最大','number']], [['结果','number']],
+    function(){
+      const v=this.getInputData(0)||0, mn=this.getInputData(1)||0, mx=this.getInputData(2)||1;
+      this.setOutputData(0, Math.max(mn, Math.min(mx, v)));
+    });
+  mathNode('线性插值', 'lerp',
+    [['A','number'],['B','number'],['t','number']], [['结果','number']],
+    function(){
+      const a=this.getInputData(0)||0, b=this.getInputData(1)||0, t=this.getInputData(2)||0;
+      this.setOutputData(0, a + (b-a)*t);
+    });
+})();
+
+// —— 输入节点 ——
+(function(){
+  // 数字常量
+  function NumberConst() {
+    this.addOutput('值','number');
+    this.addWidget('number','值',0,'value',{min:-1e9,max:1e9,step:0.1});
+    this.properties = { value: 0 };
+    this.size = [150, 50];
+  }
+  NumberConst.title = '数字'; NumberConst.category = '输入';
+  NumberConst.prototype.onExecute = function(){ this.setOutputData(0, this.properties.value); };
+  LiteGraph.registerNodeType('input/数字', NumberConst);
+
+  // 滑块
+  function SliderNode() {
+    this.addOutput('值','number');
+    this.addWidget('slider','值',0.5,'value',{min:0,max:1,step:0.01});
+    this.properties = { value: 0.5 };
+    this.size = [180, 50];
+  }
+  SliderNode.title = '滑块'; SliderNode.category = '输入';
+  SliderNode.prototype.onExecute = function(){ this.setOutputData(0, this.properties.value); };
+  LiteGraph.registerNodeType('input/滑块', SliderNode);
+
+  // 文字
+  function TextConst() {
+    this.addOutput('文字','string');
+    this.addWidget('text','内容','Hello','value');
+    this.properties = { value: 'Hello' };
+    this.size = [180, 50];
+  }
+  TextConst.title = '文字'; TextConst.category = '输入';
+  TextConst.prototype.onExecute = function(){ this.setOutputData(0, this.properties.value); };
+  LiteGraph.registerNodeType('input/文字', TextConst);
+
+  // 布尔
+  function BoolConst() {
+    this.addOutput('值','boolean');
+    this.addWidget('toggle','值',false,'value');
+    this.properties = { value: false };
+    this.size = [140, 50];
+  }
+  BoolConst.title = '布尔'; BoolConst.category = '输入';
+  BoolConst.prototype.onExecute = function(){ this.setOutputData(0, this.properties.value); };
+  LiteGraph.registerNodeType('input/布尔', BoolConst);
+
+  // 随机数
+  function RandNode() {
+    this.addInput('触发','');
+    this.addOutput('值','number');
+    this.addWidget('number','最小',0,'min',{step:0.1});
+    this.addWidget('number','最大',1,'max',{step:0.1});
+    this.properties = { min:0, max:1 };
+    this.size = [160, 70];
+  }
+  RandNode.title = '随机数'; RandNode.category = '输入';
+  RandNode.prototype.onExecute = function(){
+    const mn=this.properties.min, mx=this.properties.max;
+    this.setOutputData(0, mn + Math.random()*(mx-mn));
+  };
+  LiteGraph.registerNodeType('input/随机数', RandNode);
+
+  // 时间
+  function TimeNode() {
+    this.addOutput('时间/s','number');
+    this.addOutput('sin(t)','number');
+    this.size = [150, 60];
+  }
+  TimeNode.title = '时间'; TimeNode.category = '输入';
+  TimeNode.prototype.onExecute = function(){
+    const t = LiteGraph.getTime()/1000;
+    this.setOutputData(0, t);
+    this.setOutputData(1, Math.sin(t));
+  };
+  LiteGraph.registerNodeType('input/时间', TimeNode);
+})();
+
+// —— 输出节点 ——
+(function(){
+  function WatchNode() {
+    this.addInput('数据','');
+    this._val = '—';
+    this.size = [160, 50];
+  }
+  WatchNode.title = '观察'; WatchNode.category = '输出';
+  WatchNode.prototype.onExecute = function(){
+    const v = this.getInputData(0);
+    this._val = (v !== undefined && v !== null) ? String(v).slice(0,60) : '—';
+  };
+  WatchNode.prototype.onDrawForeground = function(ctx){
+    ctx.fillStyle = '#888';
+    ctx.font = '11px monospace';
+    ctx.fillText(this._val, 4, this.size[1] - 6);
+  };
+  LiteGraph.registerNodeType('output/观察', WatchNode);
+
+  // 控制台输出
+  function LogNode() {
+    this.addInput('消息','');
+    this.addInput('触发','');
+    this.size = [160, 50];
+  }
+  LogNode.title = '打印'; LogNode.category = '输出';
+  LogNode.prototype.onExecute = function(){
+    const msg = this.getInputData(0);
+    if (msg !== undefined) console.log('[节点输出]', msg);
+  };
+  LiteGraph.registerNodeType('output/打印', LogNode);
+})();
+
+// —— 逻辑节点 ——
+(function(){
+  function logicNode(name, compute) {
+    function N() { this.addInput('A',''); this.addInput('B',''); this.addOutput('结果','boolean'); this.size=[140,60]; }
+    N.title=name; N.category='逻辑';
+    N.prototype.onExecute = compute;
+    LiteGraph.registerNodeType('logic/'+name, N);
+  }
+  logicNode('AND', function(){ this.setOutputData(0, !!this.getInputData(0) && !!this.getInputData(1)); });
+  logicNode('OR',  function(){ this.setOutputData(0, !!this.getInputData(0) || !!this.getInputData(1)); });
+  logicNode('NOT', function(){ this.setOutputData(0, !this.getInputData(0)); });
+  logicNode('XOR', function(){
+    const a=!!this.getInputData(0), b=!!this.getInputData(1);
+    this.setOutputData(0, (a||b)&&!(a&&b));
+  });
+
+  // 比较
+  function cmpNode(name, op) {
+    function N() { this.addInput('A',''); this.addInput('B',''); this.addOutput('结果','boolean'); this.size=[140,60]; }
+    N.title=name; N.category='逻辑';
+    N.prototype.onExecute = function(){
+      const a=this.getInputData(0), b=this.getInputData(1);
+      this.setOutputData(0, op(a,b));
+    };
+    LiteGraph.registerNodeType('logic/'+name, N);
+  }
+  cmpNode('等于',     (a,b)=>a===b);
+  cmpNode('不等于',   (a,b)=>a!==b);
+  cmpNode('大于',     (a,b)=>a>b);
+  cmpNode('小于',     (a,b)=>a<b);
+  cmpNode('大于等于', (a,b)=>a>=b);
+  cmpNode('小于等于', (a,b)=>a<=b);
+
+  // 条件选择
+  function SelectNode() {
+    this.addInput('条件','boolean'); this.addInput('真值',''); this.addInput('假值','');
+    this.addOutput('结果',''); this.size=[160,60];
+  }
+  SelectNode.title='条件选择'; SelectNode.category='逻辑';
+  SelectNode.prototype.onExecute=function(){
+    this.setOutputData(0, this.getInputData(0)?this.getInputData(1):this.getInputData(2));
+  };
+  LiteGraph.registerNodeType('logic/条件选择', SelectNode);
+})();
+
+// —— 字符串节点 ——
+(function(){
+  function strNode(name, compute, ins, outs) {
+    function N() {
+      ins.forEach(([n,t])=>this.addInput(n,t||'string'));
+      outs.forEach(([n,t])=>this.addOutput(n,t||'string'));
+      this.size=[170,60];
+    }
+    N.title=name; N.category='字符串';
+    N.prototype.onExecute=compute;
+    LiteGraph.registerNodeType('str/'+name, N);
+  }
+  strNode('拼接', function(){
+    const a=String(this.getInputData(0)||''), b=String(this.getInputData(1)||'');
+    this.setOutputData(0, a+b);
+  }, [['A'],['B']], [['结果']]);
+
+  strNode('转大写', function(){
+    this.setOutputData(0, String(this.getInputData(0)||'').toUpperCase());
+  }, [['文字']], [['结果']]);
+
+  strNode('转小写', function(){
+    this.setOutputData(0, String(this.getInputData(0)||'').toLowerCase());
+  }, [['文字']], [['结果']]);
+
+  strNode('长度', function(){
+    this.setOutputData(0, String(this.getInputData(0)||'').length);
+  }, [['文字']], [['长度','number']]);
+
+  strNode('转数字', function(){
+    this.setOutputData(0, parseFloat(this.getInputData(0)||0)||0);
+  }, [['文字']], [['数字','number']]);
+
+  strNode('转字符串', function(){
+    this.setOutputData(0, String(this.getInputData(0)??''));
+  }, [['值','']], [['文字']]);
+
+  // 模板节点
+  function TemplateNode() {
+    this.addInput('A',''); this.addInput('B',''); this.addInput('C','');
+    this.addOutput('结果','string');
+    this.addWidget('text','模板','{A} {B} {C}','template');
+    this.properties = { template: '{A} {B} {C}' };
+    this.size = [220, 70];
+  }
+  TemplateNode.title='模板'; TemplateNode.category='字符串';
+  TemplateNode.prototype.onExecute=function(){
+    let s = this.properties.template;
+    s = s.replace('{A}', this.getInputData(0)??'')
+         .replace('{B}', this.getInputData(1)??'')
+         .replace('{C}', this.getInputData(2)??'');
+    this.setOutputData(0, s);
+  };
+  LiteGraph.registerNodeType('str/模板', TemplateNode);
+})();
+
+// ── 辅助函数 ─────────────────────────────────────────────────────────
+function statusMsg(msg, isErr) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.style.color = isErr ? '#e07070' : '#7acf7a';
+}
+
+function updateStats() {
+  document.getElementById('status-nodes').textContent = '节点: ' + graph._nodes.length;
+  document.getElementById('status-links').textContent = '连线: ' + Object.keys(graph.links||{}).length;
+  const z = graphCanvas.ds ? graphCanvas.ds.scale : 1;
+  document.getElementById('status-zoom').textContent  = '缩放: ' + (z*100).toFixed(0) + '%';
+}
+
+// ── 工具栏功能 ────────────────────────────────────────────────────────
+function newGraph() {
+  if (!confirm('清空当前画布？')) return;
+  graph.clear();
+  statusMsg('新建图');
+  updateStats();
+}
+
+function saveGraph() {
+  const data = JSON.stringify(graph.serialize(), null, 2);
+  if (_pyBridge) {
+    _pyBridge.action('save', data);
+  } else {
+    // 浏览器降级：下载文件
+    const blob = new Blob([data], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'graph.json';
+    a.click(); URL.revokeObjectURL(url);
+    statusMsg('已下载 graph.json');
+  }
+}
+
+function runGraph() {
+  try {
+    if (graph.status === LGraph.STATUS_STOPPED) graph.start(60);
+    else { graph.runStep(); statusMsg('执行完成 — ' + graph._nodes.length + ' 个节点'); }
+    updateStats();
+  } catch(e) { statusMsg('执行错误: ' + e, true); }
+}
+
+function setZoom(v) {
+  graphCanvas.ds.changeScale(parseFloat(v), [canvas.width/2, canvas.height/2]);
+  graphCanvas.draw(true, true);
+  updateStats();
+}
+
+function addExampleNodes() {
+  const num = LiteGraph.createNode('input/数字');
+  num.pos = [100, 150]; num.properties.value = 3.14; graph.add(num);
+
+  const slider = LiteGraph.createNode('input/滑块');
+  slider.pos = [100, 230]; slider.properties.value = 0.5; graph.add(slider);
+
+  const mul = LiteGraph.createNode('math/乘法');
+  mul.pos = [330, 170]; graph.add(mul);
+
+  const watch = LiteGraph.createNode('output/观察');
+  watch.pos = [520, 180]; graph.add(watch);
+
+  graph.connect(num.id,    0, mul.id, 0);
+  graph.connect(slider.id, 0, mul.id, 1);
+  graph.connect(mul.id,    0, watch.id, 0);
+
+  graphCanvas.draw(true, true);
+  statusMsg('已添加示例节点');
+  updateStats();
+}
+
+// ── 事件钩子 ──────────────────────────────────────────────────────────
+graph.onAfterChange = updateStats;
+graphCanvas.onSelectionChange = updateStats;
+
+// 初始化
+graph.start(30);
+resizeCanvas();
+updateStats();
+statusMsg('AYE LiteGraph 编辑器已就绪');
+</script>
+</body>
+</html>
