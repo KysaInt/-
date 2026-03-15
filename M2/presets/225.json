@@ -9,6 +9,8 @@
   "always_on_top": true,
   "num_bars": 11,
   "smoothing": 0.7,
+  "bar_use_independent_time_window": false,
+  "bar_time_window": 0.01,
   "damping": 0.02,
   "spring_strength": 0.02,
   "gravity": 0.07,

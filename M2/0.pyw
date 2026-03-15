@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QFrame, QMessageBox, QScrollArea,
     QStackedWidget,
     QTreeWidget, QTreeWidgetItem,
-    QProxyStyle, QStyle,
+    QProxyStyle, QStyle, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QRectF
 from PySide6.QtGui import QFont, QColor, QPalette, QPainter, QPen, QCursor, QLinearGradient
@@ -32,17 +32,21 @@ CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 PRESETS_DIR = Path(__file__).parent / 'presets'
 SECTION_PRESETS_DIR = Path(__file__).parent / 'section_presets'
 
+_DAMPED_OBJECT_KEYS = ('bar', 'c1', 'c2', 'c4', 'c5', 'b12', 'b23', 'b34', 'b45')
+
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
     'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
     'drag_adjust_mode': False,
     'bg_transparent': True, 'always_on_top': True,
     'num_bars': 64, 'smoothing': 0.7,
-    'damping': 0.85, 'spring_strength': 0.3, 'gravity': 0.5,
+    'k_rise_damping': 0.1, 'k_fall_damping': 0.999,
+    'bar_use_independent_damping': False,
+    'bar_independent_rise_damping': 0.1, 'bar_independent_fall_damping': 0.999,
+    'bar_use_independent_time_window': False, 'bar_time_window': 10.0,
     'rotation_base': 1.0, 'main_radius_scale': 1.0,
     'bar_height_min': 0, 'bar_height_max': 500,
     'bar_default_height': 0.0, 'bar_internal_min': 0.0, 'bar_internal_max': 300.0,
-    'bar_a1_influence': 0.0,
     'color_scheme': 'rainbow',
     'gradient_points': [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))],
     'gradient_enabled': True, 'gradient_mode': 'frequency',
@@ -92,10 +96,75 @@ _DEFAULT_CONFIG = {
     'preset_switch_interval_max': 10.0,
 }
 
+for _prefix in _DAMPED_OBJECT_KEYS[1:]:
+    _DEFAULT_CONFIG[f'{_prefix}_use_independent_damping'] = False
+    _DEFAULT_CONFIG[f'{_prefix}_independent_rise_damping'] = 0.1
+    _DEFAULT_CONFIG[f'{_prefix}_independent_fall_damping'] = 0.999
+
 
 def _get_defaults():
     import copy
     return copy.deepcopy(_DEFAULT_CONFIG)
+
+
+def _clamp_time_window(value, fallback=10.0):
+    try:
+        return max(0.01, float(value))
+    except Exception:
+        return max(0.01, float(fallback))
+
+
+def _normalize_loaded_config(data):
+    cfg = _get_defaults()
+    loaded = dict(data or {})
+
+    legacy_rise = float(loaded.get('bar_rise_damping', loaded.get('damping', cfg['k_rise_damping'])))
+    legacy_fall = float(loaded.get('bar_fall_damping', loaded.get('damping', cfg['k_fall_damping'])))
+    loaded.setdefault('k_rise_damping', max(0.0, min(0.999, legacy_rise)))
+    loaded.setdefault('k_fall_damping', max(0.0, min(0.999, legacy_fall)))
+    loaded.setdefault('bar_use_independent_damping', False)
+    loaded.setdefault('bar_independent_rise_damping', max(0.0, min(0.999, legacy_rise)))
+    loaded.setdefault('bar_independent_fall_damping', max(0.0, min(0.999, legacy_fall)))
+    loaded.setdefault('bar_use_independent_time_window', False)
+    loaded.setdefault('bar_time_window', _clamp_time_window(loaded.get('a1_time_window', cfg['a1_time_window']), cfg['a1_time_window']))
+    for prefix in _DAMPED_OBJECT_KEYS[1:]:
+        loaded.setdefault(f'{prefix}_use_independent_damping', False)
+        loaded.setdefault(f'{prefix}_independent_rise_damping', loaded['k_rise_damping'])
+        loaded.setdefault(f'{prefix}_independent_fall_damping', loaded['k_fall_damping'])
+
+    cfg.update(loaded)
+    cfg['a1_time_window'] = _clamp_time_window(cfg.get('a1_time_window', _DEFAULT_CONFIG['a1_time_window']), _DEFAULT_CONFIG['a1_time_window'])
+    cfg['bar_time_window'] = _clamp_time_window(cfg.get('bar_time_window', cfg['a1_time_window']), cfg['a1_time_window'])
+    cfg['bar_use_independent_time_window'] = bool(cfg.get('bar_use_independent_time_window', False))
+    cfg.pop('freq_band_mode', None)
+    cfg.pop('bar_a1_influence', None)
+    cfg.pop('bar_rise_damping', None)
+    cfg.pop('bar_fall_damping', None)
+    cfg.pop('damping', None)
+    cfg.pop('spring_strength', None)
+    cfg.pop('gravity', None)
+    return cfg
+
+
+def _active_palette_color(role):
+    palette = QApplication.palette()
+    try:
+        return QColor(palette.color(QPalette.ColorGroup.Active, role))
+    except TypeError:
+        return QColor(palette.color(role))
+
+
+def _inverse_color(color):
+    return QColor(255 - int(color.red()), 255 - int(color.green()), 255 - int(color.blue()), int(color.alpha()))
+
+
+def _sample_preview_color(colors, phase):
+    normalized = [tuple(int(channel) for channel in color[:3]) for color in (colors or []) if len(color) >= 3]
+    if not normalized:
+        red, green, blue = colorsys.hsv_to_rgb(phase % 1.0, 1.0, 1.0)
+        return int(red * 255), int(green * 255), int(blue * 255)
+    index = int(round((phase % 1.0) * max(0, len(normalized) - 1)))
+    return normalized[index % len(normalized)]
 
 
 class _Collapsible(QWidget):
@@ -202,6 +271,10 @@ class _SoftRangeNumberMixin:
         self._bound_slider = None
         self._slider_scale = 1.0
         self._syncing_slider = False
+        self._drag_adjust_pressed = False
+        self._drag_adjust_active = False
+        self._drag_adjust_start_x = 0.0
+        self._drag_adjust_start_value = 0.0
         self.setKeyboardTracking(False)
         self.set_soft_range(soft_min, soft_max, sync_slider=False)
 
@@ -296,6 +369,43 @@ class _SoftRangeNumberMixin:
     def _create_limit_editor(self, value):
         raise NotImplementedError
 
+    def _drag_value_delta(self, delta_x):
+        raise NotImplementedError
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_adjust_pressed = True
+            self._drag_adjust_active = False
+            self._drag_adjust_start_x = float(event.globalPosition().x())
+            self._drag_adjust_start_value = float(self.value())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_adjust_pressed:
+            delta_x = float(event.globalPosition().x()) - self._drag_adjust_start_x
+            if self._drag_adjust_active or abs(delta_x) >= 4.0:
+                if not self._drag_adjust_active:
+                    self._drag_adjust_active = True
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                    line_edit = self.lineEdit()
+                    if line_edit is not None:
+                        line_edit.deselect()
+                self.setValue(self._clamp_hard(self._drag_adjust_start_value + self._drag_value_delta(delta_x)))
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        had_drag = self._drag_adjust_active
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_adjust_pressed = False
+            self._drag_adjust_active = False
+            self.unsetCursor()
+            if had_drag:
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
     def contextMenuEvent(self, event):
         popup = _NumericAdjustPopup(self)
         popup.show_at(event.globalPos())
@@ -318,6 +428,10 @@ class _SoftRangeSpinBox(_SoftRangeNumberMixin, QSpinBox):
         editor.setValue(self._coerce_value(value))
         return editor
 
+    def _drag_value_delta(self, delta_x):
+        step = self.singleStep() or 1
+        return round(delta_x / 6.0) * step
+
 
 class _SoftRangeDoubleSpinBox(_SoftRangeNumberMixin, QDoubleSpinBox):
     """浮点软范围输入框：滚轮/步进限制在软范围，手动输入可超出软范围。"""
@@ -336,6 +450,10 @@ class _SoftRangeDoubleSpinBox(_SoftRangeNumberMixin, QDoubleSpinBox):
         editor.setRange(self._hard_min, self._hard_max)
         editor.setValue(self._coerce_value(value))
         return editor
+
+    def _drag_value_delta(self, delta_x):
+        step = self.singleStep() or 0.01
+        return float(delta_x) * float(step)
 
 
 class _NumericAdjustPopup(QDialog):
@@ -502,8 +620,9 @@ class _SignalPreviewWidget(QWidget):
         self._target_value = 0.0
         self._history = []
         self._history_limit = 72
-        self.setMinimumSize(200, 114)
-        self.setMaximumHeight(126)
+        self.setMinimumHeight(172)
+        self.setMaximumHeight(196)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._advance_animation)
@@ -529,6 +648,11 @@ class _SignalPreviewWidget(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        highlight = _active_palette_color(QPalette.ColorRole.Highlight)
+        history_color = QColor(highlight)
+        history_color.setAlpha(175)
+        current_color = _inverse_color(highlight)
+        current_color.setAlpha(230)
 
         outer = QRectF(self.rect()).adjusted(3.0, 3.0, -3.0, -3.0)
         painter.setPen(Qt.NoPen)
@@ -541,7 +665,7 @@ class _SignalPreviewWidget(QWidget):
             self._title,
         )
 
-        chart = QRectF(outer.left(), outer.top() + 20.0, outer.width(), outer.height() - 42.0)
+        chart = QRectF(outer.left(), outer.top() + 24.0, outer.width(), outer.height() - 44.0)
         grid_pen = QPen(QColor(255, 255, 255, 22), 1)
         grid_pen.setStyle(Qt.DashLine)
         painter.setPen(grid_pen)
@@ -572,12 +696,12 @@ class _SignalPreviewWidget(QWidget):
             y = chart.bottom() - ratio * chart.height()
             points.append(QPoint(int(round(x)), int(round(y))))
         if len(points) >= 2:
-            painter.setPen(QPen(QColor(255, 212, 102, 185), 2))
+            painter.setPen(QPen(history_color, 2))
             painter.drawPolyline(points)
 
         current_ratio = max(0.0, min(1.0, (self._display_value - visible_lo) / display_span))
         current_y = chart.bottom() - current_ratio * chart.height()
-        painter.setPen(QPen(QColor(108, 194, 255), 2))
+        painter.setPen(QPen(current_color, 2))
         painter.drawLine(int(chart.left()), int(round(current_y)), int(chart.right()), int(round(current_y)))
 
         painter.setPen(QColor("#96a0ae"))
@@ -610,23 +734,41 @@ class _SpectrumBarsPreviewWidget(QWidget):
         self._segments = 1
         self._freq_min = 20
         self._freq_max = 20000
-        self.setMinimumSize(220, 114)
-        self.setMaximumHeight(126)
+        self._time_window = 10.0
+        self._uses_independent_time_window = False
+        self._uses_independent_damping = False
+        self._rise_damping = 0.1
+        self._fall_damping = 0.999
+        self.setMinimumHeight(172)
+        self.setMaximumHeight(196)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-    def set_config_snapshot(self, *, bar_count, segments, freq_min, freq_max):
+    def set_config_snapshot(self, *, bar_count, segments, freq_min, freq_max, time_window=10.0,
+                            uses_independent_time_window=False, uses_independent_damping=False,
+                            rise_damping=0.1, fall_damping=0.999):
         self._bar_count = max(1, int(bar_count))
         self._segments = max(1, int(segments))
         self._freq_min = int(min(freq_min, freq_max))
         self._freq_max = int(max(freq_min, freq_max))
+        self._time_window = _clamp_time_window(time_window, 10.0)
+        self._uses_independent_time_window = bool(uses_independent_time_window)
+        self._uses_independent_damping = bool(uses_independent_damping)
+        self._rise_damping = float(rise_damping)
+        self._fall_damping = float(fall_damping)
         self.update()
 
-    def set_runtime_state(self, values):
+    def set_runtime_state(self, values, colors=None):
         self._values = [max(0.0, float(value)) for value in (values or [])]
         self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        highlight = _active_palette_color(QPalette.ColorRole.Highlight)
+        top_color = QColor(highlight.lighter(135))
+        top_color.setAlpha(235)
+        bottom_color = QColor(highlight)
+        bottom_color.setAlpha(200)
 
         outer = QRectF(self.rect()).adjusted(3.0, 3.0, -3.0, -3.0)
         painter.setPen(QColor("#e6eaf0"))
@@ -636,7 +778,7 @@ class _SpectrumBarsPreviewWidget(QWidget):
             "完整条形频谱",
         )
 
-        chart = QRectF(outer.left(), outer.top() + 20.0, outer.width(), outer.height() - 42.0)
+        chart = QRectF(outer.left(), outer.top() + 24.0, outer.width(), outer.height() - 56.0)
         grid_pen = QPen(QColor(255, 255, 255, 22), 1)
         grid_pen.setStyle(Qt.DashLine)
         painter.setPen(grid_pen)
@@ -656,8 +798,8 @@ class _SpectrumBarsPreviewWidget(QWidget):
             x = chart.left() + idx * bar_width
             rect = QRectF(x, chart.bottom() - height, max(1.0, bar_width - 1.0), height)
             gradient = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
-            gradient.setColorAt(0.0, QColor(178, 231, 255))
-            gradient.setColorAt(1.0, QColor(66, 124, 255))
+            gradient.setColorAt(0.0, top_color)
+            gradient.setColorAt(1.0, bottom_color)
             painter.fillRect(rect, gradient)
 
         painter.setPen(QColor("#96a0ae"))
@@ -667,11 +809,112 @@ class _SpectrumBarsPreviewWidget(QWidget):
             f"{visible_hi:.1f}",
         )
 
+        footer = (
+            f"{len(values)} 条  {self._freq_min}-{self._freq_max} Hz\n"
+            f"{'独立T' if self._uses_independent_time_window else '继承T'} {self._time_window:.2f} 秒   "
+            f"{'独立阻尼' if self._uses_independent_damping else '继承阻尼'}"
+        )
+        footer_font = QFont(painter.font())
+        if footer_font.pointSizeF() > 0:
+            footer_font.setPointSizeF(max(7.6, footer_font.pointSizeF() - 1.0))
+        else:
+            footer_font.setPointSize(8)
+        painter.setFont(footer_font)
         painter.setPen(QColor("#d7dbe3"))
         painter.drawText(
-            QRectF(outer.left(), outer.bottom() - 14.0, outer.width(), 14.0),
+            QRectF(outer.left(), outer.bottom() - 24.0, outer.width(), 22.0),
+            Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+            footer,
+        )
+
+
+class _DynamicColorPreviewWidget(QWidget):
+    """动态配色预览，显示运行中的颜色条、相位与变化速率。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._strip_colors = []
+        self._phase = 0.0
+        self._rate = 0.0
+        self._dynamic_enabled = False
+        self._current_color = (255, 255, 255)
+        self.setMinimumHeight(104)
+        self.setMaximumHeight(118)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_runtime_state(self, colors, *, phase=0.0, rate=0.0, dynamic_enabled=False, current_color=None):
+        self._strip_colors = [tuple(color) for color in (colors or [])]
+        self._phase = float(phase)
+        self._rate = float(rate)
+        self._dynamic_enabled = bool(dynamic_enabled)
+        if current_color is not None:
+            self._current_color = tuple(int(channel) for channel in current_color[:3])
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        outer = QRectF(self.rect()).adjusted(3.0, 3.0, -3.0, -3.0)
+        painter.setPen(QColor("#e6eaf0"))
+        painter.drawText(
+            QRectF(outer.left(), outer.top(), outer.width(), 16.0),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"条数 {len(values)}   分段 {self._segments}   频率 {self._freq_min}-{self._freq_max} Hz",
+            "动态配色预览",
+        )
+
+        chart = QRectF(outer.left(), outer.top() + 24.0, outer.width(), outer.height() - 46.0)
+        palette_colors = [tuple(int(channel) for channel in color[:3]) for color in (self._strip_colors or []) if len(color) >= 3]
+        if not palette_colors:
+            palette_colors = [
+                tuple(int(channel * 255) for channel in colorsys.hsv_to_rgb(index / 12.0, 1.0, 1.0))
+                for index in range(12)
+            ]
+
+        row_rect = QRectF(chart.left(), chart.top() + max(4.0, (chart.height() - 34.0) * 0.5), chart.width(), 34.0)
+        swatch_size = 30.0
+        swatch_rect = QRectF(row_rect.left(), row_rect.top() + 2.0, swatch_size, swatch_size)
+        strip_rect = QRectF(swatch_rect.right() + 12.0, row_rect.center().y() - 7.0, max(24.0, row_rect.right() - swatch_rect.right() - 12.0), 14.0)
+
+        strip_gradient = QLinearGradient(strip_rect.left(), strip_rect.center().y(), strip_rect.right(), strip_rect.center().y())
+        if len(palette_colors) == 1:
+            strip_gradient.setColorAt(0.0, QColor(*palette_colors[0]))
+            strip_gradient.setColorAt(1.0, QColor(*palette_colors[0]))
+        else:
+            for index, color in enumerate(palette_colors):
+                strip_gradient.setColorAt(index / max(1, len(palette_colors) - 1), QColor(int(color[0]), int(color[1]), int(color[2])))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 20))
+        painter.drawRoundedRect(strip_rect.adjusted(-1.0, -1.0, 1.0, 1.0), 8.0, 8.0)
+        painter.setBrush(strip_gradient)
+        painter.drawRoundedRect(strip_rect, 7.0, 7.0)
+
+        current_rgb = tuple(int(channel) for channel in self._current_color[:3])
+        current_color = QColor(int(current_rgb[0]), int(current_rgb[1]), int(current_rgb[2]))
+        painter.setPen(QPen(QColor(255, 255, 255, 165), 1))
+        painter.setBrush(current_color)
+        painter.drawRoundedRect(swatch_rect, 6.0, 6.0)
+
+        marker_x = strip_rect.left() + (self._phase % 1.0) * strip_rect.width()
+        marker_pen = QPen(QColor(255, 255, 255, 230))
+        marker_pen.setWidthF(1.6)
+        painter.setPen(marker_pen)
+        painter.drawLine(int(round(marker_x)), int(strip_rect.top()) - 4, int(round(marker_x)), int(strip_rect.bottom()) + 4)
+        painter.setBrush(current_color)
+        painter.drawEllipse(QRectF(marker_x - 5.0, strip_rect.center().y() - 5.0, 10.0, 10.0))
+
+        footer_font = QFont(painter.font())
+        if footer_font.pointSizeF() > 0:
+            footer_font.setPointSizeF(max(7.6, footer_font.pointSizeF() - 1.0))
+        else:
+            footer_font.setPointSize(8)
+        painter.setFont(footer_font)
+        painter.setPen(QColor("#d7dbe3"))
+        painter.drawText(
+            QRectF(outer.left(), outer.bottom() - 20.0, outer.width(), 18.0),
+            Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+            f"{'动态' if self._dynamic_enabled else '静态'}   {current_color.name().upper()}   速率 {self._rate:.5f}/帧",
         )
 
 
@@ -681,15 +924,19 @@ class VisualizerControlUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("音频可视化控制台")
-        self.resize(760, 600)
+        self.resize(880, 680)
 
         self.config = self._load_config()
         self.config_queue = None
         self.status_queue = None
         self.viz_process = None
+        self.current_raw_a1 = 0.0
         self.current_a1 = 0.0
         self.current_p = 0.0
         self.preview_spectrum_values = []
+        self.preview_dynamic_colors = []
+        self.current_color_cycle_hue = 0.0
+        self.current_color_cycle_rate = 0.0
         self._applying_config = False
         self._syncing_preset_combo = False
         self._last_random_apply_ts = None
@@ -723,17 +970,15 @@ class VisualizerControlUI(QWidget):
     # ═══════════════════════════════════════════════════════
 
     def _load_config(self):
-        cfg = _get_defaults()
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    cfg.update(json.load(f))
-                cfg.pop('freq_band_mode', None)
+                    return _normalize_loaded_config(json.load(f))
             except Exception as e:
                 print(f"警告: 加载配置失败: {e}")
-        else:
-            # 首次运行，用默认值创建 JSON
-            self._save_config_data(cfg)
+                return _get_defaults()
+        cfg = _get_defaults()
+        self._save_config_data(cfg)
         return cfg
 
     @staticmethod
@@ -751,11 +996,78 @@ class VisualizerControlUI(QWidget):
         except Exception as e:
             print(f"警告: 保存配置失败: {e}")
 
+    @staticmethod
+    def _set_checkbox_silent(widget, checked):
+        if widget is None or widget.isChecked() == bool(checked):
+            return
+        widget.blockSignals(True)
+        widget.setChecked(bool(checked))
+        widget.blockSignals(False)
+
+    @staticmethod
+    def _set_spin_silent(widget, value):
+        if widget is None:
+            return
+        try:
+            if abs(float(widget.value()) - float(value)) < 1e-9:
+                return
+        except Exception:
+            pass
+        widget.blockSignals(True)
+        widget.setValue(value)
+        widget.blockSignals(False)
+
+    @staticmethod
+    def _clamp_damping(value, fallback):
+        try:
+            return max(0.0, min(0.999, float(value)))
+        except Exception:
+            return max(0.0, min(0.999, float(fallback)))
+
+    def _get_damping_pair(self, prefix=None):
+        global_rise = self._clamp_damping(self.config.get('k_rise_damping', 0.1), 0.1)
+        global_fall = self._clamp_damping(self.config.get('k_fall_damping', 0.999), 0.999)
+        if not prefix or not self.config.get(f'{prefix}_use_independent_damping', False):
+            return global_rise, global_fall
+        rise = self._clamp_damping(self.config.get(f'{prefix}_independent_rise_damping', global_rise), global_rise)
+        fall = self._clamp_damping(self.config.get(f'{prefix}_independent_fall_damping', global_fall), global_fall)
+        return rise, fall
+
+    def _sync_color_quick_widgets(self, dynamic_enabled=None):
+        dynamic_enabled = bool(self.config.get('color_dynamic', False) if dynamic_enabled is None else dynamic_enabled)
+        if hasattr(self, 'dyn_widget'):
+            self.dyn_widget.setVisible(dynamic_enabled)
+        if hasattr(self, 'color_quick_controls_widget'):
+            self.color_quick_controls_widget.setEnabled(dynamic_enabled)
+        if hasattr(self, 'color_cycle_a1_quick_check'):
+            self.color_cycle_a1_quick_check.setEnabled(dynamic_enabled)
+        self._set_checkbox_silent(getattr(self, 'dyn_check', None), dynamic_enabled)
+        self._set_checkbox_silent(getattr(self, 'color_dynamic_quick_check', None), dynamic_enabled)
+        self._set_checkbox_silent(getattr(self, 'cyc_a1_check', None), bool(self.config.get('color_cycle_a1', True)))
+        self._set_checkbox_silent(getattr(self, 'color_cycle_a1_quick_check', None), bool(self.config.get('color_cycle_a1', True)))
+        self._set_spin_silent(getattr(self, 'cyc_spd_slider', None), int(float(self.config.get('color_cycle_speed', 1.0)) * 100))
+        self._set_spin_silent(getattr(self, 'cyc_spd_spin', None), float(self.config.get('color_cycle_speed', 1.0)))
+        self._set_spin_silent(getattr(self, 'color_cycle_speed_quick_spin', None), float(self.config.get('color_cycle_speed', 1.0)))
+        self._set_spin_silent(getattr(self, 'cyc_pow_slider', None), int(float(self.config.get('color_cycle_pow', 2.0)) * 100))
+        self._set_spin_silent(getattr(self, 'cyc_pow_spin', None), float(self.config.get('color_cycle_pow', 2.0)))
+        self._set_spin_silent(getattr(self, 'color_cycle_pow_quick_spin', None), float(self.config.get('color_cycle_pow', 2.0)))
+
     def _update_cfg(self, key, value):
         self.config[key] = value
+        if key == 'color_dynamic':
+            self._sync_color_quick_widgets(bool(value))
+        elif key in {'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'}:
+            self._sync_color_quick_widgets()
         if key in {'color_scheme', 'gradient_enabled', 'gradient_points'} or re.match(r'^c[1-5]_color$', str(key)):
             self._update_color_preview_strip()
-        if key in {'num_bars', 'circle_segments', 'bar_length_min', 'bar_length_max', 'freq_min', 'freq_max'}:
+        if key in {
+            'num_bars', 'circle_segments', 'bar_length_min', 'bar_length_max', 'freq_min', 'freq_max',
+            'color_scheme', 'gradient_enabled', 'gradient_points', 'gradient_mode', 'bar_height_min', 'bar_height_max',
+            'a1_time_window', 'bar_use_independent_time_window', 'bar_time_window',
+            'k_rise_damping', 'k_fall_damping', 'bar_use_independent_damping',
+            'bar_independent_rise_damping', 'bar_independent_fall_damping',
+            'color_dynamic', 'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'
+        } or re.match(r'^c[1-5]_color$', str(key)) or re.match(r'^(c[1245]|b(?:12|23|34|45))_(use_independent_damping|independent_rise_damping|independent_fall_damping)$', str(key)):
             self._refresh_single_bar_preview()
         if self._applying_config:
             return
@@ -888,20 +1200,12 @@ class VisualizerControlUI(QWidget):
         self.master_visible_check = QCheckBox("总开关（显示全部）")
         self.master_visible_check.setChecked(self.config.get('master_visible', True))
         self.master_visible_check.toggled.connect(lambda v: self._update_cfg('master_visible', v))
-        tg.addWidget(self.master_visible_check, r, 0, 1, 4)
+        tg.addWidget(self.master_visible_check, r, 0, 1, 10)
 
-        tg.addWidget(QLabel("模式:"), r, 4)
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["圆形频谱"])
-        tg.addWidget(self.mode_combo, r, 5)
-
-        tg.addWidget(QLabel("K:"), r, 6)
         self.a1_lbl = QLabel("0.00")
-        tg.addWidget(self.a1_lbl, r, 7)
-
-        tg.addWidget(QLabel("P:"), r, 8)
         self.k2_lbl = QLabel("0.00")
-        tg.addWidget(self.k2_lbl, r, 9)
+        self.a1_lbl.hide()
+        self.k2_lbl.hide()
         r += 1
 
         tg.addWidget(QLabel("预设管理:"), r, 0)
@@ -1126,11 +1430,79 @@ class VisualizerControlUI(QWidget):
         layout.setSpacing(6)
         return card, layout
 
+    def _build_damping_pair_layout(self, rise_cfg_key, fall_cfg_key, *, default_rise=0.1, default_fall=0.999,
+                                   rise_label='增大阻尼:', fall_label='缩小阻尼:'):
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        row.addWidget(QLabel(rise_label))
+        rise_box = self._new_float_box(
+            default_value=default_rise, soft_min=0.0, soft_max=0.95,
+            hard_min=0.0, hard_max=0.999, step=0.01, decimals=3,
+            cfg_key=rise_cfg_key
+        )
+        row.addWidget(rise_box)
+        row.addWidget(QLabel(fall_label))
+        fall_box = self._new_float_box(
+            default_value=default_fall, soft_min=0.0, soft_max=0.999,
+            hard_min=0.0, hard_max=0.999, step=0.01, decimals=3,
+            cfg_key=fall_cfg_key
+        )
+        row.addWidget(fall_box)
+        row.addStretch()
+        return row, rise_box, fall_box
+
+    def _build_independent_damping_controls(self, prefix, *, label='启用独立阻尼'):
+        checkbox = QCheckBox(label)
+        checkbox.setChecked(self.config.get(f'{prefix}_use_independent_damping', False))
+        checkbox.toggled.connect(lambda v, k=f'{prefix}_use_independent_damping': self._update_cfg(k, v))
+
+        widget = QWidget()
+        container = QHBoxLayout(widget)
+        container.setContentsMargins(18, 0, 0, 0)
+        container.setSpacing(0)
+        row, rise_box, fall_box = self._build_damping_pair_layout(
+            f'{prefix}_independent_rise_damping',
+            f'{prefix}_independent_fall_damping',
+        )
+        container.addLayout(row)
+        widget.setVisible(checkbox.isChecked())
+        checkbox.toggled.connect(widget.setVisible)
+        return checkbox, widget, rise_box, fall_box
+
+    def _build_independent_time_window_controls(self, prefix, *, label='启用独立T'):
+        checkbox = QCheckBox(label)
+        checkbox.setChecked(self.config.get(f'{prefix}_use_independent_time_window', False))
+        checkbox.toggled.connect(self._on_bar_independent_time_window_toggled)
+
+        widget = QWidget()
+        container = QHBoxLayout(widget)
+        container.setContentsMargins(18, 0, 0, 0)
+        container.setSpacing(4)
+        container.addWidget(QLabel('频谱T:'))
+        time_box = self._new_float_box(
+            default_value=10.0, soft_min=0.01, soft_max=60.0,
+            hard_min=0.01, hard_max=10000.0, step=0.1, decimals=2,
+            suffix=' 秒', cfg_key=f'{prefix}_time_window'
+        )
+        container.addWidget(time_box)
+        container.addStretch()
+        widget.setVisible(checkbox.isChecked())
+        checkbox.toggled.connect(widget.setVisible)
+        return checkbox, widget, time_box
+
+    def _on_bar_independent_time_window_toggled(self, checked):
+        if checked and not self._applying_config:
+            self._update_cfg('bar_time_window', _clamp_time_window(self.config.get('a1_time_window', 10.0), 10.0))
+        self._update_cfg('bar_use_independent_time_window', bool(checked))
+
     def _build_single_bar_preview_panel(self):
         panel = QWidget()
-        root = QHBoxLayout(panel)
+        root = QGridLayout(panel)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setHorizontalSpacing(8)
+        root.setVerticalSpacing(8)
+        root.setColumnStretch(0, 1)
+        root.setColumnStretch(1, 1)
 
         k_card, k_layout = self._make_preview_card()
         self.k_preview = _SignalPreviewWidget("K 预览", signed=False)
@@ -1146,11 +1518,15 @@ class VisualizerControlUI(QWidget):
         t_row.addWidget(self.a1_spin)
         t_row.addStretch()
         k_layout.addLayout(t_row)
-        k_note = QLabel("K = T 时间内的平均响度")
+        k_damping_row, self.k_rise_damping_spin, self.k_fall_damping_spin = self._build_damping_pair_layout(
+            'k_rise_damping', 'k_fall_damping'
+        )
+        k_layout.addLayout(k_damping_row)
+        k_note = QLabel("K = T 时间窗口平均响度，再按默认增减阻尼更新；未启用独立阻尼的条形图和图元都会跟随它。")
         k_note.setWordWrap(True)
         k_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
         k_layout.addWidget(k_note)
-        root.addWidget(k_card, 1)
+        root.addWidget(k_card, 0, 0)
 
         p_card, p_layout = self._make_preview_card()
         self.p_preview = _SignalPreviewWidget("P 预览", signed=True)
@@ -1170,11 +1546,11 @@ class VisualizerControlUI(QWidget):
         )
         p_row.addWidget(self.k2_pow_spin)
         p_layout.addLayout(p_row)
-        p_note = QLabel("P = sign(上一帧 K - 当前 K) × |差值|^P2")
+        p_note = QLabel("P = sign(当前 K - 上一帧 K) × |差值|^P2，其中 K 使用上面的默认阻尼结果。")
         p_note.setWordWrap(True)
         p_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
         p_layout.addWidget(p_note)
-        root.addWidget(p_card, 1)
+        root.addWidget(p_card, 0, 1)
 
         spec_card, spec_layout = self._make_preview_card()
         self.spectrum_preview = _SpectrumBarsPreviewWidget()
@@ -1232,12 +1608,64 @@ class VisualizerControlUI(QWidget):
         row3.addWidget(QLabel("px"))
         spec_layout.addLayout(row3)
 
-        spec_note = QLabel("当前频率范围内，按当前条数完整展开的一段条形频谱图")
+        self.bar_independent_time_window_check, self.bar_independent_time_window_widget, self.bar_time_window_spin = self._build_independent_time_window_controls('bar')
+        spec_layout.addWidget(self.bar_independent_time_window_check)
+        spec_layout.addWidget(self.bar_independent_time_window_widget)
+
+        self.bar_independent_damping_check, self.bar_independent_damping_widget, self.bar_independent_rise_damping_spin, self.bar_independent_fall_damping_spin = self._build_independent_damping_controls('bar')
+        spec_layout.addWidget(self.bar_independent_damping_check)
+        spec_layout.addWidget(self.bar_independent_damping_widget)
+
+        spec_note = QLabel("完整条形频谱条预览使用 Qt 主题高亮色。频谱T默认继承K的T，勾选后可单独控制频谱平均时间与条形阻尼。")
         spec_note.setWordWrap(True)
         spec_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
         spec_layout.addWidget(spec_note)
-        root.addWidget(spec_card, 1)
+        root.addWidget(spec_card, 1, 0)
 
+        color_card, color_layout = self._make_preview_card()
+        self.color_preview = _DynamicColorPreviewWidget()
+        color_layout.addWidget(self.color_preview)
+        color_row1 = QHBoxLayout()
+        color_row1.setSpacing(6)
+        self.color_dynamic_quick_check = QCheckBox('动态颜色')
+        self.color_dynamic_quick_check.setChecked(self.config.get('color_dynamic', False))
+        self.color_dynamic_quick_check.toggled.connect(lambda v: self._update_cfg('color_dynamic', v))
+        color_row1.addWidget(self.color_dynamic_quick_check)
+        self.color_cycle_a1_quick_check = QCheckBox('P 突变加速')
+        self.color_cycle_a1_quick_check.setChecked(self.config.get('color_cycle_a1', True))
+        self.color_cycle_a1_quick_check.toggled.connect(lambda v: self._update_cfg('color_cycle_a1', v))
+        color_row1.addWidget(self.color_cycle_a1_quick_check)
+        color_row1.addStretch()
+        color_layout.addLayout(color_row1)
+
+        self.color_quick_controls_widget = QWidget()
+        color_controls_layout = QHBoxLayout(self.color_quick_controls_widget)
+        color_controls_layout.setContentsMargins(0, 0, 0, 0)
+        color_controls_layout.setSpacing(4)
+        color_controls_layout.addWidget(QLabel('V0:'))
+        self.color_cycle_speed_quick_spin = self._new_float_box(
+            default_value=1.0, soft_min=0.0, soft_max=10.0,
+            hard_min=-100.0, hard_max=100.0, step=0.01, decimals=2,
+            suffix='x', cfg_key='color_cycle_speed'
+        )
+        color_controls_layout.addWidget(self.color_cycle_speed_quick_spin)
+        color_controls_layout.addWidget(QLabel('VP:'))
+        self.color_cycle_pow_quick_spin = self._new_float_box(
+            default_value=2.0, soft_min=0.01, soft_max=5.0,
+            hard_min=-100.0, hard_max=100.0, step=0.01, decimals=2,
+            cfg_key='color_cycle_pow'
+        )
+        color_controls_layout.addWidget(self.color_cycle_pow_quick_spin)
+        color_controls_layout.addStretch()
+        color_layout.addWidget(self.color_quick_controls_widget)
+
+        color_note = QLabel('这里显示静态渐变长条、当前颜色方块与实时速率；动态颜色会在 P 突变时瞬间加速，稳定后回落到 V0。')
+        color_note.setWordWrap(True)
+        color_note.setStyleSheet('color:#8d95a3; font-size:8.4pt;')
+        color_layout.addWidget(color_note)
+        root.addWidget(color_card, 1, 1)
+
+        self._sync_color_quick_widgets(self.config.get('color_dynamic', False))
         self._refresh_single_bar_preview()
         return panel
 
@@ -1292,6 +1720,12 @@ class VisualizerControlUI(QWidget):
         freq_max = int(self.config.get('freq_max', 20000))
         if freq_min > freq_max:
             freq_min, freq_max = freq_max, freq_min
+        uses_independent_time_window = bool(self.config.get('bar_use_independent_time_window', False))
+        spectrum_time_window = _clamp_time_window(
+            self.config.get('bar_time_window', self.config.get('a1_time_window', 10.0)),
+            self.config.get('a1_time_window', 10.0),
+        ) if uses_independent_time_window else _clamp_time_window(self.config.get('a1_time_window', 10.0), 10.0)
+        bar_rise_damping, bar_fall_damping = self._get_damping_pair('bar')
         self.k_preview.set_runtime_state(self.current_a1)
         self.p_preview.set_runtime_state(self.current_p)
         self.spectrum_preview.set_config_snapshot(
@@ -1299,8 +1733,80 @@ class VisualizerControlUI(QWidget):
             segments=int(self.config.get('circle_segments', 1)),
             freq_min=freq_min,
             freq_max=freq_max,
+            time_window=spectrum_time_window,
+            uses_independent_time_window=uses_independent_time_window,
+            uses_independent_damping=bool(self.config.get('bar_use_independent_damping', False)),
+            rise_damping=bar_rise_damping,
+            fall_damping=bar_fall_damping,
         )
         self.spectrum_preview.set_runtime_state(self.preview_spectrum_values)
+        preview_colors = self._build_spectrum_preview_colors(
+            [0.0] * max(1, int(self.config.get('num_bars', 64)))
+        )
+        current_color = _sample_preview_color(self.preview_dynamic_colors or preview_colors, self.current_color_cycle_hue)
+        self.color_preview.set_runtime_state(
+            preview_colors,
+            phase=self.current_color_cycle_hue,
+            rate=self.current_color_cycle_rate,
+            dynamic_enabled=bool(self.config.get('color_dynamic', False)),
+            current_color=current_color,
+        )
+
+    @staticmethod
+    def _interpolate_preview_color(ratio, points):
+        if not points:
+            return (255, 255, 255)
+        for index in range(len(points) - 1):
+            pos1, color1 = points[index]
+            pos2, color2 = points[index + 1]
+            if pos1 <= ratio <= pos2:
+                blend = (ratio - pos1) / (pos2 - pos1) if pos2 > pos1 else 0.0
+                return (
+                    int(color1[0] * (1.0 - blend) + color2[0] * blend),
+                    int(color1[1] * (1.0 - blend) + color2[1] * blend),
+                    int(color1[2] * (1.0 - blend) + color2[2] * blend),
+                )
+        if ratio <= points[0][0]:
+            return tuple(points[0][1])
+        return tuple(points[-1][1])
+
+    def _build_spectrum_preview_colors(self, values):
+        count = len(values) if values else max(1, int(self.config.get('num_bars', 64)))
+        scheme = self.config.get('color_scheme', 'rainbow')
+        gradient_mode = self.config.get('gradient_mode', 'frequency')
+        gradient_enabled = self.config.get('gradient_enabled', True)
+        colors = []
+
+        if scheme == 'custom':
+            points = sorted(self.config.get('gradient_points', [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))]), key=lambda item: item[0])
+            if not gradient_enabled:
+                base = tuple(points[0][1]) if points else (255, 255, 255)
+                return [base] * count
+            min_height = float(self.config.get('bar_height_min', 0))
+            max_height = float(self.config.get('bar_height_max', 500))
+            span = max(1.0, max_height - min_height)
+            for index in range(count):
+                if gradient_mode == 'height' and values:
+                    ratio = max(0.0, min(1.0, (float(values[index]) - min_height) / span))
+                else:
+                    ratio = index / max(1, count - 1)
+                colors.append(self._interpolate_preview_color(ratio, points))
+            return colors
+
+        for index in range(count):
+            ratio = index / max(1, count - 1)
+            if scheme == 'rainbow':
+                rgb = colorsys.hsv_to_rgb(ratio, 1.0, 1.0)
+            elif scheme == 'fire':
+                rgb = (1.0, ratio * 0.8, ratio * 0.2)
+            elif scheme == 'ice':
+                rgb = (ratio * 0.3, ratio * 0.7, 1.0)
+            elif scheme == 'neon':
+                rgb = colorsys.hsv_to_rgb((ratio + 0.5) % 1.0, 1.0, 1.0)
+            else:
+                rgb = colorsys.hsv_to_rgb(ratio, 1.0, 1.0)
+            colors.append(tuple(int(channel * 255) for channel in rgb))
+        return colors
 
     # ── 控制（含基础设置） ──────────────────────────────
 
@@ -1347,7 +1853,7 @@ class VisualizerControlUI(QWidget):
             setattr(self, f'{attr}_slider', sl); setattr(self, f'{attr}_spin', box)
             r += 1
 
-        hint = QLabel("顶部三联预览已承载 K / P / T / P2 以及条数、分段、频率、长度快捷输入。")
+        hint = QLabel("顶部四联预览已承载 K / P / T / P2、默认阻尼、条形图独立阻尼，以及动态颜色预览快捷输入。图元独立阻尼在“图元设置”页逐项配置。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#8a93a1; font-size:8.5pt; padding-top:4px;")
         g.addWidget(hint, r, 0, 1, 3)
@@ -1799,10 +2305,7 @@ class VisualizerControlUI(QWidget):
             return
         try:
             with open(fp, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            cfg = _get_defaults()
-            cfg.update(data)
-            cfg.pop('freq_band_mode', None)
+                cfg = _normalize_loaded_config(json.load(f))
             # 保留运行态设置，不被预设覆盖
             runtime_keep_keys = (
                 'pos_x', 'pos_y',
@@ -1871,28 +2374,28 @@ class VisualizerControlUI(QWidget):
         add_btn.clicked.connect(self._add_gradient_point)
         cl.addWidget(add_btn)
 
-        self.dyn_check = QCheckBox("动态色相循环")
+        self.dyn_check = QCheckBox("动态颜色变化")
         self.dyn_check.setChecked(self.config['color_dynamic'])
         self.dyn_check.toggled.connect(self._on_dynamic_toggled)
         cl.addWidget(self.dyn_check)
 
         self.dyn_widget = QWidget()
         dl = QGridLayout(self.dyn_widget); dl.setContentsMargins(10,2,0,2)
-        dl.addWidget(QLabel("速度:"), 0, 0)
+        dl.addWidget(QLabel("V0:"), 0, 0)
         self.cyc_spd_slider, self.cyc_spd_spin = self._new_bound_float_slider(
             cfg_key='color_cycle_speed', default_value=1.0,
             soft_min=0.0, soft_max=10.0, hard_min=-100.0, hard_max=100.0,
             slider_scale=100, step=0.01, decimals=2, suffix='x'
         )
         dl.addWidget(self.cyc_spd_slider, 0, 1); dl.addWidget(self.cyc_spd_spin, 0, 2)
-        dl.addWidget(QLabel("指数:"), 1, 0)
+        dl.addWidget(QLabel("VP:"), 1, 0)
         self.cyc_pow_slider, self.cyc_pow_spin = self._new_bound_float_slider(
             cfg_key='color_cycle_pow', default_value=2.0,
             soft_min=0.01, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
             slider_scale=100, step=0.01, decimals=2
         )
         dl.addWidget(self.cyc_pow_slider, 1, 1); dl.addWidget(self.cyc_pow_spin, 1, 2)
-        self.cyc_a1_check = QCheckBox("受K响度控制")
+        self.cyc_a1_check = QCheckBox("受P突变加速")
         self.cyc_a1_check.setChecked(self.config['color_cycle_a1'])
         self.cyc_a1_check.toggled.connect(lambda v: self._update_cfg('color_cycle_a1', v))
         dl.addWidget(self.cyc_a1_check, 2, 0, 1, 3)
@@ -1929,21 +2432,6 @@ class VisualizerControlUI(QWidget):
             cfg_key='main_radius_scale'
         )
         g.addWidget(self.main_radius_scale_spin, r, 1); r += 1
-
-        for lbl_t, attr, cfg_key, default, soft_min, soft_max, hard_min, hard_max in [
-            ("阻尼:", "damp", 'damping', 0.85, 0.0, 2.0, -20.0, 20.0),
-            ("弹性:", "spring", 'spring_strength', 0.3, 0.0, 3.0, -20.0, 20.0),
-            ("重力:", "grav", 'gravity', 0.5, 0.0, 2.0, -20.0, 20.0),
-        ]:
-            g.addWidget(QLabel(lbl_t), r, 0)
-            sl, box = self._new_bound_float_slider(
-                cfg_key=cfg_key, default_value=default, soft_min=soft_min, soft_max=soft_max,
-                hard_min=hard_min, hard_max=hard_max, slider_scale=100,
-                step=0.01, decimals=2
-            )
-            g.addWidget(sl, r, 1); g.addWidget(box, r, 2)
-            setattr(self, f'{attr}_slider', sl); setattr(self, f'{attr}_spin', box)
-            r += 1
 
         g.addWidget(QLabel("默认高度:"), r, 0)
         self.bar_default_height_spin = self._new_float_box(
@@ -1987,6 +2475,11 @@ class VisualizerControlUI(QWidget):
         hh.addWidget(self.hmin_spin); hh.addWidget(QLabel("~")); hh.addWidget(self.hmax_spin)
         hh.addWidget(QLabel("px"))
         g.addLayout(hh, r, 1, 1, 2); r += 1
+
+        note = QLabel("K 默认增减阻尼位于顶部 K 预览卡；条形图独立阻尼位于顶部频谱卡；各图元独立阻尼位于“图元设置”页。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8a93a1; font-size:8.5pt;")
+        g.addWidget(note, r, 0, 1, 3); r += 1
 
         v.addLayout(g)
         s.add_widget(w)
@@ -2056,7 +2549,9 @@ class VisualizerControlUI(QWidget):
         if section == 'physics':
             return [
                 'rotation_base', 'main_radius_scale',
-                'damping', 'spring_strength', 'gravity',
+                'a1_time_window', 'bar_use_independent_time_window', 'bar_time_window',
+                'k_rise_damping', 'k_fall_damping',
+                'bar_use_independent_damping', 'bar_independent_rise_damping', 'bar_independent_fall_damping',
                 'bar_default_height', 'bar_internal_min', 'bar_internal_max',
                 'bar_height_min', 'bar_height_max'
             ]
@@ -2069,12 +2564,18 @@ class VisualizerControlUI(QWidget):
                 ])
                 if li in (1, 2, 4, 5):
                     keys.append(f'c{li}_step')
+                    keys.extend([
+                        f'c{li}_use_independent_damping',
+                        f'c{li}_independent_rise_damping',
+                        f'c{li}_independent_fall_damping',
+                    ])
                 if li in (1, 5):
                     keys.append(f'c{li}_decay')
             for key in ('b12', 'b23', 'b34', 'b45'):
                 keys.extend([
                     f'{key}_on', f'{key}_thick', f'{key}_fixed', f'{key}_fixed_len',
-                    f'{key}_from_start', f'{key}_from_end', f'{key}_from_center'
+                    f'{key}_from_start', f'{key}_from_end', f'{key}_from_center',
+                    f'{key}_use_independent_damping', f'{key}_independent_rise_damping', f'{key}_independent_fall_damping'
                 ])
             return keys
         return []
@@ -2330,6 +2831,15 @@ class VisualizerControlUI(QWidget):
                 setattr(self, f'c{li}_decay_spin', decay_box)
                 g.addWidget(dsl, r, 1, 1, 2); g.addWidget(decay_box, r, 3); r += 1
 
+            if li in (1, 2, 4, 5):
+                damp_check, damp_widget, rise_box, fall_box = self._build_independent_damping_controls(f'c{li}')
+                setattr(self, f'c{li}_independent_damping_check', damp_check)
+                setattr(self, f'c{li}_independent_damping_widget', damp_widget)
+                setattr(self, f'c{li}_independent_rise_damping_spin', rise_box)
+                setattr(self, f'c{li}_independent_fall_damping_spin', fall_box)
+                g.addWidget(damp_check, r, 0, 1, 4); r += 1
+                g.addWidget(damp_widget, r, 0, 1, 4); r += 1
+
             g.addWidget(QLabel("转速:"), r, 0)
             rsl, speed_box = self._new_bound_float_slider(
                 cfg_key=f'c{li}_rot_speed', default_value=1.0,
@@ -2412,6 +2922,14 @@ class VisualizerControlUI(QWidget):
 
             fchk.toggled.connect(lambda v, k=key, w=mode_w: (self._update_cfg(f'{k}_fixed', v), w.setVisible(v)))
 
+            damp_check, damp_widget, rise_box, fall_box = self._build_independent_damping_controls(key)
+            setattr(self, f'{key}_independent_damping_check', damp_check)
+            setattr(self, f'{key}_independent_damping_widget', damp_widget)
+            setattr(self, f'{key}_independent_rise_damping_spin', rise_box)
+            setattr(self, f'{key}_independent_fall_damping_spin', fall_box)
+            g.addWidget(damp_check, r, 0, 1, 3); r += 1
+            g.addWidget(damp_widget, r, 0, 1, 3); r += 1
+
         s.add_layout(g)
         return s
 
@@ -2420,7 +2938,7 @@ class VisualizerControlUI(QWidget):
     def _build_k1_section(self):
         s = _Collapsible("高级控制", expanded=True)
         v = QVBoxLayout(); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
-        note = QLabel("顶部三联预览区已承载 K、P、T、P2 的实时预览与输入。\n右侧此页保留为说明，不再重复放置同一组控件。")
+        note = QLabel("顶部四联预览区已承载 K、P、T、P2、默认阻尼、条形独立阻尼与动态颜色预览。\n右侧此页保留为说明，不再重复放置同一组控件。")
         note.setWordWrap(True)
         note.setStyleSheet("color:#9aa3af; padding:4px 0;")
         v.addWidget(note)
@@ -2526,16 +3044,18 @@ class VisualizerControlUI(QWidget):
                 ("渐变启用", "gradient_enabled", "bool"),
                 ("渐变模式", "gradient_mode", "choice", ["frequency", "height"]),
                 ("动态色相", "color_dynamic", "bool"),
-                ("循环速度", "color_cycle_speed", "float", 0.0, 10.0),
-                ("循环指数", "color_cycle_pow", "float", 0.01, 5.0),
-                ("K色相控制", "color_cycle_a1", "bool"),
+                ("基础速率V0", "color_cycle_speed", "float", 0.0, 10.0),
+                ("峰值速率VP", "color_cycle_pow", "float", 0.01, 5.0),
+                ("P突变加速", "color_cycle_a1", "bool"),
             ]),
             ("运动表现", [
                 ("旋转基值", "rotation_base", "float", 0.0, 3.0),
                 ("主半径缩放", "main_radius_scale", "float", 0.1, 3.0),
-                ("阻尼", "damping", "float", 0.0, 2.0),
-                ("弹性", "spring_strength", "float", 0.0, 3.0),
-                ("重力", "gravity", "float", 0.0, 2.0),
+                ("K增大阻尼", "k_rise_damping", "float", 0.0, 0.999),
+                ("K缩小阻尼", "k_fall_damping", "float", 0.0, 0.999),
+                ("条形独立阻尼", "bar_use_independent_damping", "bool"),
+                ("条形增大阻尼", "bar_independent_rise_damping", "float", 0.0, 0.999),
+                ("条形缩小阻尼", "bar_independent_fall_damping", "float", 0.0, 0.999),
                 ("默认高度", "bar_default_height", "float", 0.0, 300.0),
                 ("内部最小高度", "bar_internal_min", "float", 0.0, 300.0),
                 ("内部最大高度", "bar_internal_max", "float", 0.0, 1000.0),
@@ -2561,6 +3081,11 @@ class VisualizerControlUI(QWidget):
             ]
             if li in (1, 2, 4, 5):
                 cat_props.append(("间隔", f"c{li}_step", "int", 1, 32))
+                cat_props.extend([
+                    ("独立阻尼", f"c{li}_use_independent_damping", "bool"),
+                    ("增大阻尼", f"c{li}_independent_rise_damping", "float", 0.0, 0.999),
+                    ("缩小阻尼", f"c{li}_independent_fall_damping", "float", 0.0, 0.999),
+                ])
             if li in (1, 5):
                 cat_props.append(("衰减", f"c{li}_decay", "float", 0.9, 1.0))
             props.append((f"L{li} {layer_names[li]}", cat_props))
@@ -2575,11 +3100,16 @@ class VisualizerControlUI(QWidget):
                 ("首端", f"{key}_from_start", "bool"),
                 ("末端", f"{key}_from_end", "bool"),
                 ("中间", f"{key}_from_center", "bool"),
+                ("独立阻尼", f"{key}_use_independent_damping", "bool"),
+                ("增大阻尼", f"{key}_independent_rise_damping", "float", 0.0, 0.999),
+                ("缩小阻尼", f"{key}_independent_fall_damping", "float", 0.0, 0.999),
             ]
             props.append((bname, cat_props))
 
         props.append(("高级控制", [
             ("T时间窗口", "a1_time_window", "float", 0.01, 60.0),
+            ("频谱独立T", "bar_use_independent_time_window", "bool"),
+            ("频谱T时间窗口", "bar_time_window", "float", 0.01, 60.0),
             ("P启用", "k2_enabled", "bool"),
             ("P2幂次", "k2_pow", "float", 0.01, 10.0),
         ]))
@@ -2905,7 +3435,6 @@ class VisualizerControlUI(QWidget):
             self._update_cfg(key, rgb)
 
     def _on_dynamic_toggled(self, v):
-        self.dyn_widget.setVisible(v)
         self._update_cfg('color_dynamic', v)
 
     def _rebuild_gradient_ui(self):
@@ -3044,9 +3573,7 @@ class VisualizerControlUI(QWidget):
             self._schedule_config_commit()
 
     def _apply_config_to_ui(self, cfg):
-        d = _get_defaults()
-        d.update(cfg)
-        d.pop('freq_band_mode', None)
+        d = _normalize_loaded_config(cfg)
         # 保留随机勾选状态，不被预设/复位覆盖
         d['random_checked'] = self.config.get('random_checked', [])
 
@@ -3063,11 +3590,17 @@ class VisualizerControlUI(QWidget):
             schemes = ['rainbow', 'fire', 'ice', 'neon', 'custom']
             scheme = d.get('color_scheme', 'rainbow')
             self.color_combo.setCurrentIndex(schemes.index(scheme) if scheme in schemes else 0)
-            self.damp_slider.setValue(int(d.get('damping', 0.85) * 100))
-            self.spring_slider.setValue(int(d.get('spring_strength', 0.3) * 100))
-            self.grav_slider.setValue(int(d.get('gravity', 0.5) * 100))
             self.rotation_base_spin.setValue(float(d.get('rotation_base', 1.0)))
             self.main_radius_scale_spin.setValue(float(d.get('main_radius_scale', 1.0)))
+            self.k_rise_damping_spin.setValue(float(d.get('k_rise_damping', 0.1)))
+            self.k_fall_damping_spin.setValue(float(d.get('k_fall_damping', 0.999)))
+            self.bar_independent_time_window_check.setChecked(d.get('bar_use_independent_time_window', False))
+            self.bar_independent_time_window_widget.setVisible(d.get('bar_use_independent_time_window', False))
+            self.bar_time_window_spin.setValue(float(d.get('bar_time_window', d.get('a1_time_window', 10.0))))
+            self.bar_independent_damping_check.setChecked(d.get('bar_use_independent_damping', False))
+            self.bar_independent_damping_widget.setVisible(d.get('bar_use_independent_damping', False))
+            self.bar_independent_rise_damping_spin.setValue(float(d.get('bar_independent_rise_damping', 0.1)))
+            self.bar_independent_fall_damping_spin.setValue(float(d.get('bar_independent_fall_damping', 0.999)))
             self.bar_default_height_spin.setValue(float(d.get('bar_default_height', 0.0)))
             self.bar_internal_min_spin.setValue(float(d.get('bar_internal_min', 0.0)))
             self.bar_internal_max_spin.setValue(float(d.get('bar_internal_max', 300.0)))
@@ -3103,6 +3636,10 @@ class VisualizerControlUI(QWidget):
             self.cyc_spd_slider.setValue(int(d.get('color_cycle_speed', 1.0) * 100))
             self.cyc_pow_slider.setValue(int(d.get('color_cycle_pow', 2.0) * 100))
             self.cyc_a1_check.setChecked(d.get('color_cycle_a1', True))
+            self.color_dynamic_quick_check.setChecked(d.get('color_dynamic', False))
+            self.color_cycle_speed_quick_spin.setValue(float(d.get('color_cycle_speed', 1.0)))
+            self.color_cycle_pow_quick_spin.setValue(float(d.get('color_cycle_pow', 2.0)))
+            self.color_cycle_a1_quick_check.setChecked(d.get('color_cycle_a1', True))
             self._rebuild_gradient_ui()
 
             # 五层轮廓
@@ -3119,6 +3656,11 @@ class VisualizerControlUI(QWidget):
                     getattr(self, f'c{li}_step_spin').setValue(d.get(f'c{li}_step', 2))
                 if hasattr(self, f'c{li}_decay_slider'):
                     getattr(self, f'c{li}_decay_slider').setValue(int(d.get(f'c{li}_decay', 0.995) * 1000))
+                if li in (1, 2, 4, 5):
+                    getattr(self, f'c{li}_independent_damping_check').setChecked(d.get(f'c{li}_use_independent_damping', False))
+                    getattr(self, f'c{li}_independent_damping_widget').setVisible(d.get(f'c{li}_use_independent_damping', False))
+                    getattr(self, f'c{li}_independent_rise_damping_spin').setValue(float(d.get(f'c{li}_independent_rise_damping', 0.1)))
+                    getattr(self, f'c{li}_independent_fall_damping_spin').setValue(float(d.get(f'c{li}_independent_fall_damping', 0.999)))
                 getattr(self, f'c{li}_rot_speed_slider').setValue(int(d.get(f'c{li}_rot_speed', 1.0) * 100))
                 getattr(self, f'c{li}_rot_pow_slider').setValue(int(d.get(f'c{li}_rot_pow', 0.5) * 100))
 
@@ -3132,9 +3674,14 @@ class VisualizerControlUI(QWidget):
                 getattr(self, f'{key}_end_check').setChecked(d.get(f'{key}_from_end', False))
                 getattr(self, f'{key}_center_check').setChecked(d.get(f'{key}_from_center', False))
                 getattr(self, f'{key}_mode_widget').setVisible(d.get(f'{key}_fixed', False))
+                getattr(self, f'{key}_independent_damping_check').setChecked(d.get(f'{key}_use_independent_damping', False))
+                getattr(self, f'{key}_independent_damping_widget').setVisible(d.get(f'{key}_use_independent_damping', False))
+                getattr(self, f'{key}_independent_rise_damping_spin').setValue(float(d.get(f'{key}_independent_rise_damping', 0.1)))
+                getattr(self, f'{key}_independent_fall_damping_spin').setValue(float(d.get(f'{key}_independent_fall_damping', 0.999)))
         finally:
             self._applying_config = False
 
+            self._sync_color_quick_widgets(d.get('color_dynamic', False))
         self._update_color_preview_strip()
         self._refresh_single_bar_preview()
         self._save_config()
@@ -3157,6 +3704,8 @@ class VisualizerControlUI(QWidget):
         try:
             while not self.status_queue.empty():
                 st = self.status_queue.get_nowait()
+                if 'raw_k' in st:
+                    self.current_raw_a1 = st['raw_k']
                 if 'k' in st:
                     self.current_a1 = st['k']
                     self.a1_lbl.setText(f"{self.current_a1:.2f}")
@@ -3171,6 +3720,14 @@ class VisualizerControlUI(QWidget):
                     self.k2_lbl.setText(f"{self.current_p:.2f}")
                 if 'spectrum_bars' in st:
                     self.preview_spectrum_values = list(st['spectrum_bars'])
+                if 'color_preview' in st:
+                    self.preview_dynamic_colors = [tuple(color) for color in st['color_preview']]
+                if 'color_cycle_hue' in st:
+                    self.current_color_cycle_hue = float(st['color_cycle_hue'])
+                if 'color_cycle_rate' in st:
+                    self.current_color_cycle_rate = float(st['color_cycle_rate'])
+                if 'drag_adjust_mode' in st and self.drag_adjust_check.isChecked() != bool(st['drag_adjust_mode']):
+                    self.drag_adjust_check.setChecked(bool(st['drag_adjust_mode']))
                 if 'pos_x' in st and 'pos_y' in st:
                     # 只有在用户没有聚焦pos控件时才更新显示，避免干扰用户输入
                     if not (self.pos_x_spin.hasFocus() or self.pos_y_spin.hasFocus()):

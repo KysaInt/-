@@ -8,6 +8,8 @@ import sys
 import json
 import colorsys
 import ctypes
+import math
+from collections import deque
 from pathlib import Path
 import queue
 import time
@@ -38,6 +40,8 @@ except Exception:
 
 CONFIG_FILE = Path(__file__).parent / "visualizer_config.json"
 
+_DAMPED_OBJECT_KEYS = ("bar", "c1", "c2", "c4", "c5", "b12", "b23", "b34", "b45")
+
 _DEFAULT_CONFIG = {
     "width": 0,
     "height": 0,
@@ -51,9 +55,13 @@ _DEFAULT_CONFIG = {
     "always_on_top": True,
     "num_bars": 64,
     "smoothing": 0.7,
-    "damping": 0.85,
-    "spring_strength": 0.3,
-    "gravity": 0.5,
+    "k_rise_damping": 0.1,
+    "k_fall_damping": 0.999,
+    "bar_use_independent_damping": False,
+    "bar_independent_rise_damping": 0.1,
+    "bar_independent_fall_damping": 0.999,
+    "bar_use_independent_time_window": False,
+    "bar_time_window": 10.0,
     "rotation_base": 1.0,
     "main_radius_scale": 1.0,
     "bar_height_min": 0,
@@ -61,7 +69,6 @@ _DEFAULT_CONFIG = {
     "bar_default_height": 0.0,
     "bar_internal_min": 0.0,
     "bar_internal_max": 300.0,
-    "bar_a1_influence": 0.0,
     "color_scheme": "rainbow",
     "gradient_points": [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))],
     "gradient_enabled": True,
@@ -161,19 +168,61 @@ _DEFAULT_CONFIG = {
     "b45_from_center": False,
 }
 
+for _prefix in _DAMPED_OBJECT_KEYS[1:]:
+    _DEFAULT_CONFIG[f"{_prefix}_use_independent_damping"] = False
+    _DEFAULT_CONFIG[f"{_prefix}_independent_rise_damping"] = 0.1
+    _DEFAULT_CONFIG[f"{_prefix}_independent_fall_damping"] = 0.999
 
-def _load_config():
+
+def _clamp_time_window(value, fallback=10.0):
+    try:
+        return max(0.01, float(value))
+    except Exception:
+        return max(0.01, float(fallback))
+
+
+def _normalize_loaded_config(data):
     import copy
 
     cfg = copy.deepcopy(_DEFAULT_CONFIG)
+    loaded = dict(data or {})
+
+    legacy_rise = float(loaded.get("bar_rise_damping", loaded.get("damping", cfg["k_rise_damping"])))
+    legacy_fall = float(loaded.get("bar_fall_damping", loaded.get("damping", cfg["k_fall_damping"])))
+    loaded.setdefault("k_rise_damping", max(0.0, min(0.999, legacy_rise)))
+    loaded.setdefault("k_fall_damping", max(0.0, min(0.999, legacy_fall)))
+    loaded.setdefault("bar_use_independent_damping", False)
+    loaded.setdefault("bar_independent_rise_damping", max(0.0, min(0.999, legacy_rise)))
+    loaded.setdefault("bar_independent_fall_damping", max(0.0, min(0.999, legacy_fall)))
+    loaded.setdefault("bar_use_independent_time_window", False)
+    loaded.setdefault("bar_time_window", _clamp_time_window(loaded.get("a1_time_window", cfg["a1_time_window"]), cfg["a1_time_window"]))
+    for prefix in _DAMPED_OBJECT_KEYS[1:]:
+        loaded.setdefault(f"{prefix}_use_independent_damping", False)
+        loaded.setdefault(f"{prefix}_independent_rise_damping", loaded["k_rise_damping"])
+        loaded.setdefault(f"{prefix}_independent_fall_damping", loaded["k_fall_damping"])
+
+    cfg.update(loaded)
+    cfg["a1_time_window"] = _clamp_time_window(cfg.get("a1_time_window", _DEFAULT_CONFIG["a1_time_window"]), _DEFAULT_CONFIG["a1_time_window"])
+    cfg["bar_time_window"] = _clamp_time_window(cfg.get("bar_time_window", cfg["a1_time_window"]), cfg["a1_time_window"])
+    cfg["bar_use_independent_time_window"] = bool(cfg.get("bar_use_independent_time_window", False))
+    cfg.pop("freq_band_mode", None)
+    cfg.pop("bar_a1_influence", None)
+    cfg.pop("bar_rise_damping", None)
+    cfg.pop("bar_fall_damping", None)
+    cfg.pop("damping", None)
+    cfg.pop("spring_strength", None)
+    cfg.pop("gravity", None)
+    return cfg
+
+
+def _load_config():
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as file_obj:
-                cfg.update(json.load(file_obj))
-            cfg.pop("freq_band_mode", None)
+                return _normalize_loaded_config(json.load(file_obj))
         except Exception:
-            pass
-    return cfg
+            return _normalize_loaded_config(None)
+    return _normalize_loaded_config(None)
 
 
 class OverlayControlLayer(QWidget):
@@ -379,6 +428,8 @@ class CircularVisualizerWindow(QWidget):
         self.NUM_BARS = int(self.config.get("num_bars", 64))
         self.colors = []
         self.color_cycle_hue = 0.0
+        self.current_color_cycle_rate = 0.0
+        self.current_color_cycle_boost = 0.0
 
         initial_bar_height = self._default_bar_height()
         self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
@@ -386,14 +437,18 @@ class CircularVisualizerWindow(QWidget):
         self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
         self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
         self.preview_spectrum_values = [0.0] * self.NUM_BARS
+        self.object_length_states = {
+            key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
+        }
+        self.spectrum_history = deque()
+        self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
+        self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
 
         self.smoothing_factor = float(self.config.get("smoothing", 0.7))
-        self.damping = float(self.config.get("damping", 0.85))
-        self.spring_strength = float(self.config.get("spring_strength", 0.3))
-        self.gravity = float(self.config.get("gravity", 0.5))
 
-        self.a1_time_window = float(self.config.get("a1_time_window", 10))
+        self.a1_time_window = _clamp_time_window(self.config.get("a1_time_window", 10), 10)
         self.loudness_history = []
+        self.raw_a1_value = 0.0
         self.a1_value = 0.0
         self.prev_a1_value = 0.0
         self.k2_value = 0.0
@@ -425,7 +480,16 @@ class CircularVisualizerWindow(QWidget):
         event.accept()
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Q):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.config.get("drag_adjust_mode", False):
+                self.config["drag_adjust_mode"] = False
+                self.dragging = False
+                self.drag_handle_hover = False
+                self._send_status()
+                self.overlay.update()
+                return
+            return
+        if event.key() == Qt.Key.Key_Q:
             self.close()
             return
         super().keyPressEvent(event)
@@ -488,6 +552,19 @@ class CircularVisualizerWindow(QWidget):
         except queue.Empty:
             return None
 
+    def _reset_length_states(self, initial_bar_height):
+        self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
+        self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.preview_spectrum_values = [float(initial_bar_height)] * self.NUM_BARS
+        self.object_length_states = {
+            key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
+        }
+        self.spectrum_history = deque()
+        self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
+        self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
+
     def _default_bar_height(self):
         default_height = float(self.config.get("bar_default_height", 0.0))
         lower_limit = float(self.config.get("bar_internal_min", 0.0))
@@ -495,6 +572,68 @@ class CircularVisualizerWindow(QWidget):
         if lower_limit > upper_limit:
             lower_limit, upper_limit = upper_limit, lower_limit
         return float(np.clip(default_height, lower_limit, upper_limit))
+
+    @staticmethod
+    def _clamp_damping(value, fallback):
+        try:
+            return max(0.0, min(0.999, float(value)))
+        except Exception:
+            return max(0.0, min(0.999, float(fallback)))
+
+    def _get_damping_pair(self, prefix=None):
+        global_rise = self._clamp_damping(self.config.get("k_rise_damping", 0.1), 0.1)
+        global_fall = self._clamp_damping(self.config.get("k_fall_damping", 0.999), 0.999)
+        if not prefix:
+            return global_rise, global_fall
+        if not self.config.get(f"{prefix}_use_independent_damping", False):
+            return global_rise, global_fall
+        rise = self._clamp_damping(self.config.get(f"{prefix}_independent_rise_damping", global_rise), global_rise)
+        fall = self._clamp_damping(self.config.get(f"{prefix}_independent_fall_damping", global_fall), global_fall)
+        return rise, fall
+
+    def _get_bar_time_window(self):
+        base_time_window = _clamp_time_window(self.a1_time_window, 10.0)
+        if not self.config.get("bar_use_independent_time_window", False):
+            return base_time_window
+        return _clamp_time_window(self.config.get("bar_time_window", base_time_window), base_time_window)
+
+    def _prune_spectrum_history(self, now=None):
+        current_time = time.time() if now is None else now
+        cutoff = current_time - self._get_bar_time_window()
+        while self.spectrum_history and self.spectrum_history[0][0] < cutoff:
+            _, old_values = self.spectrum_history.popleft()
+            self.spectrum_history_sum -= old_values
+        if not self.spectrum_history:
+            self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
+        else:
+            self.smoothed_bar_values = self.spectrum_history_sum / len(self.spectrum_history)
+        return self.smoothed_bar_values.copy()
+
+    def _update_spectrum_history(self, bar_values, now=None):
+        current_time = time.time() if now is None else now
+        values = np.asarray(bar_values, dtype=float).reshape(-1)
+        if values.size != self.NUM_BARS:
+            resized = np.zeros(self.NUM_BARS, dtype=float)
+            copy_count = min(self.NUM_BARS, values.size)
+            resized[:copy_count] = values[:copy_count]
+            values = resized
+        self.spectrum_history.append((current_time, values.copy()))
+        if len(self.spectrum_history_sum) != self.NUM_BARS:
+            self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
+        self.spectrum_history_sum += values
+        return self._prune_spectrum_history(current_time)
+
+    @staticmethod
+    def _apply_damping_step(current, target, rise_damping, fall_damping):
+        rise_factor = max(0.001, 1.0 - rise_damping)
+        fall_factor = max(0.001, 1.0 - fall_damping)
+        if np.isscalar(current) and np.isscalar(target):
+            blend = rise_factor if target >= current else fall_factor
+            return current + (target - current) * blend
+        current_arr = np.asarray(current, dtype=float)
+        target_arr = np.asarray(target, dtype=float)
+        blend = np.where(target_arr >= current_arr, rise_factor, fall_factor)
+        return current_arr + (target_arr - current_arr) * blend
 
     def _build_band_edges(self, spectrum_length, freq_res):
         lower_bin = max(1, int(self.config.get("freq_min", 20) / freq_res))
@@ -554,8 +693,10 @@ class CircularVisualizerWindow(QWidget):
         self.loudness_history = [(stamp, value) for stamp, value in self.loudness_history if stamp >= cutoff]
 
         previous = self.a1_value
-        self.a1_value = np.mean([value for _, value in self.loudness_history]) if self.loudness_history else 0.0
-        delta = previous - self.a1_value
+        self.raw_a1_value = np.mean([value for _, value in self.loudness_history]) if self.loudness_history else 0.0
+        k_rise_damping, k_fall_damping = self._get_damping_pair()
+        self.a1_value = float(self._apply_damping_step(previous, self.raw_a1_value, k_rise_damping, k_fall_damping))
+        delta = self.a1_value - previous
         power = float(self.config.get("k2_pow", 1.0))
         self.k2_value = np.sign(delta) * (abs(delta) ** power)
 
@@ -576,11 +717,16 @@ class CircularVisualizerWindow(QWidget):
                     break
             self.status_queue.put(
                 {
+                    "raw_k": float(self.raw_a1_value),
                     "k": float(self.a1_value),
                     "p": float(self.k2_value),
                     "a1": float(self.a1_value),
                     "k2": float(self.k2_value),
                     "spectrum_bars": list(self.preview_spectrum_values),
+                    "color_preview": [tuple(int(channel) for channel in color) for color in self.colors],
+                    "color_cycle_hue": float(self.color_cycle_hue),
+                    "color_cycle_rate": float(self.current_color_cycle_rate),
+                    "drag_adjust_mode": bool(self.config.get("drag_adjust_mode", False)),
                     "pos_x": int(round(self.center_x)),
                     "pos_y": int(round(self.center_y)),
                 }
@@ -895,17 +1041,37 @@ class CircularVisualizerWindow(QWidget):
         if internal_min > internal_max:
             internal_min, internal_max = internal_max, internal_min
         targets = self._default_bar_height() + bar_values / 200.0
-        spring_forces = (targets - self.bar_heights) * self.spring_strength
-        self.bar_velocities *= self.damping
-        self.bar_velocities += spring_forces - self.gravity * 0.1
-        self.bar_heights = np.clip(self.bar_heights + self.bar_velocities, internal_min, internal_max)
-        lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max) * scale
-        self.preview_spectrum_values = [float(value) for value in lengths.tolist()]
+        shared_rise, shared_fall = self._get_damping_pair()
+        self.bar_heights = np.clip(
+            self._apply_damping_step(self.bar_heights, targets, shared_rise, shared_fall),
+            internal_min,
+            internal_max,
+        )
+        shared_lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max) * scale
+
+        object_lengths = {}
+        for key in _DAMPED_OBJECT_KEYS:
+            if self.config.get(f"{key}_use_independent_damping", False):
+                rise_damping, fall_damping = self._get_damping_pair(key)
+                state = self.object_length_states.get(key)
+                if state is None or len(state) != self.NUM_BARS:
+                    state = np.full(self.NUM_BARS, self._default_bar_height(), dtype=float)
+                state = np.clip(
+                    self._apply_damping_step(state, targets, rise_damping, fall_damping),
+                    internal_min,
+                    internal_max,
+                )
+                self.object_length_states[key] = state
+                object_lengths[key] = np.clip(state, bar_len_min, bar_len_max) * scale
+            else:
+                object_lengths[key] = shared_lengths
+
+        self.preview_spectrum_values = [float(value) for value in object_lengths["bar"].tolist()]
 
         decay_inner = float(self.config.get("c1_decay", 0.995))
         decay_outer = float(self.config.get("c5_decay", 0.995))
-        self.peak_inner_heights = np.maximum(lengths, self.peak_inner_heights * decay_inner)
-        self.peak_outer_heights = np.maximum(lengths, self.peak_outer_heights * decay_outer)
+        self.peak_inner_heights = np.maximum(object_lengths["c1"], self.peak_inner_heights * decay_inner)
+        self.peak_outer_heights = np.maximum(object_lengths["c5"], self.peak_outer_heights * decay_outer)
 
         a1_delta = abs(effective_a1 - self.prev_a1_value)
         self.prev_a1_value = effective_a1
@@ -926,9 +1092,9 @@ class CircularVisualizerWindow(QWidget):
 
         radius_map = {
             1: np.maximum(0, radius - self.peak_inner_heights),
-            2: np.maximum(0, radius - lengths),
+            2: np.maximum(0, radius - object_lengths["c2"]),
             3: np.full(self.NUM_BARS, radius),
-            4: radius + lengths,
+            4: radius + object_lengths["c4"],
             5: radius + self.peak_outer_heights,
         }
 
@@ -967,7 +1133,7 @@ class CircularVisualizerWindow(QWidget):
                 rot[layer_b],
                 segments,
                 seg_angle,
-                lengths,
+                object_lengths[key],
                 key,
             )
             bars.append({"segments": segments_data, "thickness": thickness})
@@ -1073,27 +1239,24 @@ class CircularVisualizerWindow(QWidget):
                         self._send_status()
                     continue
 
+                normalized_config = _normalize_loaded_config(new_config)
                 old = self.config.copy()
-                self.config = new_config
+                self.config = normalized_config
+                new_config = normalized_config
 
                 if int(new_config.get("num_bars", 64)) != self.NUM_BARS:
                     self.NUM_BARS = int(new_config.get("num_bars", 64))
                     old_heights = self.bar_heights.copy()
                     initial_bar_height = self._default_bar_height()
-                    self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
-                    self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
-                    self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
-                    self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
-                    self.preview_spectrum_values = [float(initial_bar_height)] * self.NUM_BARS
+                    self._reset_length_states(initial_bar_height)
                     count = min(len(old_heights), self.NUM_BARS)
                     self.bar_heights[:count] = old_heights[:count]
+                    for state in self.object_length_states.values():
+                        state[:count] = old_heights[:count]
                     self._update_colors()
 
                 self.smoothing_factor = float(new_config.get("smoothing", 0.7))
-                self.damping = float(new_config.get("damping", 0.85))
-                self.spring_strength = float(new_config.get("spring_strength", 0.3))
-                self.gravity = float(new_config.get("gravity", 0.5))
-                self.a1_time_window = float(new_config.get("a1_time_window", 10))
+                self.a1_time_window = _clamp_time_window(new_config.get("a1_time_window", 10), 10)
                 self.ui_bg_alpha = int(new_config.get("ui_alpha", 180))
                 self.window_alpha = int(new_config.get("alpha", 255))
 
@@ -1136,21 +1299,29 @@ class CircularVisualizerWindow(QWidget):
 
         now = time.time()
 
-        effective_a1 = self.effective_a1
         if self.config.get("color_dynamic", False):
-            base_speed = 0.001
-            if self.config.get("color_cycle_a1", True) and effective_a1 > 0:
-                base_speed *= 1.0 + (effective_a1 / 1000.0) * 2.0
-            speed = float(self.config.get("color_cycle_speed", 1.0))
-            power = float(self.config.get("color_cycle_pow", 2.0))
-            self.color_cycle_hue = (self.color_cycle_hue + base_speed * pow(speed, power)) % 1.0
+            base_speed = max(0.0, float(self.config.get("color_cycle_speed", 1.0)))
+            peak_speed = max(base_speed, float(self.config.get("color_cycle_pow", 2.0)))
+            if self.config.get("color_cycle_a1", True):
+                reference = max(2.0, abs(self.a1_value) * 0.08 + 2.0)
+                boost_target = math.tanh(abs(self.k2_value) / reference)
+                self.current_color_cycle_boost = max(boost_target, self.current_color_cycle_boost * 0.88)
+            else:
+                self.current_color_cycle_boost *= 0.88
+            speed = base_speed + (peak_speed - base_speed) * self.current_color_cycle_boost
+            jump_rate = self.current_color_cycle_boost * 0.01
+            self.current_color_cycle_rate = 0.0012 * speed + jump_rate
+            self.color_cycle_hue = (self.color_cycle_hue + self.current_color_cycle_rate) % 1.0
             self._update_colors()
+        else:
+            self.current_color_cycle_rate = 0.0
+            self.current_color_cycle_boost = 0.0
 
         audio_frame = self._pull_latest_audio_frame()
         if audio_frame is None:
-            bar_values = np.zeros(self.NUM_BARS, dtype=float)
+            bar_values = self._prune_spectrum_history(now)
         else:
-            bar_values = self._process_audio(audio_frame)
+            bar_values = self._update_spectrum_history(self._process_audio(audio_frame), now)
 
         self._update_visual_state(bar_values)
         self.gl_widget.update()
