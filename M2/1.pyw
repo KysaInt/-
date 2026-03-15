@@ -215,14 +215,59 @@ def _normalize_loaded_config(data):
     return cfg
 
 
+# ── 预设平滑过渡支持 ───────────────────────────────────────────
+
+_ON_FIELD_ORDER = [
+    "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
+    "b12_on", "b23_on", "b34_on", "b45_on",
+]
+
+_NOINTERP_KEYS = frozenset({
+    "color_scheme", "gradient_mode", "gradient_points",
+    "num_bars",
+    "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
+    "b12_on", "b23_on", "b34_on", "b45_on",
+    "master_visible",
+    "gradient_enabled", "color_dynamic", "circle_a1_rotation", "circle_a1_radius",
+    "k2_enabled", "color_cycle_a1", "drag_adjust_mode", "always_on_top", "bg_transparent",
+    "bar_use_independent_damping", "bar_use_independent_time_window",
+    "c1_fill", "c2_fill", "c3_fill", "c4_fill", "c5_fill",
+    "c1_use_independent_damping", "c2_use_independent_damping",
+    "c4_use_independent_damping", "c5_use_independent_damping",
+    "b12_use_independent_damping", "b23_use_independent_damping",
+    "b34_use_independent_damping", "b45_use_independent_damping",
+    "b12_fixed", "b23_fixed", "b34_fixed", "b45_fixed",
+    "b12_from_start", "b12_from_end", "b12_from_center",
+    "b23_from_start", "b23_from_end", "b23_from_center",
+    "b34_from_start", "b34_from_end", "b34_from_center",
+    "b45_from_start", "b45_from_end", "b45_from_center",
+    "pos_x", "pos_y", "width", "height",
+    "preset_order", "preset_auto_switch", "preset_switch_interval",
+    "preset_interval_random_enabled", "preset_switch_interval_min", "preset_switch_interval_max",
+    "preset_transition_enabled", "preset_transition_duration", "preset_transition_easing",
+    "random_checked", "random_object_count_min", "random_object_count_max",
+})
+
+
+def _ease_value(t, mode):
+    t = max(0.0, min(1.0, t))
+    if mode == "ease_in":
+        return t * t
+    if mode == "ease_out":
+        return 1.0 - (1.0 - t) ** 2
+    if mode == "ease_in_out":
+        return t * t * (3.0 - 2.0 * t)
+    if mode == "cubic":
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    return t
+
+
 def _load_config():
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as file_obj:
-                return _normalize_loaded_config(json.load(file_obj))
-        except Exception:
-            return _normalize_loaded_config(None)
-    return _normalize_loaded_config(None)
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as file_obj:
+            return _normalize_loaded_config(json.load(file_obj))
+    except Exception:
+        return _normalize_loaded_config(None)
 
 
 class OverlayControlLayer(QWidget):
@@ -462,8 +507,19 @@ class CircularVisualizerWindow(QWidget):
         self._window_ready = False
 
         self._update_colors()
-        self._init_audio()
 
+        # 预设平滑过渡状态
+        self._transition_active = False
+        self._transition_start = 0.0
+        self._transition_duration = 2.0
+        self._transition_easing = "ease_in_out"
+        self._transition_from = {}
+        self._transition_target = {}
+        self._transition_toggle_schedule = []  # legacy, unused
+        self._transition_alpha_schedule = []     # alpha-based fade schedule
+        self._transition_alpha_controlled = set()
+
+        self._init_audio()
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self._tick)
@@ -953,25 +1009,30 @@ class CircularVisualizerWindow(QWidget):
             bx = cx + radii_b * np.cos(angle_b)
             by = cy + radii_b * np.sin(angle_b)
 
+            b_alpha = int(self.config.get(f"_tr_{key}_alpha", 255))
+            len_frac = float(self.config.get(f"_tr_{key}_len_frac", 1.0))
             if not fixed:
                 for index in range(self.NUM_BARS):
                     color_index = (index + segment * self.NUM_BARS // max(1, segments)) % max(1, len(self.colors))
                     color = self._get_color_for_bar(color_index, lengths[index])
-                    line_segments.append(((ax[index], ay[index]), (bx[index], by[index]), (*color, 255)))
+                    ex = ax[index] + (bx[index] - ax[index]) * len_frac
+                    ey = ay[index] + (by[index] - ay[index]) * len_frac
+                    line_segments.append(((ax[index], ay[index]), (ex, ey), (*color, b_alpha)))
                 continue
 
+            eff_fixed_len = fixed_len * len_frac
             delta_x = bx - ax
             delta_y = by - ay
             full_len = np.sqrt(delta_x * delta_x + delta_y * delta_y)
             full_len = np.maximum(full_len, 1e-6)
             unit_x = delta_x / full_len
             unit_y = delta_y / full_len
-            clip_len = np.minimum(fixed_len, full_len)
+            clip_len = np.minimum(eff_fixed_len, full_len)
 
             for index in range(self.NUM_BARS):
                 color_index = (index + segment * self.NUM_BARS // max(1, segments)) % max(1, len(self.colors))
                 color = self._get_color_for_bar(color_index, lengths[index])
-                rgba = (*color, 255)
+                rgba = (*color, b_alpha)
                 if from_start:
                     line_segments.append(
                         (
@@ -1237,10 +1298,19 @@ class CircularVisualizerWindow(QWidget):
                     if new_config["command"] == "center_window":
                         self._center_window(reset_visual_center=True)
                         self._send_status()
+                    elif new_config["command"] == "preset_transition":
+                        self._start_transition(
+                            new_config.get("from_config", {}),
+                            new_config.get("to_config", {}),
+                            float(new_config.get("duration", 2.0)),
+                            new_config.get("easing", "ease_in_out"),
+                        )
                     continue
 
                 normalized_config = _normalize_loaded_config(new_config)
                 old = self.config.copy()
+                if self._transition_active:
+                    self._transition_active = False   # 手动变更打断过渡
                 self.config = normalized_config
                 new_config = normalized_config
 
@@ -1299,6 +1369,9 @@ class CircularVisualizerWindow(QWidget):
 
         now = time.time()
 
+        if self._transition_active:
+            self._update_transition(now)
+
         if self.config.get("color_dynamic", False):
             base_speed = max(0.0, float(self.config.get("color_cycle_speed", 1.0)))
             peak_speed = max(base_speed, float(self.config.get("color_cycle_pow", 2.0)))
@@ -1308,9 +1381,11 @@ class CircularVisualizerWindow(QWidget):
                 self.current_color_cycle_boost = max(boost_target, self.current_color_cycle_boost * 0.88)
             else:
                 self.current_color_cycle_boost *= 0.88
-            speed = base_speed + (peak_speed - base_speed) * self.current_color_cycle_boost
-            jump_rate = self.current_color_cycle_boost * 0.01
-            self.current_color_cycle_rate = 0.0012 * speed + jump_rate
+            # V0 直接决定基础速率（boost=0 时），VP 决定加速后的速率
+            base_rate = base_speed * 0.001
+            boost_extra = ((peak_speed - base_speed) * self.current_color_cycle_boost * 0.001
+                           + self.current_color_cycle_boost * 0.008)
+            self.current_color_cycle_rate = base_rate + boost_extra
             self.color_cycle_hue = (self.color_cycle_hue + self.current_color_cycle_rate) % 1.0
             self._update_colors()
         else:
@@ -1330,6 +1405,182 @@ class CircularVisualizerWindow(QWidget):
         if now - self.last_status_send >= 0.12:
             self._send_status()
             self.last_status_send = now
+
+    # ── 预设平滑过渡（透明度淡入淡出版） ─────────────────────────
+
+    def _start_transition(self, from_config, to_config, duration, easing):
+        self._transition_from = _normalize_loaded_config(from_config)
+        self._transition_target = _normalize_loaded_config(to_config)
+        self._transition_duration = max(0.05, float(duration))
+        self._transition_easing = 'cubic'
+        self._transition_start = time.time()
+        self._transition_active = True
+        self._transition_toggle_schedule = []
+
+        # 分别收集需要关闭 / 开启的图元
+        turning_off = []  # (on_key, prefix)
+        turning_on = []   # (on_key, prefix)
+        for key in _ON_FIELD_ORDER:
+            from_val = bool(self._transition_from.get(key, False))
+            to_val = bool(self._transition_target.get(key, False))
+            prefix = key[:-3]          # strip '_on'
+            if from_val and not to_val:
+                turning_off.append((key, prefix))
+            elif not from_val and to_val:
+                turning_on.append((key, prefix))
+
+        # 交错排列：off0, on0, off1, on1 ...
+        sequence = []
+        off_i = on_i = 0
+        while off_i < len(turning_off) or on_i < len(turning_on):
+            if off_i < len(turning_off):
+                sequence.append(('out', turning_off[off_i][0], turning_off[off_i][1]))
+                off_i += 1
+            if on_i < len(turning_on):
+                sequence.append(('in', turning_on[on_i][0], turning_on[on_i][1]))
+                on_i += 1
+
+        n = len(sequence)
+        self._transition_alpha_schedule = []
+        alpha_controlled_keys = set()
+
+        for i, (direction, on_key, prefix) in enumerate(sequence):
+            slot_t_start = i / n if n > 0 else 0.0
+            slot_t_end = (i + 1) / n if n > 0 else 1.0
+
+            is_circle = prefix.startswith('c') and len(prefix) == 2 and prefix[1:].isdigit()
+            alpha_entries = []
+            if is_circle:
+                if direction == 'out':
+                    from_a = int(self._transition_from.get(f'{prefix}_alpha', 180))
+                    alpha_entries.append((f'{prefix}_alpha', from_a, 0))
+                    if self._transition_from.get(f'{prefix}_fill', False):
+                        fa = int(self._transition_from.get(f'{prefix}_fill_alpha', 50))
+                        alpha_entries.append((f'{prefix}_fill_alpha', fa, 0))
+                else:
+                    to_a = int(self._transition_target.get(f'{prefix}_alpha', 180))
+                    alpha_entries.append((f'{prefix}_alpha', 0, to_a))
+                    if self._transition_target.get(f'{prefix}_fill', False):
+                        ta = int(self._transition_target.get(f'{prefix}_fill_alpha', 50))
+                        alpha_entries.append((f'{prefix}_fill_alpha', 0, ta))
+            else:
+                # b-层：用 _tr_ 运行时键控制 alpha 和长度缩放，不落盘
+                if direction == 'out':
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 255, 0))
+                    alpha_entries.append((f'_tr_{prefix}_len_frac', 1.0, 0.0))
+                else:
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 0, 255))
+                    alpha_entries.append((f'_tr_{prefix}_len_frac', 0.0, 1.0))
+
+            for ak, _, _ in alpha_entries:
+                alpha_controlled_keys.add(ak)
+
+            self._transition_alpha_schedule.append({
+                'direction': direction,
+                'on_key': on_key,
+                'prefix': prefix,
+                'is_circle': is_circle,
+                'alpha_entries': alpha_entries,
+                'from_fill': self._transition_from.get(f'{prefix}_fill', False) if is_circle else False,
+                'slot_t_start': slot_t_start,
+                'slot_t_end': slot_t_end,
+            })
+
+        self._transition_alpha_controlled = alpha_controlled_keys
+
+    def _update_transition(self, now):
+        elapsed = now - self._transition_start
+        t = elapsed / self._transition_duration if self._transition_duration > 0 else 1.0
+
+        if t >= 1.0:
+            self.config = self._transition_target.copy()
+            self._transition_active = False
+            self._update_colors()
+            return
+
+        interp = self._transition_target.copy()
+        et = _ease_value(t, self._transition_easing)
+
+        # ── 数值插值（跳过透明度调度控制的键和布尔开关）────────────
+        skip_interp = _NOINTERP_KEYS | getattr(self, '_transition_alpha_controlled', set())
+        for key, from_val in self._transition_from.items():
+            if key in skip_interp:
+                continue
+            to_val = self._transition_target.get(key)
+            if to_val is None:
+                continue
+            if isinstance(from_val, (int, float)) and isinstance(to_val, (int, float)):
+                interp[key] = from_val + (to_val - from_val) * et
+            elif (
+                isinstance(from_val, (list, tuple)) and isinstance(to_val, (list, tuple))
+                and len(from_val) == 3 and len(to_val) == 3
+                and all(isinstance(x, (int, float)) for x in from_val)
+                and all(isinstance(x, (int, float)) for x in to_val)
+            ):
+                interp[key] = tuple(
+                    int(round(from_val[i] + (to_val[i] - from_val[i]) * et))
+                    for i in range(3)
+                )
+
+        # ── 所有 _on 字段先恢复 from 状态，由时间表覆盖 ────────────
+        for key in _ON_FIELD_ORDER:
+            interp[key] = self._transition_from.get(key, False)
+
+        # ── 透明度淡入/淡出时间表 ──────────────────────────────────
+        for entry in getattr(self, '_transition_alpha_schedule', []):
+            direction = entry['direction']
+            on_key = entry['on_key']
+            prefix = entry['prefix']
+            alpha_entries = entry['alpha_entries']
+            is_circle = entry['is_circle']
+            from_fill = entry.get('from_fill', False)
+            s0 = entry['slot_t_start']
+            s1 = entry['slot_t_end']
+
+            if direction == 'in':
+                if t < s0:
+                    # 尚未到时间槽：元素处于隐藏状态（预透明度=0）
+                    interp[on_key] = False
+                    for ak, from_a, _ in alpha_entries:
+                        interp[ak] = 0.0 if isinstance(from_a, float) else 0
+                else:
+                    # 时间槽内或之后：已开启，透明度从0渐入
+                    interp[on_key] = True
+                    slot_et = _ease_value(
+                        min(1.0, (t - s0) / max(1e-9, s1 - s0)),
+                        self._transition_easing)
+                    for ak, from_a, to_a in alpha_entries:
+                        _v = from_a + (to_a - from_a) * slot_et
+                        interp[ak] = _v if isinstance(from_a, float) else int(round(_v))
+            else:  # 'out'
+                if t < s0:
+                    # 时间槽前：保持原透明度和填充
+                    interp[on_key] = True
+                    for ak, from_a, _ in alpha_entries:
+                        interp[ak] = from_a
+                    if from_fill:
+                        interp[f'{prefix}_fill'] = True
+                elif t < s1:
+                    # 时间槽内：淡出
+                    interp[on_key] = True
+                    slot_et = _ease_value(
+                        (t - s0) / max(1e-9, s1 - s0),
+                        self._transition_easing)
+                    for ak, from_a, to_a in alpha_entries:
+                        _v = from_a + (to_a - from_a) * slot_et
+                        interp[ak] = _v if isinstance(from_a, float) else int(round(_v))
+                    if from_fill:
+                        interp[f'{prefix}_fill'] = True
+                else:
+                    # 时间槽后：关闭，透明度归零
+                    interp[on_key] = False
+                    for ak, _, _ in alpha_entries:
+                        interp[ak] = 0.0 if isinstance(_, float) else 0
+
+                # b-层有 _tr_ alpha，淡出结束后隐藏（on_key 已设为 False）
+
+        self.config = interp
+        self._update_colors()
 
     def _cleanup(self):
         if hasattr(self, "stream"):

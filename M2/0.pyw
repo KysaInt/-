@@ -94,6 +94,9 @@ _DEFAULT_CONFIG = {
     'preset_interval_random_enabled': False,
     'preset_switch_interval_min': 1.0,
     'preset_switch_interval_max': 10.0,
+    'preset_transition_enabled': False,
+    'preset_transition_duration': 2.0,
+    'preset_transition_easing': 'ease_in_out',
 }
 
 for _prefix in _DAMPED_OBJECT_KEYS[1:]:
@@ -739,6 +742,7 @@ class _SpectrumBarsPreviewWidget(QWidget):
         self._uses_independent_damping = False
         self._rise_damping = 0.1
         self._fall_damping = 0.999
+        self._peak_visible_hi = 1.0
         self.setMinimumHeight(172)
         self.setMaximumHeight(196)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -759,6 +763,11 @@ class _SpectrumBarsPreviewWidget(QWidget):
 
     def set_runtime_state(self, values, colors=None):
         self._values = [max(0.0, float(value)) for value in (values or [])]
+        if self._values:
+            new_hi = max(self._values) * 1.12
+            if new_hi > self._peak_visible_hi:
+                self._peak_visible_hi = new_hi
+        self._peak_visible_hi = max(1.0, self._peak_visible_hi * 0.999)
         self.update()
 
     def paintEvent(self, _event):
@@ -790,7 +799,7 @@ class _SpectrumBarsPreviewWidget(QWidget):
         painter.drawLine(int(chart.left()), int(chart.bottom()), int(chart.right()), int(chart.bottom()))
 
         values = self._values or [0.0] * max(1, self._bar_count)
-        visible_hi = max(1.0, max(values)) * 1.12
+        visible_hi = max(1.0, self._peak_visible_hi)
         bar_width = max(1.0, chart.width() / max(1, len(values)))
         for idx, value in enumerate(values):
             ratio = max(0.0, min(1.0, value / visible_hi))
@@ -864,25 +873,19 @@ class _DynamicColorPreviewWidget(QWidget):
         )
 
         chart = QRectF(outer.left(), outer.top() + 24.0, outer.width(), outer.height() - 46.0)
-        palette_colors = [tuple(int(channel) for channel in color[:3]) for color in (self._strip_colors or []) if len(color) >= 3]
-        if not palette_colors:
-            palette_colors = [
-                tuple(int(channel * 255) for channel in colorsys.hsv_to_rgb(index / 12.0, 1.0, 1.0))
-                for index in range(12)
-            ]
 
         row_rect = QRectF(chart.left(), chart.top() + max(4.0, (chart.height() - 34.0) * 0.5), chart.width(), 34.0)
         swatch_size = 30.0
         swatch_rect = QRectF(row_rect.left(), row_rect.top() + 2.0, swatch_size, swatch_size)
         strip_rect = QRectF(swatch_rect.right() + 12.0, row_rect.center().y() - 7.0, max(24.0, row_rect.right() - swatch_rect.right() - 12.0), 14.0)
 
+        # 色环渐变（0→红→绿→蓝→红），hue 0~1 均匀覆盖
         strip_gradient = QLinearGradient(strip_rect.left(), strip_rect.center().y(), strip_rect.right(), strip_rect.center().y())
-        if len(palette_colors) == 1:
-            strip_gradient.setColorAt(0.0, QColor(*palette_colors[0]))
-            strip_gradient.setColorAt(1.0, QColor(*palette_colors[0]))
-        else:
-            for index, color in enumerate(palette_colors):
-                strip_gradient.setColorAt(index / max(1, len(palette_colors) - 1), QColor(int(color[0]), int(color[1]), int(color[2])))
+        _hue_steps = 13
+        for _i in range(_hue_steps):
+            _hue = _i / (_hue_steps - 1)
+            _r, _g, _b = colorsys.hsv_to_rgb(_hue, 1.0, 1.0)
+            strip_gradient.setColorAt(_hue, QColor(int(_r * 255), int(_g * 255), int(_b * 255)))
 
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255, 20))
@@ -1277,12 +1280,35 @@ class VisualizerControlUI(QWidget):
         self._update_preset_interval_mode_ui()
         r += 1
 
+        transition_row = QHBoxLayout(); transition_row.setSpacing(6)
+        self.preset_transition_check = QCheckBox("平滑过渡")
+        self.preset_transition_check.setChecked(self.config.get('preset_transition_enabled', False))
+        self.preset_transition_check.toggled.connect(lambda v: self._update_cfg('preset_transition_enabled', v))
+        transition_row.addWidget(self.preset_transition_check)
+        self.preset_transition_ctrl = QWidget()
+        _tr_inner = QHBoxLayout(self.preset_transition_ctrl)
+        _tr_inner.setContentsMargins(0, 0, 0, 0); _tr_inner.setSpacing(6)
+        _tr_inner.addWidget(QLabel("时长:"))
+        self.preset_transition_duration_spin = self._new_float_box(
+            default_value=2.0, soft_min=0.1, soft_max=30.0,
+            hard_min=0.05, hard_max=300.0, step=0.1, decimals=1,
+            suffix=' 秒', cfg_key='preset_transition_duration'
+        )
+        _tr_inner.addWidget(self.preset_transition_duration_spin)
+        _tr_inner.addStretch()
+        self.preset_transition_ctrl.setVisible(self.config.get('preset_transition_enabled', False))
+        self.preset_transition_check.toggled.connect(self.preset_transition_ctrl.setVisible)
+        transition_row.addWidget(self.preset_transition_ctrl)
+        transition_row.addStretch()
+        tg.addLayout(transition_row, r, 0, 1, 10)
+        r += 1
+
         tg.addWidget(QLabel("颜色方案:"), r, 0)
         self.palette_preview_cells = []
         palette_row = QHBoxLayout(); palette_row.setSpacing(4)
         for _ in range(8):
             cell = QFrame()
-            cell.setFixedSize(24, 16)
+            cell.setFixedSize(22, 22)
             cell.setFrameShape(QFrame.StyledPanel)
             cell.setStyleSheet("border:1px solid #666; border-radius:2px;")
             self.palette_preview_cells.append(cell)
@@ -1426,8 +1452,8 @@ class VisualizerControlUI(QWidget):
             "QCheckBox{color:#dce1e8;}"
         )
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
         return card, layout
 
     def _build_damping_pair_layout(self, rise_cfg_key, fall_cfg_key, *, default_rise=0.1, default_fall=0.999,
@@ -1522,10 +1548,6 @@ class VisualizerControlUI(QWidget):
             'k_rise_damping', 'k_fall_damping'
         )
         k_layout.addLayout(k_damping_row)
-        k_note = QLabel("K = T 时间窗口平均响度，再按默认增减阻尼更新；未启用独立阻尼的条形图和图元都会跟随它。")
-        k_note.setWordWrap(True)
-        k_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
-        k_layout.addWidget(k_note)
         root.addWidget(k_card, 0, 0)
 
         p_card, p_layout = self._make_preview_card()
@@ -1546,10 +1568,6 @@ class VisualizerControlUI(QWidget):
         )
         p_row.addWidget(self.k2_pow_spin)
         p_layout.addLayout(p_row)
-        p_note = QLabel("P = sign(当前 K - 上一帧 K) × |差值|^P2，其中 K 使用上面的默认阻尼结果。")
-        p_note.setWordWrap(True)
-        p_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
-        p_layout.addWidget(p_note)
         root.addWidget(p_card, 0, 1)
 
         spec_card, spec_layout = self._make_preview_card()
@@ -1616,10 +1634,6 @@ class VisualizerControlUI(QWidget):
         spec_layout.addWidget(self.bar_independent_damping_check)
         spec_layout.addWidget(self.bar_independent_damping_widget)
 
-        spec_note = QLabel("完整条形频谱条预览使用 Qt 主题高亮色。频谱T默认继承K的T，勾选后可单独控制频谱平均时间与条形阻尼。")
-        spec_note.setWordWrap(True)
-        spec_note.setStyleSheet("color:#8d95a3; font-size:8.4pt;")
-        spec_layout.addWidget(spec_note)
         root.addWidget(spec_card, 1, 0)
 
         color_card, color_layout = self._make_preview_card()
@@ -1659,10 +1673,6 @@ class VisualizerControlUI(QWidget):
         color_controls_layout.addStretch()
         color_layout.addWidget(self.color_quick_controls_widget)
 
-        color_note = QLabel('这里显示静态渐变长条、当前颜色方块与实时速率；动态颜色会在 P 突变时瞬间加速，稳定后回落到 V0。')
-        color_note.setWordWrap(True)
-        color_note.setStyleSheet('color:#8d95a3; font-size:8.4pt;')
-        color_layout.addWidget(color_note)
         root.addWidget(color_card, 1, 1)
 
         self._sync_color_quick_widgets(self.config.get('color_dynamic', False))
@@ -2304,6 +2314,7 @@ class VisualizerControlUI(QWidget):
         if not fp:
             return
         try:
+            from_config = self.config.copy()
             with open(fp, 'r', encoding='utf-8') as f:
                 cfg = _normalize_loaded_config(json.load(f))
             # 保留运行态设置，不被预设覆盖
@@ -2318,14 +2329,40 @@ class VisualizerControlUI(QWidget):
                 'preset_interval_random_enabled',
                 'preset_switch_interval_min',
                 'preset_switch_interval_max',
+                'preset_transition_enabled',
+                'preset_transition_duration',
+                'preset_transition_easing',
             )
             for key in runtime_keep_keys:
                 cfg[key] = self.config.get(key, cfg.get(key))
             self._apply_config_to_ui(cfg)
+            # 若启用平滑过渡，替换队列为过渡指令
+            if self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
+                self._send_transition_command(from_config)
             if show_message:
                 QMessageBox.information(self, "成功", f"已加载预设: {Path(fp).stem}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载预设失败: {e}")
+
+    def _send_transition_command(self, from_config):
+        if not self.config_queue:
+            return
+        cmd = {
+            'command': 'preset_transition',
+            'from_config': {k: v for k, v in from_config.items()},
+            'to_config': {k: v for k, v in self.config.items()},
+            'duration': float(self.config.get('preset_transition_duration', 2.0)),
+            'easing': 'cubic',
+        }
+        try:
+            while True:
+                try:
+                    self.config_queue.get_nowait()
+                except Exception:
+                    break
+            self.config_queue.put_nowait(cmd)
+        except Exception:
+            pass
 
     # ── 颜色 ──────────────────────────────────────────
 
@@ -2772,7 +2809,7 @@ class VisualizerControlUI(QWidget):
 
             cbtn = QPushButton()
             cc = self.config.get(f'c{li}_color', (255, 255, 255))
-            cbtn.setFixedSize(40, 18)
+            cbtn.setFixedSize(22, 22)
             cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
             cbtn.clicked.connect(lambda _, i=li: self._pick_layer_color(i))
             setattr(self, f'c{li}_color_btn', cbtn)
@@ -3458,7 +3495,7 @@ class VisualizerControlUI(QWidget):
             pos_box.valueChanged.connect(lambda v, idx=i: self._gp_pos_changed(idx, v))
             rl.addWidget(sl)
 
-            btn = QPushButton(); btn.setFixedSize(40, 25)
+            btn = QPushButton(); btn.setFixedSize(26, 26)
             btn.setStyleSheet(f"background:rgb({color[0]},{color[1]},{color[2]}); border:1px solid #aaa; border-radius:2px;")
             btn.clicked.connect(lambda _, idx=i, b=btn: self._gp_color_pick(idx, b))
             rl.addWidget(btn)
@@ -3578,56 +3615,66 @@ class VisualizerControlUI(QWidget):
         d['random_checked'] = self.config.get('random_checked', [])
 
         self._applying_config = True
+        # 跳过正在被用户编辑（有焦点）的 spinbox，避免打断输入
+        _focused = QApplication.focusWidget()
+        def _ssv(w, v):
+            if w is not _focused:
+                w.setValue(v)
+
         try:
             self.config = d
 
             # 基础 UI
             self.master_visible_check.setChecked(d.get('master_visible', True))
-            self.scale_spin.setValue(d.get('global_scale', 1.0))
-            self.pos_x_spin.setValue(d.get('pos_x', -1)); self.pos_y_spin.setValue(d.get('pos_y', -1))
+            _ssv(self.scale_spin, d.get('global_scale', 1.0))
+            _ssv(self.pos_x_spin, d.get('pos_x', -1)); _ssv(self.pos_y_spin, d.get('pos_y', -1))
             self.drag_adjust_check.setChecked(d.get('drag_adjust_mode', False))
-            self.bars_spin.setValue(d.get('num_bars', 64))
+            _ssv(self.bars_spin, d.get('num_bars', 64))
             schemes = ['rainbow', 'fire', 'ice', 'neon', 'custom']
             scheme = d.get('color_scheme', 'rainbow')
             self.color_combo.setCurrentIndex(schemes.index(scheme) if scheme in schemes else 0)
-            self.rotation_base_spin.setValue(float(d.get('rotation_base', 1.0)))
-            self.main_radius_scale_spin.setValue(float(d.get('main_radius_scale', 1.0)))
-            self.k_rise_damping_spin.setValue(float(d.get('k_rise_damping', 0.1)))
-            self.k_fall_damping_spin.setValue(float(d.get('k_fall_damping', 0.999)))
+            _ssv(self.rotation_base_spin, float(d.get('rotation_base', 1.0)))
+            _ssv(self.main_radius_scale_spin, float(d.get('main_radius_scale', 1.0)))
+            _ssv(self.k_rise_damping_spin, float(d.get('k_rise_damping', 0.1)))
+            _ssv(self.k_fall_damping_spin, float(d.get('k_fall_damping', 0.999)))
             self.bar_independent_time_window_check.setChecked(d.get('bar_use_independent_time_window', False))
             self.bar_independent_time_window_widget.setVisible(d.get('bar_use_independent_time_window', False))
-            self.bar_time_window_spin.setValue(float(d.get('bar_time_window', d.get('a1_time_window', 10.0))))
+            _ssv(self.bar_time_window_spin, float(d.get('bar_time_window', d.get('a1_time_window', 10.0))))
             self.bar_independent_damping_check.setChecked(d.get('bar_use_independent_damping', False))
             self.bar_independent_damping_widget.setVisible(d.get('bar_use_independent_damping', False))
-            self.bar_independent_rise_damping_spin.setValue(float(d.get('bar_independent_rise_damping', 0.1)))
-            self.bar_independent_fall_damping_spin.setValue(float(d.get('bar_independent_fall_damping', 0.999)))
-            self.bar_default_height_spin.setValue(float(d.get('bar_default_height', 0.0)))
-            self.bar_internal_min_spin.setValue(float(d.get('bar_internal_min', 0.0)))
-            self.bar_internal_max_spin.setValue(float(d.get('bar_internal_max', 300.0)))
-            self.hmin_spin.setValue(d.get('bar_height_min', 0)); self.hmax_spin.setValue(d.get('bar_height_max', 500))
-            self.radius_spin.setValue(d.get('circle_radius', 150)); self.seg_spin.setValue(d.get('circle_segments', 1))
+            _ssv(self.bar_independent_rise_damping_spin, float(d.get('bar_independent_rise_damping', 0.1)))
+            _ssv(self.bar_independent_fall_damping_spin, float(d.get('bar_independent_fall_damping', 0.999)))
+            _ssv(self.bar_default_height_spin, float(d.get('bar_default_height', 0.0)))
+            _ssv(self.bar_internal_min_spin, float(d.get('bar_internal_min', 0.0)))
+            _ssv(self.bar_internal_max_spin, float(d.get('bar_internal_max', 300.0)))
+            _ssv(self.hmin_spin, d.get('bar_height_min', 0)); _ssv(self.hmax_spin, d.get('bar_height_max', 500))
+            _ssv(self.radius_spin, d.get('circle_radius', 150)); _ssv(self.seg_spin, d.get('circle_segments', 1))
             self.a1rot_check.setChecked(d.get('circle_a1_rotation', True)); self.a1rad_check.setChecked(d.get('circle_a1_radius', True))
             self.rdamp_slider.setValue(int(d.get('radius_damping', 0.92) * 100))
             self.rspring_slider.setValue(int(d.get('radius_spring', 0.15) * 100))
             self.rgrav_slider.setValue(int(d.get('radius_gravity', 0.3) * 100))
-            self.freq_min_spin.setValue(d.get('freq_min', 20)); self.freq_max_spin.setValue(d.get('freq_max', 20000))
-            self.bar_len_min_spin.setValue(d.get('bar_length_min', 0)); self.bar_len_max_spin.setValue(d.get('bar_length_max', 300))
-            self.a1_spin.setValue(d.get('a1_time_window', 10.0))
+            _ssv(self.freq_min_spin, d.get('freq_min', 20)); _ssv(self.freq_max_spin, d.get('freq_max', 20000))
+            _ssv(self.bar_len_min_spin, d.get('bar_length_min', 0)); _ssv(self.bar_len_max_spin, d.get('bar_length_max', 300))
+            _ssv(self.a1_spin, d.get('a1_time_window', 10.0))
             self.k2_check.setChecked(d.get('k2_enabled', False))
-            self.k2_pow_spin.setValue(d.get('k2_pow', 1.0))
+            _ssv(self.k2_pow_spin, d.get('k2_pow', 1.0))
 
             # 预设自动切换
             self.preset_auto_check.setChecked(d.get('preset_auto_switch', False))
-            self.preset_interval_spin.setValue(float(d.get('preset_switch_interval', 10.0)))
+            _ssv(self.preset_interval_spin, float(d.get('preset_switch_interval', 10.0)))
             self.preset_interval_random_check.setChecked(d.get('preset_interval_random_enabled', False))
-            self.preset_interval_min_spin.setValue(float(d.get('preset_switch_interval_min', 1.0)))
-            self.preset_interval_max_spin.setValue(float(d.get('preset_switch_interval_max', 10.0)))
+            _ssv(self.preset_interval_min_spin, float(d.get('preset_switch_interval_min', 1.0)))
+            _ssv(self.preset_interval_max_spin, float(d.get('preset_switch_interval_max', 10.0)))
             self._update_preset_interval_mode_ui()
+            # 过渡动画
+            self.preset_transition_check.setChecked(d.get('preset_transition_enabled', False))
+            _ssv(self.preset_transition_duration_spin, float(d.get('preset_transition_duration', 2.0)))
+            self.preset_transition_ctrl.setVisible(d.get('preset_transition_enabled', False))
             self._update_preset_preview()
             if hasattr(self, 'random_obj_min_spin'):
-                self.random_obj_min_spin.setValue(int(d.get('random_object_count_min', 1)))
+                _ssv(self.random_obj_min_spin, int(d.get('random_object_count_min', 1)))
             if hasattr(self, 'random_obj_max_spin'):
-                self.random_obj_max_spin.setValue(int(d.get('random_object_count_max', 9)))
+                _ssv(self.random_obj_max_spin, int(d.get('random_object_count_max', 9)))
 
             # 颜色/渐变
             self.grad_check.setChecked(d.get('gradient_enabled', True))
@@ -3637,8 +3684,8 @@ class VisualizerControlUI(QWidget):
             self.cyc_pow_slider.setValue(int(d.get('color_cycle_pow', 2.0) * 100))
             self.cyc_a1_check.setChecked(d.get('color_cycle_a1', True))
             self.color_dynamic_quick_check.setChecked(d.get('color_dynamic', False))
-            self.color_cycle_speed_quick_spin.setValue(float(d.get('color_cycle_speed', 1.0)))
-            self.color_cycle_pow_quick_spin.setValue(float(d.get('color_cycle_pow', 2.0)))
+            _ssv(self.color_cycle_speed_quick_spin, float(d.get('color_cycle_speed', 1.0)))
+            _ssv(self.color_cycle_pow_quick_spin, float(d.get('color_cycle_pow', 2.0)))
             self.color_cycle_a1_quick_check.setChecked(d.get('color_cycle_a1', True))
             self._rebuild_gradient_ui()
 
@@ -3648,36 +3695,36 @@ class VisualizerControlUI(QWidget):
                 cc = d.get(f'c{li}_color', (255, 255, 255))
                 getattr(self, f'c{li}_color_btn').setStyleSheet(
                     f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
-                getattr(self, f'c{li}_thick_spin').setValue(d.get(f'c{li}_thick', 2))
+                _ssv(getattr(self, f'c{li}_thick_spin'), d.get(f'c{li}_thick', 2))
                 getattr(self, f'c{li}_alpha_slider').setValue(d.get(f'c{li}_alpha', 180))
                 getattr(self, f'c{li}_fill_check').setChecked(d.get(f'c{li}_fill', False))
                 getattr(self, f'c{li}_fill_alpha_slider').setValue(d.get(f'c{li}_fill_alpha', 50))
                 if hasattr(self, f'c{li}_step_spin'):
-                    getattr(self, f'c{li}_step_spin').setValue(d.get(f'c{li}_step', 2))
+                    _ssv(getattr(self, f'c{li}_step_spin'), d.get(f'c{li}_step', 2))
                 if hasattr(self, f'c{li}_decay_slider'):
                     getattr(self, f'c{li}_decay_slider').setValue(int(d.get(f'c{li}_decay', 0.995) * 1000))
                 if li in (1, 2, 4, 5):
                     getattr(self, f'c{li}_independent_damping_check').setChecked(d.get(f'c{li}_use_independent_damping', False))
                     getattr(self, f'c{li}_independent_damping_widget').setVisible(d.get(f'c{li}_use_independent_damping', False))
-                    getattr(self, f'c{li}_independent_rise_damping_spin').setValue(float(d.get(f'c{li}_independent_rise_damping', 0.1)))
-                    getattr(self, f'c{li}_independent_fall_damping_spin').setValue(float(d.get(f'c{li}_independent_fall_damping', 0.999)))
+                    _ssv(getattr(self, f'c{li}_independent_rise_damping_spin'), float(d.get(f'c{li}_independent_rise_damping', 0.1)))
+                    _ssv(getattr(self, f'c{li}_independent_fall_damping_spin'), float(d.get(f'c{li}_independent_fall_damping', 0.999)))
                 getattr(self, f'c{li}_rot_speed_slider').setValue(int(d.get(f'c{li}_rot_speed', 1.0) * 100))
                 getattr(self, f'c{li}_rot_pow_slider').setValue(int(d.get(f'c{li}_rot_pow', 0.5) * 100))
 
             # 四层条形
             for key in ('b12', 'b23', 'b34', 'b45'):
                 getattr(self, f'{key}_on_check').setChecked(d.get(f'{key}_on', False))
-                getattr(self, f'{key}_thick_spin').setValue(d.get(f'{key}_thick', 3))
+                _ssv(getattr(self, f'{key}_thick_spin'), d.get(f'{key}_thick', 3))
                 getattr(self, f'{key}_fixed_check').setChecked(d.get(f'{key}_fixed', False))
-                getattr(self, f'{key}_fixed_len_spin').setValue(d.get(f'{key}_fixed_len', 30))
+                _ssv(getattr(self, f'{key}_fixed_len_spin'), d.get(f'{key}_fixed_len', 30))
                 getattr(self, f'{key}_start_check').setChecked(d.get(f'{key}_from_start', True))
                 getattr(self, f'{key}_end_check').setChecked(d.get(f'{key}_from_end', False))
                 getattr(self, f'{key}_center_check').setChecked(d.get(f'{key}_from_center', False))
                 getattr(self, f'{key}_mode_widget').setVisible(d.get(f'{key}_fixed', False))
                 getattr(self, f'{key}_independent_damping_check').setChecked(d.get(f'{key}_use_independent_damping', False))
                 getattr(self, f'{key}_independent_damping_widget').setVisible(d.get(f'{key}_use_independent_damping', False))
-                getattr(self, f'{key}_independent_rise_damping_spin').setValue(float(d.get(f'{key}_independent_rise_damping', 0.1)))
-                getattr(self, f'{key}_independent_fall_damping_spin').setValue(float(d.get(f'{key}_independent_fall_damping', 0.999)))
+                _ssv(getattr(self, f'{key}_independent_rise_damping_spin'), float(d.get(f'{key}_independent_rise_damping', 0.1)))
+                _ssv(getattr(self, f'{key}_independent_fall_damping_spin'), float(d.get(f'{key}_independent_fall_damping', 0.999)))
         finally:
             self._applying_config = False
 
