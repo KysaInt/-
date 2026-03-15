@@ -58,6 +58,10 @@ _DEFAULT_CONFIG = {
     "main_radius_scale": 1.0,
     "bar_height_min": 0,
     "bar_height_max": 500,
+    "bar_default_height": 0.0,
+    "bar_internal_min": 0.0,
+    "bar_internal_max": 300.0,
+    "bar_a1_influence": 0.0,
     "color_scheme": "rainbow",
     "gradient_points": [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))],
     "gradient_enabled": True,
@@ -166,6 +170,7 @@ def _load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as file_obj:
                 cfg.update(json.load(file_obj))
+            cfg.pop("freq_band_mode", None)
         except Exception:
             pass
     return cfg
@@ -364,6 +369,7 @@ class CircularVisualizerWindow(QWidget):
             self.center_x = self.WIDTH * 0.5
         if self.center_y < 0:
             self.center_y = self.HEIGHT * 0.5
+        self._clamp_center()
 
         self.CHUNK = 2048
         self.RATE = 44100
@@ -374,10 +380,12 @@ class CircularVisualizerWindow(QWidget):
         self.colors = []
         self.color_cycle_hue = 0.0
 
-        self.bar_heights = np.zeros(self.NUM_BARS, dtype=float)
+        initial_bar_height = self._default_bar_height()
+        self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
         self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
-        self.peak_outer_heights = np.zeros(self.NUM_BARS, dtype=float)
-        self.peak_inner_heights = np.zeros(self.NUM_BARS, dtype=float)
+        self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.preview_spectrum_values = [0.0] * self.NUM_BARS
 
         self.smoothing_factor = float(self.config.get("smoothing", 0.7))
         self.damping = float(self.config.get("damping", 0.85))
@@ -480,6 +488,30 @@ class CircularVisualizerWindow(QWidget):
         except queue.Empty:
             return None
 
+    def _default_bar_height(self):
+        default_height = float(self.config.get("bar_default_height", 0.0))
+        lower_limit = float(self.config.get("bar_internal_min", 0.0))
+        upper_limit = float(self.config.get("bar_internal_max", 300.0))
+        if lower_limit > upper_limit:
+            lower_limit, upper_limit = upper_limit, lower_limit
+        return float(np.clip(default_height, lower_limit, upper_limit))
+
+    def _build_band_edges(self, spectrum_length, freq_res):
+        lower_bin = max(1, int(self.config.get("freq_min", 20) / freq_res))
+        upper_bin = min(spectrum_length, int(np.ceil(self.config.get("freq_max", 20000) / freq_res)) + 1)
+        if upper_bin <= lower_bin:
+            upper_bin = min(spectrum_length, lower_bin + 1)
+
+        min_freq = max(freq_res, lower_bin * freq_res)
+        max_freq = max(min_freq + freq_res, upper_bin * freq_res)
+        edges = np.geomspace(min_freq, max_freq, self.NUM_BARS + 1) / freq_res
+
+        bins = np.clip(np.rint(edges).astype(int), lower_bin, upper_bin)
+        bins[0] = lower_bin
+        bins[-1] = upper_bin
+        bins = np.maximum.accumulate(bins)
+        return bins
+
     def _process_audio(self, audio_data):
         if self.channel_count > 1 and len(audio_data) % self.channel_count == 0:
             audio_data = audio_data.reshape(-1, self.channel_count).mean(axis=1)
@@ -502,20 +534,17 @@ class CircularVisualizerWindow(QWidget):
             spectrum = np.abs(scipy_fft(windowed))[: self.CHUNK // 2]
 
         freq_res = self.RATE / self.CHUNK
-        f_lo = max(1, int(self.config.get("freq_min", 20) / freq_res))
-        f_hi = min(len(spectrum), int(self.config.get("freq_max", 20000) / freq_res))
-        if f_hi <= f_lo:
-            f_hi = f_lo + 1
-
-        sub = spectrum[f_lo:f_hi]
-        bins = np.logspace(np.log10(1), np.log10(max(2, len(sub))), self.NUM_BARS + 1, dtype=int)
+        bins = self._build_band_edges(len(spectrum), freq_res)
+        limit = int(bins[-1])
 
         bar_values = np.zeros(self.NUM_BARS, dtype=float)
         for index in range(self.NUM_BARS):
-            start = bins[index]
-            end = bins[index + 1]
+            start = int(bins[index])
+            end = int(bins[index + 1])
+            if end <= start and start < limit:
+                end = min(limit, start + 1)
             if end > start:
-                bar_values[index] = np.mean(sub[start:end])
+                bar_values[index] = float(np.mean(spectrum[start:end]))
         return bar_values
 
     def _update_a1(self, loudness):
@@ -526,7 +555,7 @@ class CircularVisualizerWindow(QWidget):
 
         previous = self.a1_value
         self.a1_value = np.mean([value for _, value in self.loudness_history]) if self.loudness_history else 0.0
-        delta = self.a1_value - previous
+        delta = previous - self.a1_value
         power = float(self.config.get("k2_pow", 1.0))
         self.k2_value = np.sign(delta) * (abs(delta) ** power)
 
@@ -537,7 +566,7 @@ class CircularVisualizerWindow(QWidget):
         return self.a1_value
 
     def _send_status(self):
-        if not self.status_queue or self.status_queue.full():
+        if not self.status_queue:
             return
         try:
             while not self.status_queue.empty():
@@ -547,8 +576,11 @@ class CircularVisualizerWindow(QWidget):
                     break
             self.status_queue.put(
                 {
+                    "k": float(self.a1_value),
+                    "p": float(self.k2_value),
                     "a1": float(self.a1_value),
                     "k2": float(self.k2_value),
+                    "spectrum_bars": list(self.preview_spectrum_values),
                     "pos_x": int(round(self.center_x)),
                     "pos_y": int(round(self.center_y)),
                 }
@@ -663,6 +695,19 @@ class CircularVisualizerWindow(QWidget):
         if reset_visual_center:
             self.center_x = self.width() * 0.5
             self.center_y = self.height() * 0.5
+        self._clamp_center()
+
+    def _clamp_center(self):
+        width = max(1.0, float(self.width()))
+        height = max(1.0, float(self.height()))
+        margin_x = min(96.0, max(12.0, width * 0.03))
+        margin_y = min(96.0, max(12.0, height * 0.03))
+        min_x = margin_x
+        max_x = max(min_x, width - margin_x)
+        min_y = margin_y
+        max_y = max(min_y, height - margin_y)
+        self.center_x = min(max(float(self.center_x), min_x), max_x)
+        self.center_y = min(max(float(self.center_y), min_y), max_y)
 
     def drag_handle_rect(self):
         size = 92
@@ -675,6 +720,7 @@ class CircularVisualizerWindow(QWidget):
             return
         self.center_x += dx
         self.center_y += dy
+        self._clamp_center()
         self._send_status()
         self.overlay.update()
 
@@ -811,6 +857,7 @@ class CircularVisualizerWindow(QWidget):
 
     def _update_visual_state(self, bar_values):
         if not self.config.get("master_visible", True):
+            self.preview_spectrum_values = [0.0] * self.NUM_BARS
             self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "bars": [], "lines": []}
             return
 
@@ -841,12 +888,19 @@ class CircularVisualizerWindow(QWidget):
 
         bar_len_min = float(self.config.get("bar_length_min", 0))
         bar_len_max = float(self.config.get("bar_length_max", 300))
-        targets = bar_values / 200.0
+        if bar_len_min > bar_len_max:
+            bar_len_min, bar_len_max = bar_len_max, bar_len_min
+        internal_min = float(self.config.get("bar_internal_min", 0.0))
+        internal_max = float(self.config.get("bar_internal_max", 300.0))
+        if internal_min > internal_max:
+            internal_min, internal_max = internal_max, internal_min
+        targets = self._default_bar_height() + bar_values / 200.0
         spring_forces = (targets - self.bar_heights) * self.spring_strength
         self.bar_velocities *= self.damping
         self.bar_velocities += spring_forces - self.gravity * 0.1
-        self.bar_heights = np.clip(self.bar_heights + self.bar_velocities, 0, 300)
+        self.bar_heights = np.clip(self.bar_heights + self.bar_velocities, internal_min, internal_max)
         lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max) * scale
+        self.preview_spectrum_values = [float(value) for value in lengths.tolist()]
 
         decay_inner = float(self.config.get("c1_decay", 0.995))
         decay_outer = float(self.config.get("c5_decay", 0.995))
@@ -1025,10 +1079,12 @@ class CircularVisualizerWindow(QWidget):
                 if int(new_config.get("num_bars", 64)) != self.NUM_BARS:
                     self.NUM_BARS = int(new_config.get("num_bars", 64))
                     old_heights = self.bar_heights.copy()
-                    self.bar_heights = np.zeros(self.NUM_BARS, dtype=float)
+                    initial_bar_height = self._default_bar_height()
+                    self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
                     self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
-                    self.peak_outer_heights = np.zeros(self.NUM_BARS, dtype=float)
-                    self.peak_inner_heights = np.zeros(self.NUM_BARS, dtype=float)
+                    self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+                    self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+                    self.preview_spectrum_values = [float(initial_bar_height)] * self.NUM_BARS
                     count = min(len(old_heights), self.NUM_BARS)
                     self.bar_heights[:count] = old_heights[:count]
                     self._update_colors()
@@ -1071,6 +1127,7 @@ class CircularVisualizerWindow(QWidget):
                     self.center_y = self.height() * 0.5
                 else:
                     self.center_y = float(new_y)
+                self._clamp_center()
         except queue.Empty:
             pass
 
@@ -1078,9 +1135,6 @@ class CircularVisualizerWindow(QWidget):
         self._update_config_from_queue()
 
         now = time.time()
-        if now - self.last_status_send >= 2.0:
-            self._send_status()
-            self.last_status_send = now
 
         effective_a1 = self.effective_a1
         if self.config.get("color_dynamic", False):
@@ -1101,6 +1155,10 @@ class CircularVisualizerWindow(QWidget):
         self._update_visual_state(bar_values)
         self.gl_widget.update()
         self.overlay.update()
+
+        if now - self.last_status_send >= 0.12:
+            self._send_status()
+            self.last_status_send = now
 
     def _cleanup(self):
         if hasattr(self, "stream"):
