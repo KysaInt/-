@@ -371,6 +371,12 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
 
+    def _framebuffer_size(self):
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        fb_width = max(1, int(round(self.width() * dpr)))
+        fb_height = max(1, int(round(self.height() * dpr)))
+        return fb_width, fb_height
+
     def initializeGL(self):
         GL.glClearColor(0.0, 0.0, 0.0, 0.0)
         GL.glDisable(GL.GL_DEPTH_TEST)
@@ -381,31 +387,35 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         GL.glEnable(GL.GL_MULTISAMPLE)
 
     def resizeGL(self, width, height):
-        GL.glViewport(0, 0, width, height)
+        fb_width, fb_height = self._framebuffer_size()
+        GL.glViewport(0, 0, fb_width, fb_height)
 
     def paintGL(self):
         state = self.owner.render_state
+        logical_width = max(1.0, float(self.width()))
+        logical_height = max(1.0, float(self.height()))
+        fb_width, fb_height = self._framebuffer_size()
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.beginNativePainting()
 
-        GL.glViewport(0, 0, self.width(), self.height())
+        GL.glViewport(0, 0, fb_width, fb_height)
         clear_alpha = 0.0 if self.owner.config.get("bg_transparent", True) else 1.0
         GL.glClearColor(0.0, 0.0, 0.0, clear_alpha)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
 
         GL.glMatrixMode(GL.GL_PROJECTION)
         GL.glLoadIdentity()
-        GL.glOrtho(0.0, float(self.width()), float(self.height()), 0.0, -1.0, 1.0)
+        GL.glOrtho(0.0, logical_width, logical_height, 0.0, -1.0, 1.0)
 
         GL.glMatrixMode(GL.GL_MODELVIEW)
         GL.glLoadIdentity()
 
         GL.glFlush()
         if state:
-            center = state.get("center", (self.width() * 0.5, self.height() * 0.5))
+            center = state.get("center", (logical_width * 0.5, logical_height * 0.5))
             for fill_item in state.get("fills", []):
                 self.owner._gl_draw_radial_fill(center, fill_item["points"], fill_item["color"])
             GL.glFlush()
