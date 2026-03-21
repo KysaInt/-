@@ -60,9 +60,6 @@ _DEFAULT_CONFIG = {
     'a1_time_window': 10,
     'k2_enabled': False, 'k2_pow': 1.0,
     'master_visible': True,
-    'contours_enabled': True,
-    'bars_enabled': True,
-    'tentacles_enabled': True,
     # C1 内缓慢  C2 内快速  C3 基圆  C4 外快速  C5 外缓慢
     'c1_on': True,  'c1_color': (100,180,255), 'c1_alpha': 100, 'c1_thick': 1,
     'c1_fill': False, 'c1_fill_alpha': 30, 'c1_step': 2, 'c1_decay': 0.995,
@@ -964,14 +961,7 @@ class VisualizerControlUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("音频可视化控制台")
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            area = screen.availableGeometry()
-            target_width = min(880, max(720, area.width() - 80))
-            target_height = min(680, max(520, area.height() - 80))
-            self.resize(target_width, target_height)
-        else:
-            self.resize(880, 680)
+        self.resize(880, 680)
 
         self.config = self._load_config()
         self.config_queue = None
@@ -1646,35 +1636,6 @@ class VisualizerControlUI(QWidget):
 
         row1 = QHBoxLayout(); row1.setSpacing(4)
         row1.addWidget(QLabel("条数:"))
-        self.bars_spin = self._new_int_box(
-            default_value=64, soft_min=3, soft_max=12,
-            hard_min=1, hard_max=4096, step=1, cfg_key='num_bars'
-        )
-        row1.addWidget(self.bars_spin)
-        row1.addWidget(QLabel("分段:"))
-        self.seg_spin = self._new_int_box(
-            default_value=1, soft_min=1, soft_max=11,
-            hard_min=1, hard_max=999, step=1, cfg_key='circle_segments'
-        )
-        row1.addWidget(self.seg_spin)
-        row1.addStretch()
-        spec_layout.addLayout(row1)
-
-        row2 = QHBoxLayout(); row2.setSpacing(4)
-        row2.addWidget(QLabel("频率:"))
-        self.freq_min_spin = self._new_int_box(
-            default_value=20, soft_min=1, soft_max=20000,
-            hard_min=1, hard_max=22050, step=10, cfg_key='freq_min'
-        )
-        self.freq_max_spin = self._new_int_box(
-            default_value=20000, soft_min=100, soft_max=22050,
-            hard_min=1, hard_max=22050, step=100, cfg_key='freq_max'
-        )
-        self.freq_min_spin.valueChanged.connect(self._on_freq_min_changed)
-        self.freq_max_spin.valueChanged.connect(self._on_freq_max_changed)
-        row2.addWidget(self.freq_min_spin)
-        row2.addWidget(QLabel("~"))
-        row2.addWidget(self.freq_max_spin)
         row2.addWidget(QLabel("Hz"))
         spec_layout.addLayout(row2)
 
@@ -2665,7 +2626,6 @@ class VisualizerControlUI(QWidget):
             ]
         if section == 'graphics':
             keys = []
-            keys.extend(['contours_enabled', 'bars_enabled', 'tentacles_enabled'])
             for li in range(1, 6):
                 keys.extend([
                     f'c{li}_on', f'c{li}_color', f'c{li}_alpha', f'c{li}_thick',
@@ -2873,13 +2833,6 @@ class VisualizerControlUI(QWidget):
     def _build_contour_section(self):
         s = _Collapsible("五层轮廓 (L1~L5)", expanded=False)
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
-
-        group_chk = QCheckBox("启用整个大类")
-        group_chk.setChecked(self.config.get('contours_enabled', True))
-        group_chk.toggled.connect(lambda v: self._update_cfg('contours_enabled', v))
-        self.contours_enabled_check = group_chk
-        g.addWidget(group_chk, r, 0, 1, 4); r += 1
-
         _layers = [
             (1, "L1 内缓慢", True, True),
             (2, "L2 内快速", True, False),
@@ -2994,12 +2947,6 @@ class VisualizerControlUI(QWidget):
     def _build_tentacle_section(self):
         s = _Collapsible("水母触须", expanded=True)
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0, 0, 0, 0); r = 0
-
-        group_chk = QCheckBox("启用整个大类")
-        group_chk.setChecked(self.config.get('tentacles_enabled', True))
-        group_chk.toggled.connect(lambda v: self._update_cfg('tentacles_enabled', v))
-        self.tentacles_enabled_check = group_chk
-        g.addWidget(group_chk, r, 0, 1, 4); r += 1
 
         chk = QCheckBox("显示")
         chk.setChecked(self.config.get('tentacle_on', True))
@@ -3289,13 +3236,6 @@ class VisualizerControlUI(QWidget):
     def _build_bars_section(self):
         s = _Collapsible("四层条形 (B12~B45)", expanded=False)
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
-
-        group_chk = QCheckBox("启用整个大类")
-        group_chk.setChecked(self.config.get('bars_enabled', True))
-        group_chk.toggled.connect(lambda v: self._update_cfg('bars_enabled', v))
-        self.bars_enabled_check = group_chk
-        g.addWidget(group_chk, r, 0, 1, 3); r += 1
-
         for key, bname in [('b12', 'L1-L2 间'), ('b23', 'L2-L3 间'),
                            ('b34', 'L3-L4 间'), ('b45', 'L4-L5 间')]:
             hdr = QLabel(f"── {bname} ──")
@@ -3493,11 +3433,6 @@ class VisualizerControlUI(QWidget):
             ("窗口行为", [
                 ("背景透明", "bg_transparent", "bool"),
                 ("窗口置顶", "always_on_top", "bool"),
-            ]),
-            ("图元大类", [
-                ("五层轮廓总开关", "contours_enabled", "bool"),
-                ("四层条形总开关", "bars_enabled", "bool"),
-                ("水母触须总开关", "tentacles_enabled", "bool"),
             ]),
         ]
         layer_names = {1: "内缓慢", 2: "内快速", 3: "基圆", 4: "外快速", 5: "外缓慢"}
@@ -3898,14 +3833,6 @@ class VisualizerControlUI(QWidget):
             btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
             self._update_cfg(key, rgb)
 
-    def _pick_special_color(self, key, button):
-        cur = self.config.get(key, (255, 255, 255))
-        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
-        if picker.exec() == QDialog.Accepted and picker.selected_rgb:
-            rgb = picker.selected_rgb
-            button.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
-            self._update_cfg(key, rgb)
-
     def _on_dynamic_toggled(self, v):
         self._update_cfg('color_dynamic', v)
 
@@ -4123,10 +4050,6 @@ class VisualizerControlUI(QWidget):
             _ssv(self.color_cycle_pow_quick_spin, float(d.get('color_cycle_pow', 2.0)))
             self.color_cycle_a1_quick_check.setChecked(d.get('color_cycle_a1', True))
             self._rebuild_gradient_ui()
-
-            self.contours_enabled_check.setChecked(d.get('contours_enabled', True))
-            self.bars_enabled_check.setChecked(d.get('bars_enabled', True))
-            self.tentacles_enabled_check.setChecked(d.get('tentacles_enabled', True))
 
             # 五层轮廓
             for li in range(1, 6):
