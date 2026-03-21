@@ -4,15 +4,13 @@
   "alpha": 255,
   "ui_alpha": 180,
   "global_scale": 1.4,
-  "pos_x": -1,
-  "pos_y": -1,
   "drag_adjust_mode": false,
   "bg_transparent": true,
   "always_on_top": true,
   "num_bars": 4,
   "smoothing": 0.7,
   "k_rise_damping": 0.1,
-  "k_fall_damping": 0.3,
+  "k_fall_damping": 0.5,
   "bar_use_independent_damping": false,
   "bar_independent_rise_damping": 0.02,
   "bar_independent_fall_damping": 0.02,
@@ -30,33 +28,33 @@
     [
       0.0,
       [
-        235,
-        0,
-        0
+        172,
+        161,
+        255
       ]
     ],
     [
-      0.51,
+      1.0,
       [
-        0,
+        176,
         255,
-        0
+        218
       ]
     ],
     [
       0.5,
       [
-        0,
-        0,
-        255
+        246,
+        255,
+        142
       ]
     ]
   ],
   "gradient_enabled": false,
-  "gradient_mode": "height",
-  "color_dynamic": false,
-  "color_cycle_speed": 0.06,
-  "color_cycle_pow": 0.12,
+  "gradient_mode": "frequency",
+  "color_dynamic": true,
+  "color_cycle_speed": 1.7,
+  "color_cycle_pow": 2.68,
   "color_cycle_a1": true,
   "circle_radius": 300,
   "circle_segments": 2,
@@ -69,7 +67,7 @@
   "bar_length_max": 1000,
   "freq_min": 20,
   "freq_max": 20400,
-  "a1_time_window": 0.2,
+  "a1_time_window": 0.1,
   "k2_enabled": false,
   "k2_pow": 1.8,
   "master_visible": true,
@@ -169,17 +167,17 @@
   "b45_from_center": false,
   "tentacle_on": true,
   "tentacle_color": [
-    0,
-    116,
-    189
+    55,
+    113,
+    204
   ],
   "tentacle_alpha": 255,
   "tentacle_thick": 1,
   "tentacle_count": 7,
   "tentacle_length": 275.2,
-  "tentacle_length_jitter": 80.0,
-  "tentacle_length_jitter_speed": 0.3,
-  "tentacle_length_jitter_random": true,
+  "tentacle_length_jitter": 0.0,
+  "tentacle_length_jitter_speed": 0.0,
+  "tentacle_length_jitter_random": false,
   "tentacle_control_points_min": 9,
   "tentacle_control_points_max": 9,
   "tentacle_tip_bias": 0.5,
@@ -194,9 +192,9 @@
   "tentacle_stretch_limit": 1.12,
   "tentacle_shader_enabled": true,
   "tentacle_shader_tip_color": [
-    0,
-    0,
-    0
+    255,
+    191,
+    191
   ],
   "tentacle_shader_alpha_start": 0.0,
   "tentacle_shader_alpha_end": 1.0,
@@ -220,7 +218,7 @@
   "kp_tentacle_turbulence_k_wmax": 0.5228,
   "kp_bind_tentacle_core_base_speed_k": true,
   "kp_tentacle_core_base_speed_k_wmin": 0.0,
-  "kp_tentacle_core_base_speed_k_wmax": 1.5,
+  "kp_tentacle_core_base_speed_k_wmax": 3.0,
   "kp_bind_tentacle_core_base_speed_p": false,
   "kp_tentacle_core_base_speed_p_wmin": 0.0,
   "kp_tentacle_core_base_speed_p_wmax": 0.0,
@@ -253,8 +251,7 @@
     "紫花",
     "闪烁雪花",
     "黑胶唱片",
-    "水母触须",
-    "RT1"
+    "水母触须"
   ],
   "preset_auto_switch": false,
   "preset_switch_interval": 3.0,
@@ -347,20 +344,5 @@
   "kp_bind_tentacle_shader_alpha_start_p": false,
   "kp_tentacle_shader_alpha_start_p_wmax": 1.0,
   "kp_bind_tentacle_shader_alpha_start_k": false,
-  "kp_tentacle_shader_alpha_start_k_wmax": 1.0,
-  "kp_bind_tentacle_color__l_k": true,
-  "kp_tentacle_color__l_k_wmax": 20.0,
-  "kp_bind_tentacle_shader_tip_color__l_p": false,
-  "kp_tentacle_shader_tip_color__l_p_wmax": 255.0,
-  "kp_tentacle_shader_tip_color__l_p_wmin": 200.0,
-  "kp_bind_tentacle_shader_tip_color__l_k": true,
-  "kp_tentacle_shader_tip_color__l_k_wmin": 0.0,
-  "kp_tentacle_shader_tip_color__l_k_wmax": 255.0,
-  "kp_bind_tentacle_color__h_k": false,
-  "kp_tentacle_color__h_k_wmax": 255.0,
-  "kp_tentacle_color__h_k_wmin": 255.0,
-  "kp_bind_tentacle_color__s_k": false,
-  "kp_tentacle_color__s_k_wmax": 255.0,
-  "kp_bind_tentacle_length_jitter_k": true,
-  "kp_tentacle_length_jitter_k_wmax": 8000.0
+  "kp_tentacle_shader_alpha_start_k_wmax": 1.0
 }

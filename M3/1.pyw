@@ -176,6 +176,8 @@ _DEFAULT_CONFIG = {
     "tentacle_count": 16,
     "tentacle_length": 280,
     "tentacle_length_jitter": 80,
+    "tentacle_length_jitter_speed": 0.35,
+    "tentacle_length_jitter_random": False,
     "tentacle_control_points_min": 3,
     "tentacle_control_points_max": 5,
     "tentacle_tip_bias": 1.85,
@@ -203,6 +205,17 @@ _DEFAULT_CONFIG = {
     "tentacle_core_base_speed": 0.75,
     "tentacle_core_k_speed": 1.2,
     "tentacle_core_p_speed": 1.35,
+
+    # K/P 绑定（触须相关：用于替代旧的“K影响 / K角加速度 / P角加速度”独立调节）
+    "kp_bind_tentacle_turbulence_k": True,
+    "kp_tentacle_turbulence_k_wmin": 0.22,
+    "kp_tentacle_turbulence_k_wmax": 0.683,
+    "kp_bind_tentacle_core_base_speed_k": True,
+    "kp_tentacle_core_base_speed_k_wmin": 0.0,
+    "kp_tentacle_core_base_speed_k_wmax": 1.2,
+    "kp_bind_tentacle_core_base_speed_p": True,
+    "kp_tentacle_core_base_speed_p_wmin": 0.0,
+    "kp_tentacle_core_base_speed_p_wmax": 1.35,
 }
 
 for _prefix in _DAMPED_OBJECT_KEYS[1:]:
@@ -237,6 +250,29 @@ def _normalize_loaded_config(data):
         loaded.setdefault(f"{prefix}_use_independent_damping", False)
         loaded.setdefault(f"{prefix}_independent_rise_damping", loaded["k_rise_damping"])
         loaded.setdefault(f"{prefix}_independent_fall_damping", loaded["k_fall_damping"])
+
+    # 触须旧参数 -> 新 K/P 绑定键（兼容旧配置文件）
+    if "kp_bind_tentacle_turbulence_k" not in loaded and "tentacle_k_influence" in loaded:
+        kinf = float(loaded.get("tentacle_k_influence", cfg.get("tentacle_k_influence", 1.35)))
+        loaded.setdefault("kp_bind_tentacle_turbulence_k", True)
+        loaded.setdefault("kp_tentacle_turbulence_k_wmin", 0.22)
+        loaded.setdefault("kp_tentacle_turbulence_k_wmax", min(0.55, 0.22 + max(0.0, kinf) * 0.18) + 0.22)
+
+    if "kp_bind_tentacle_core_base_speed_k" not in loaded and "tentacle_core_k_speed" in loaded:
+        loaded.setdefault("kp_bind_tentacle_core_base_speed_k", True)
+        loaded.setdefault("kp_tentacle_core_base_speed_k_wmin", 0.0)
+        loaded.setdefault(
+            "kp_tentacle_core_base_speed_k_wmax",
+            float(loaded.get("tentacle_core_k_speed", cfg.get("tentacle_core_k_speed", 1.2))),
+        )
+
+    if "kp_bind_tentacle_core_base_speed_p" not in loaded and "tentacle_core_p_speed" in loaded:
+        loaded.setdefault("kp_bind_tentacle_core_base_speed_p", True)
+        loaded.setdefault("kp_tentacle_core_base_speed_p_wmin", 0.0)
+        loaded.setdefault(
+            "kp_tentacle_core_base_speed_p_wmax",
+            float(loaded.get("tentacle_core_p_speed", cfg.get("tentacle_core_p_speed", 1.35))),
+        )
 
     cfg.update(loaded)
     cfg["a1_time_window"] = _clamp_time_window(cfg.get("a1_time_window", _DEFAULT_CONFIG["a1_time_window"]), _DEFAULT_CONFIG["a1_time_window"])
@@ -1231,33 +1267,147 @@ class CircularVisualizerWindow(QWidget):
         if not self.config.get("tentacle_on", True):
             return []
 
-        count = max(3, int(self.config.get("tentacle_count", 16)))
-        base_length = max(12.0, float(self.config.get("tentacle_length", 280.0)) * scale)
-        length_jitter = max(0.0, float(self.config.get("tentacle_length_jitter", 80.0)) * scale)
-        cp_min = max(3, int(self.config.get("tentacle_control_points_min", 3)))
-        cp_max = max(cp_min, int(self.config.get("tentacle_control_points_max", 5)))
-        tip_bias = max(0.1, float(self.config.get("tentacle_tip_bias", 1.85)))
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+
+        def _lerp(a, b, t):
+            return float(a) + (float(b) - float(a)) * max(0.0, min(1.0, float(t)))
+
+        def _kp_bind_key(cfg_key: str, sig: str) -> str:
+            return f"kp_bind_{cfg_key}_{sig}"
+
+        def _kp_wmin_key(cfg_key: str, sig: str) -> str:
+            return f"kp_{cfg_key}_{sig}_wmin"
+
+        def _kp_wmax_key(cfg_key: str, sig: str) -> str:
+            return f"kp_{cfg_key}_{sig}_wmax"
+
+        def _kp_delta(cfg_key: str, sig: str, normalized: float) -> float:
+            if not bool(self.config.get(_kp_bind_key(cfg_key, sig), False)):
+                return 0.0
+            wmin = float(self.config.get(_kp_wmin_key(cfg_key, sig), 0.0))
+            wmax = float(self.config.get(_kp_wmax_key(cfg_key, sig), 0.0))
+            return _lerp(wmin, wmax, normalized)
+
+        def _kp_add(cfg_key: str, base_value: float) -> float:
+            return float(base_value) + _kp_delta(cfg_key, 'k', normalized_k) + _kp_delta(cfg_key, 'p', normalized_p)
+
+        def _any_kp_enabled_for(cfg_key: str) -> bool:
+            return bool(self.config.get(_kp_bind_key(cfg_key, 'k'), False)) or bool(self.config.get(_kp_bind_key(cfg_key, 'p'), False))
+
+        def _apply_kp_to_rgb(prefix: str, rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+            # 通道 cfg_key 命名规则：<prefix>__h/__s/__l 或 <prefix>__r/__g/__b
+            # 若同时存在两套绑定：优先采用 HSL（因为弹窗默认 HSL 模式）。
+            try:
+                base_r, base_g, base_b = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+            except Exception:
+                base_r, base_g, base_b = (255, 255, 255)
+
+            h_key = f"{prefix}__h"
+            s_key = f"{prefix}__s"
+            l_key = f"{prefix}__l"
+            r_key = f"{prefix}__r"
+            g_key = f"{prefix}__g"
+            b_key = f"{prefix}__b"
+
+            use_hsl = _any_kp_enabled_for(h_key) or _any_kp_enabled_for(s_key) or _any_kp_enabled_for(l_key)
+            use_rgb = _any_kp_enabled_for(r_key) or _any_kp_enabled_for(g_key) or _any_kp_enabled_for(b_key)
+
+            if use_hsl:
+                hh, ll, ss = colorsys.rgb_to_hls(base_r / 255.0, base_g / 255.0, base_b / 255.0)
+                h_deg = (hh % 1.0) * 360.0
+                s_pct = max(0.0, min(100.0, ss * 100.0))
+                l_pct = max(0.0, min(100.0, ll * 100.0))
+
+                h_deg = (h_deg + _kp_delta(h_key, 'k', normalized_k) + _kp_delta(h_key, 'p', normalized_p)) % 360.0
+                s_pct = max(0.0, min(100.0, s_pct + _kp_delta(s_key, 'k', normalized_k) + _kp_delta(s_key, 'p', normalized_p)))
+                l_pct = max(0.0, min(100.0, l_pct + _kp_delta(l_key, 'k', normalized_k) + _kp_delta(l_key, 'p', normalized_p)))
+
+                rr, gg, bb = colorsys.hls_to_rgb((h_deg % 360.0) / 360.0, l_pct / 100.0, s_pct / 100.0)
+                return (int(round(rr * 255.0)), int(round(gg * 255.0)), int(round(bb * 255.0)))
+
+            if use_rgb:
+                rr = base_r + _kp_delta(r_key, 'k', normalized_k) + _kp_delta(r_key, 'p', normalized_p)
+                gg = base_g + _kp_delta(g_key, 'k', normalized_k) + _kp_delta(g_key, 'p', normalized_p)
+                bb = base_b + _kp_delta(b_key, 'k', normalized_k) + _kp_delta(b_key, 'p', normalized_p)
+                rr = max(0.0, min(255.0, rr))
+                gg = max(0.0, min(255.0, gg))
+                bb = max(0.0, min(255.0, bb))
+                return (int(round(rr)), int(round(gg)), int(round(bb)))
+
+            return (base_r, base_g, base_b)
+
+        # 触须参数（所有数值参数均支持 K/P 绑定）
+        count = int(round(_kp_add('tentacle_count', float(self.config.get("tentacle_count", 16)))))
+        count = max(3, min(256, count))
+
+        base_length_unscaled = _kp_add('tentacle_length', float(self.config.get("tentacle_length", 280.0)))
+        base_length = max(12.0, base_length_unscaled * scale)
+
+        length_jitter_unscaled = _kp_add('tentacle_length_jitter', float(self.config.get("tentacle_length_jitter", 80.0)))
+        length_jitter = max(0.0, length_jitter_unscaled * scale)
+
+        length_jitter_speed = max(0.0, _kp_add('tentacle_length_jitter_speed', float(self.config.get("tentacle_length_jitter_speed", 0.35))))
+        length_jitter_random = bool(self.config.get("tentacle_length_jitter_random", False))
+
+        cp_min = int(round(_kp_add('tentacle_control_points_min', float(self.config.get("tentacle_control_points_min", 3)))))
+        cp_min = max(3, min(24, cp_min))
+        cp_max = int(round(_kp_add('tentacle_control_points_max', float(self.config.get("tentacle_control_points_max", 5)))))
+        cp_max = max(cp_min, min(24, cp_max))
+
+        tip_bias = max(0.1, _kp_add('tentacle_tip_bias', float(self.config.get("tentacle_tip_bias", 1.85))))
+
         turbulence_base = max(0.0, float(self.config.get("tentacle_turbulence", 46.0)) * scale)
         k_influence = max(0.0, float(self.config.get("tentacle_k_influence", 1.35)))
-        sway_speed = float(self.config.get("tentacle_sway_speed", 1.1))
-        sway_density = max(0.1, float(self.config.get("tentacle_sway_density", 2.4)))
-        alpha = max(0, min(255, int(self.config.get("_tr_tentacle_alpha", self.config.get("tentacle_alpha", 170)))))
+
+        sway_speed = max(0.0, _kp_add('tentacle_sway_speed', float(self.config.get("tentacle_sway_speed", 1.1))))
+        sway_density = max(0.1, _kp_add('tentacle_sway_density', float(self.config.get("tentacle_sway_density", 2.4))))
+
+        alpha_base = float(self.config.get("_tr_tentacle_alpha", self.config.get("tentacle_alpha", 170)))
+        alpha = int(round(_kp_add('tentacle_alpha', alpha_base)))
+        alpha = max(0, min(255, alpha))
+
         length_fraction = max(0.0, float(self.config.get("_tr_tentacle_len_frac", 1.0)))
-        thickness = float(self.config.get("tentacle_thick", 3))
-        tip_thickness = thickness * max(0.0, min(1.0, float(self.config.get("tentacle_tip_thickness", 0.15))))
-        water_damping = max(0.0, min(0.999, float(self.config.get("tentacle_water_damping", 0.84))))
-        angle_stiffness = max(0.0, float(self.config.get("tentacle_angle_stiffness", 0.18)))
-        length_stiffness = max(0.0, float(self.config.get("tentacle_length_stiffness", 0.24)))
-        stretch_limit = max(1.0, float(self.config.get("tentacle_stretch_limit", 1.12)))
+
+        thickness = max(0.0, _kp_add('tentacle_thick', float(self.config.get("tentacle_thick", 3))))
+
+        tip_thickness_frac = _kp_add('tentacle_tip_thickness', float(self.config.get("tentacle_tip_thickness", 0.15)))
+        tip_thickness_frac = max(0.0, min(1.0, tip_thickness_frac))
+        tip_thickness = thickness * tip_thickness_frac
+
+        water_damping = _kp_add('tentacle_water_damping', float(self.config.get("tentacle_water_damping", 0.84)))
+        water_damping = max(0.0, min(0.999, water_damping))
+
+        angle_stiffness = max(0.0, _kp_add('tentacle_angle_stiffness', float(self.config.get("tentacle_angle_stiffness", 0.18))))
+        length_stiffness = max(0.0, _kp_add('tentacle_length_stiffness', float(self.config.get("tentacle_length_stiffness", 0.24))))
+        stretch_limit = max(1.0, _kp_add('tentacle_stretch_limit', float(self.config.get("tentacle_stretch_limit", 1.12))))
+
         shader_enabled = bool(self.config.get("tentacle_shader_enabled", True))
         tip_color = tuple(self.config.get("tentacle_shader_tip_color", (88, 170, 255)))
-        alpha_start = max(0.0, min(1.0, float(self.config.get("tentacle_shader_alpha_start", 1.0))))
-        alpha_end = max(0.0, min(1.0, float(self.config.get("tentacle_shader_alpha_end", 0.18))))
-        shader_bias = max(0.01, float(self.config.get("tentacle_shader_bias", 1.15)))
+        tip_color = _apply_kp_to_rgb('tentacle_shader_tip_color', tip_color)
+        alpha_start = _kp_add('tentacle_shader_alpha_start', float(self.config.get("tentacle_shader_alpha_start", 1.0)))
+        alpha_start = max(0.0, min(1.0, alpha_start))
+        alpha_end = _kp_add('tentacle_shader_alpha_end', float(self.config.get("tentacle_shader_alpha_end", 0.18)))
+        alpha_end = max(0.0, min(1.0, alpha_end))
+        shader_bias = max(0.01, _kp_add('tentacle_shader_bias', float(self.config.get("tentacle_shader_bias", 1.15))))
 
         base_color = tuple(self.config.get("tentacle_color", (130, 240, 220)))
-        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
-        turbulence = turbulence_base * (0.22 + normalized_k * min(0.55, 0.22 + k_influence * 0.18))
+        base_color = _apply_kp_to_rgb('tentacle_color', base_color)
+
+        # 紊流：沿用“系数乘法”语义，并扩展为可同时绑定 K/P
+        turbulence_coef = 0.0
+        if bool(self.config.get("kp_bind_tentacle_turbulence_k", False)):
+            wmin = float(self.config.get("kp_tentacle_turbulence_k_wmin", 0.22))
+            wmax = float(self.config.get("kp_tentacle_turbulence_k_wmax", 0.683))
+            turbulence_coef += _lerp(wmin, wmax, normalized_k)
+        if bool(self.config.get("kp_bind_tentacle_turbulence_p", False)):
+            wmin = float(self.config.get("kp_tentacle_turbulence_p_wmin", 0.0))
+            wmax = float(self.config.get("kp_tentacle_turbulence_p_wmax", 0.0))
+            turbulence_coef += _lerp(wmin, wmax, normalized_p)
+        if turbulence_coef <= 0.0 and not bool(self.config.get("kp_bind_tentacle_turbulence_k", False)) and not bool(self.config.get("kp_bind_tentacle_turbulence_p", False)):
+            turbulence_coef = 0.22 + normalized_k * min(0.55, 0.22 + k_influence * 0.18)
+        turbulence_coef = max(0.0, min(2.5, turbulence_coef))
+        turbulence = turbulence_base * turbulence_coef
         angular_velocity = float(getattr(self, "tentacle_core_angular_velocity", 0.0))
         swirl_strength = min(1.65, abs(angular_velocity) * (7.5 + sway_speed * 2.0))
         fluid_damping = 0.86 + water_damping * 0.13
@@ -1266,6 +1416,7 @@ class CircularVisualizerWindow(QWidget):
         follow_response = 0.06 + (angle_stiffness + length_stiffness) * 0.08
         time_now = time.time()
         flow_time = time_now * (0.18 + sway_speed * 0.18)
+        jitter_time = time_now * length_jitter_speed
         curves = []
         self._ensure_tentacle_soft_states(count, cp_min, cp_max)
 
@@ -1280,8 +1431,20 @@ class CircularVisualizerWindow(QWidget):
             outer_points = max(1, cp_count - 1)
             shared_index = index % max(1, len(shared_lengths))
             shared_length = float(shared_lengths[shared_index]) if len(shared_lengths) else 0.0
-            jitter_phase = math.sin(index * 1.618 + time_now * 0.23)
-            total_length = base_length + shared_length * 0.38 + jitter_phase * length_jitter * 0.45
+
+            # 非随机时：所有触须同步往复；随机时：每根触须相位/幅度不同
+            if length_jitter_random:
+                jitter_phase = (jitter_time + index * 0.17) % 1.0
+            else:
+                jitter_phase = jitter_time % 1.0
+            jitter_tri = 1.0 - abs(2.0 * jitter_phase - 1.0)  # 0→1→0
+            jitter_scale = 1.0
+            if length_jitter_random:
+                hashed = math.sin(index * 12.9898 + 78.233) * 43758.5453
+                hashed -= math.floor(hashed)
+                jitter_scale = 0.25 + 0.75 * hashed
+            jitter_amount = jitter_tri * length_jitter * jitter_scale
+            total_length = base_length + shared_length * 0.38 + jitter_amount * 0.45
             total_length = max(12.0, total_length * max(0.0, length_fraction))
             segment_length = total_length / max(1, outer_points)
             root_position = np.array((cx, cy), dtype=float)
@@ -1519,8 +1682,23 @@ class CircularVisualizerWindow(QWidget):
             self.tentacle_prev_p_rising = is_rising
             self.tentacle_prev_abs_p = abs_p
             core_acceleration = float(self.config.get("tentacle_core_base_speed", 0.75))
-            core_acceleration += normalized_k_speed * float(self.config.get("tentacle_core_k_speed", 1.2))
-            core_acceleration += normalized_p_speed * float(self.config.get("tentacle_core_p_speed", 1.35))
+
+            def _lerp(a, b, t):
+                return float(a) + (float(b) - float(a)) * max(0.0, min(1.0, float(t)))
+
+            if bool(self.config.get("kp_bind_tentacle_core_base_speed_k", False)):
+                wmin = float(self.config.get("kp_tentacle_core_base_speed_k_wmin", 0.0))
+                wmax = float(self.config.get("kp_tentacle_core_base_speed_k_wmax", 1.2))
+                core_acceleration += _lerp(wmin, wmax, normalized_k_speed)
+            else:
+                core_acceleration += normalized_k_speed * float(self.config.get("tentacle_core_k_speed", 1.2))
+
+            if bool(self.config.get("kp_bind_tentacle_core_base_speed_p", False)):
+                wmin = float(self.config.get("kp_tentacle_core_base_speed_p_wmin", 0.0))
+                wmax = float(self.config.get("kp_tentacle_core_base_speed_p_wmax", 1.35))
+                core_acceleration += _lerp(wmin, wmax, normalized_p_speed)
+            else:
+                core_acceleration += normalized_p_speed * float(self.config.get("tentacle_core_p_speed", 1.35))
             core_acceleration *= self.tentacle_core_accel_direction
             self.tentacle_core_angular_velocity *= 0.92
             self.tentacle_core_angular_velocity += core_acceleration * 0.0028 * rotation_base

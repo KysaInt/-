@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QFrame, QMessageBox, QScrollArea,
     QStackedWidget,
     QTreeWidget, QTreeWidgetItem,
+    QMenu,
+    QAbstractSpinBox,
     QProxyStyle, QStyle, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QRectF
@@ -92,6 +94,8 @@ _DEFAULT_CONFIG = {
     'tentacle_count': 16,
     'tentacle_length': 280,
     'tentacle_length_jitter': 80,
+    'tentacle_length_jitter_speed': 0.35,
+    'tentacle_length_jitter_random': False,
     'tentacle_control_points_min': 3,
     'tentacle_control_points_max': 5,
     'tentacle_tip_bias': 1.85,
@@ -119,6 +123,17 @@ _DEFAULT_CONFIG = {
     'tentacle_core_base_speed': 0.75,
     'tentacle_core_k_speed': 1.2,
     'tentacle_core_p_speed': 1.35,
+
+    # K/P 绑定（触须相关：用于替代旧的“K影响 / K角加速度 / P角加速度”独立调节）
+    'kp_bind_tentacle_turbulence_k': True,
+    'kp_tentacle_turbulence_k_wmin': 0.22,
+    'kp_tentacle_turbulence_k_wmax': 0.683,
+    'kp_bind_tentacle_core_base_speed_k': True,
+    'kp_tentacle_core_base_speed_k_wmin': 0.0,
+    'kp_tentacle_core_base_speed_k_wmax': 1.2,
+    'kp_bind_tentacle_core_base_speed_p': True,
+    'kp_tentacle_core_base_speed_p_wmin': 0.0,
+    'kp_tentacle_core_base_speed_p_wmax': 1.35,
     'random_checked': [],
     'random_object_count_min': 1,
     'random_object_count_max': 10,
@@ -168,6 +183,34 @@ def _normalize_loaded_config(data):
         loaded.setdefault(f'{prefix}_use_independent_damping', False)
         loaded.setdefault(f'{prefix}_independent_rise_damping', loaded['k_rise_damping'])
         loaded.setdefault(f'{prefix}_independent_fall_damping', loaded['k_fall_damping'])
+
+    # ── 触须：旧参数迁移到新的 K/P 绑定（仅在用户未显式设置新键时）
+    if 'kp_bind_tentacle_turbulence_k' not in loaded and 'tentacle_k_influence' in loaded:
+        try:
+            kinf = max(0.0, float(loaded.get('tentacle_k_influence', 1.35)))
+            wmin = 0.22
+            wmax = wmin + min(0.55, wmin + kinf * 0.18)
+            loaded.setdefault('kp_bind_tentacle_turbulence_k', True)
+            loaded.setdefault('kp_tentacle_turbulence_k_wmin', wmin)
+            loaded.setdefault('kp_tentacle_turbulence_k_wmax', wmax)
+        except Exception:
+            pass
+
+    if 'kp_bind_tentacle_core_base_speed_k' not in loaded and 'tentacle_core_k_speed' in loaded:
+        try:
+            loaded.setdefault('kp_bind_tentacle_core_base_speed_k', True)
+            loaded.setdefault('kp_tentacle_core_base_speed_k_wmin', 0.0)
+            loaded.setdefault('kp_tentacle_core_base_speed_k_wmax', float(loaded.get('tentacle_core_k_speed', 1.2)))
+        except Exception:
+            pass
+
+    if 'kp_bind_tentacle_core_base_speed_p' not in loaded and 'tentacle_core_p_speed' in loaded:
+        try:
+            loaded.setdefault('kp_bind_tentacle_core_base_speed_p', True)
+            loaded.setdefault('kp_tentacle_core_base_speed_p_wmin', 0.0)
+            loaded.setdefault('kp_tentacle_core_base_speed_p_wmax', float(loaded.get('tentacle_core_p_speed', 1.35)))
+        except Exception:
+            pass
 
     cfg.update(loaded)
     cfg['a1_time_window'] = _clamp_time_window(cfg.get('a1_time_window', _DEFAULT_CONFIG['a1_time_window']), _DEFAULT_CONFIG['a1_time_window'])
@@ -318,6 +361,21 @@ class _SoftRangeNumberMixin:
     def _clamp_hard(self, value):
         return min(self._hard_max, max(self._hard_min, self._coerce_value(value)))
 
+    def _expand_hard_range_to_include(self, lo, hi):
+        lo = self._coerce_value(lo)
+        hi = self._coerce_value(hi)
+        if lo > hi:
+            lo, hi = hi, lo
+        changed = False
+        if lo < self._hard_min:
+            self._hard_min = lo
+            changed = True
+        if hi > self._hard_max:
+            self._hard_max = hi
+            changed = True
+        if changed:
+            self.setRange(self._hard_min, self._hard_max)
+
     def set_default_value(self, value):
         self._default_value = self._clamp_hard(value)
 
@@ -331,10 +389,12 @@ class _SoftRangeNumberMixin:
         return self._soft_max
 
     def set_soft_range(self, soft_min, soft_max, sync_slider=True):
-        lo = self._clamp_hard(soft_min)
-        hi = self._clamp_hard(soft_max)
+        # 用户可在右键弹窗里设置任意上下限：当超过原硬范围时自动扩展硬范围
+        lo = self._coerce_value(soft_min)
+        hi = self._coerce_value(soft_max)
         if lo > hi:
             lo, hi = hi, lo
+        self._expand_hard_range_to_include(lo, hi)
         self._soft_min = lo
         self._soft_max = hi
         if sync_slider:
@@ -517,16 +577,37 @@ class _NumericAdjustPopup(QDialog):
         grid = QGridLayout()
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(4)
+
         grid.addWidget(QLabel("滑块下限"), 0, 0)
-        self.min_spin = self._target._create_limit_editor(self._target.soft_min())
+        self.min_spin = self._create_unbounded_limit_editor(self._target.soft_min())
         grid.addWidget(self.min_spin, 0, 1)
+
         grid.addWidget(QLabel("滑块上限"), 1, 0)
-        self.max_spin = self._target._create_limit_editor(self._target.soft_max())
+        self.max_spin = self._create_unbounded_limit_editor(self._target.soft_max())
         grid.addWidget(self.max_spin, 1, 1)
+
         root.addLayout(grid)
 
         self.min_spin.valueChanged.connect(self._on_soft_range_changed)
         self.max_spin.valueChanged.connect(self._on_soft_range_changed)
+
+    def _create_unbounded_limit_editor(self, value):
+        # 右键弹窗里的上下限输入框：无按钮、超大范围、禁用滚轮避免“滑动误触”
+        if isinstance(self._target, QDoubleSpinBox):
+            editor = _NoWheelDoubleSpinBox()
+            editor.setDecimals(self._target.decimals())
+            editor.setSingleStep(self._target.singleStep() or 0.01)
+            editor.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            editor.setValue(float(value))
+        else:
+            editor = _NoWheelSpinBox()
+            editor.setSingleStep(self._target.singleStep() or 1)
+            editor.setRange(-1_000_000_000, 1_000_000_000)
+            editor.setValue(int(round(float(value))))
+        editor.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        editor.setKeyboardTracking(False)
+        editor.setFixedWidth(120)
+        return editor
 
     def show_at(self, global_pos):
         self.adjustSize()
@@ -555,17 +636,32 @@ class _NumericAdjustPopup(QDialog):
         self.max_spin.blockSignals(False)
 
 
+class _NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class QuickColorPicker(QDialog):
-    """鼠标位置展开的 HSV 小浮窗。"""
+    """鼠标位置展开的 HSL / RGB 小浮窗（实时同步）。"""
     colorSelected = Signal(tuple)
 
-    def __init__(self, parent=None, initial=(255, 255, 255), presets=None):
+    def __init__(self, parent=None, initial=(255, 255, 255), presets=None, *, cfg_key_prefix: str | None = None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.selected_rgb = tuple(int(channel) for channel in initial)
+        self._cfg_key_prefix = str(cfg_key_prefix) if cfg_key_prefix else "color_picker"
+        self._mode = 'hsl'  # 'hsl' | 'rgb'
+        self._host = parent
+        self._kp_accent_color = _active_palette_color(QPalette.ColorRole.Highlight).name()
+        self._kp_ui = {}
         self.setModal(True)
-        self.setObjectName("HSVColorPopup")
+        self.setObjectName("ColorPopup")
         self.setStyleSheet(
-            "QDialog#HSVColorPopup{background:#17181b;border:1px solid #4c4f57;border-radius:10px;}"
+            "QDialog#ColorPopup{background:#17181b;border:1px solid #4c4f57;border-radius:10px;}"
             "QLabel{color:#e4e6eb;}"
         )
 
@@ -574,9 +670,10 @@ class QuickColorPicker(QDialog):
         root.setSpacing(8)
 
         top = QHBoxLayout()
-        title = QLabel("HSV")
-        title.setStyleSheet("font-weight:bold;")
-        top.addWidget(title)
+        self._title = QLabel("HSL")
+        self._title.setStyleSheet("font-weight:bold;")
+        self._title.mousePressEvent = lambda _ev: self._toggle_mode()
+        top.addWidget(self._title)
         top.addStretch()
         self.preview = QFrame()
         self.preview.setFixedSize(18, 18)
@@ -584,10 +681,27 @@ class QuickColorPicker(QDialog):
         top.addWidget(self.preview)
         root.addLayout(top)
 
-        hsv = colorsys.rgb_to_hsv(self.selected_rgb[0] / 255.0, self.selected_rgb[1] / 255.0, self.selected_rgb[2] / 255.0)
-        self._hue_slider = self._make_hsv_row(root, "H", 0, 359, int(round(hsv[0] * 359.0)))
-        self._sat_slider = self._make_hsv_row(root, "S", 0, 100, int(round(hsv[1] * 100.0)))
-        self._val_slider = self._make_hsv_row(root, "V", 0, 100, int(round(hsv[2] * 100.0)))
+        # 两组控件：HSL（默认）与 RGB（点击标题切换）
+        self._hsl_group = QWidget()
+        self._hsl_layout = QVBoxLayout(self._hsl_group)
+        self._hsl_layout.setContentsMargins(0, 0, 0, 0)
+        self._hsl_layout.setSpacing(6)
+        h, l, s = colorsys.rgb_to_hls(self.selected_rgb[0] / 255.0, self.selected_rgb[1] / 255.0, self.selected_rgb[2] / 255.0)
+        self._hue_slider = self._make_row(self._hsl_layout, "H", 0, 359, int(round(h * 359.0)), cfg_key=self._channel_key('h'))
+        self._sat_slider = self._make_row(self._hsl_layout, "S", 0, 100, int(round(s * 100.0)), cfg_key=self._channel_key('s'))
+        self._light_slider = self._make_row(self._hsl_layout, "L", 0, 100, int(round(l * 100.0)), cfg_key=self._channel_key('l'))
+
+        self._rgb_group = QWidget()
+        self._rgb_layout = QVBoxLayout(self._rgb_group)
+        self._rgb_layout.setContentsMargins(0, 0, 0, 0)
+        self._rgb_layout.setSpacing(6)
+        self._r_slider = self._make_row(self._rgb_layout, "R", 0, 255, int(self.selected_rgb[0]), cfg_key=self._channel_key('r'))
+        self._g_slider = self._make_row(self._rgb_layout, "G", 0, 255, int(self.selected_rgb[1]), cfg_key=self._channel_key('g'))
+        self._b_slider = self._make_row(self._rgb_layout, "B", 0, 255, int(self.selected_rgb[2]), cfg_key=self._channel_key('b'))
+
+        root.addWidget(self._hsl_group)
+        root.addWidget(self._rgb_group)
+        self._rgb_group.setVisible(False)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -600,19 +714,273 @@ class QuickColorPicker(QDialog):
         root.addLayout(actions)
 
         self._update_preview()
+        self._update_hsl_slider_gradients()
+        self._update_rgb_slider_gradients()
+        self._update_all_kp_ui()
 
-    def _make_hsv_row(self, root_layout, label_text, minimum, maximum, value):
-        row = QHBoxLayout()
+    def _channel_key(self, channel: str) -> str:
+        # cfg_key 仅用于 K/P 绑定键的命名空间；“基准系数”取自当前滑块值
+        return f"{self._cfg_key_prefix}__{str(channel).lower()}"
+
+    def _cfg_get(self, key: str, default=None):
+        try:
+            if self._host is not None and hasattr(self._host, 'config'):
+                return self._host.config.get(key, default)
+        except Exception:
+            pass
+        return default
+
+    def _cfg_set(self, key: str, value):
+        try:
+            if self._host is not None and hasattr(self._host, '_update_cfg'):
+                self._host._update_cfg(key, value)
+                return
+            if self._host is not None and hasattr(self._host, 'config'):
+                self._host.config[key] = value
+                return
+        except Exception:
+            pass
+
+    @staticmethod
+    def _kp_enabled_key(cfg_key: str, sig: str) -> str:
+        return f"kp_bind_{cfg_key}_{sig}"
+
+    @staticmethod
+    def _kp_wmin_key(cfg_key: str, sig: str) -> str:
+        return f"kp_{cfg_key}_{sig}_wmin"
+
+    @staticmethod
+    def _kp_wmax_key(cfg_key: str, sig: str) -> str:
+        return f"kp_{cfg_key}_{sig}_wmax"
+
+    def _kp_is_enabled(self, cfg_key: str, sig: str) -> bool:
+        return bool(self._cfg_get(self._kp_enabled_key(cfg_key, sig), False))
+
+    def _show_kp_bind_menu(self, label: QLabel, cfg_key: str, supports=('k', 'p')):
+        menu = QMenu(label)
+        actions = {}
+        for sig, text in [('k', '绑定 K'), ('p', '绑定 P')]:
+            if sig not in supports:
+                continue
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(self._kp_is_enabled(cfg_key, sig))
+            actions[sig] = act
+
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        for sig, act in actions.items():
+            if chosen is act:
+                self._cfg_set(self._kp_enabled_key(cfg_key, sig), bool(act.isChecked()))
+                self._update_kp_ui(cfg_key)
+                return
+
+    def _new_unbounded_float_input(self, *, default_value: float, decimals=3, width=72, cfg_key: str):
+        box = _NoWheelDoubleSpinBox()
+        box.setDecimals(int(decimals))
+        box.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        box.setKeyboardTracking(False)
+        box.setFocusPolicy(Qt.StrongFocus)
+        box.setFixedWidth(int(width))
+        box.setValue(float(self._cfg_get(cfg_key, default_value)))
+        box.valueChanged.connect(lambda v, k=cfg_key: self._cfg_set(k, float(v)))
+        return box
+
+    def _build_kp_container(self, *, cfg_key: str, base_getter, supports=('k', 'p'), wmin_default=0.0, wmax_default=1.0, decimals=3):
+        existing_label = None
+        try:
+            existing_label = (self._kp_ui.get(cfg_key) or {}).get('label', None)
+        except Exception:
+            existing_label = None
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(18, 0, 0, 0)
+        v.setSpacing(3)
+
+        base_label = QLabel("")
+        base_label.setStyleSheet("color:#888; font-size:8.5pt;")
+        v.addWidget(base_label)
+
+        rows = {}
+        for sig in supports:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 0, 0, 0)
+            h.setSpacing(6)
+            tag = QLabel(sig.upper())
+            tag.setStyleSheet(f"color:{self._kp_accent_color}; font-weight:bold;")
+            h.addWidget(tag)
+            h.addWidget(QLabel("权重范围"))
+            wmin_spin = self._new_unbounded_float_input(
+                default_value=float(wmin_default), decimals=int(decimals), width=72,
+                cfg_key=self._kp_wmin_key(cfg_key, sig),
+            )
+            wmax_spin = self._new_unbounded_float_input(
+                default_value=float(wmax_default), decimals=int(decimals), width=72,
+                cfg_key=self._kp_wmax_key(cfg_key, sig),
+            )
+            h.addWidget(wmin_spin)
+            h.addWidget(QLabel("~"))
+            h.addWidget(wmax_spin)
+            h.addStretch()
+            v.addWidget(row)
+            rows[sig] = row
+
+        container.setVisible(False)
+        self._kp_ui[cfg_key] = {
+            'container': container,
+            'base_label': base_label,
+            'rows': rows,
+            'supports': tuple(supports),
+            'base_getter': base_getter,
+            'label': existing_label,
+        }
+        return container
+
+    def _install_kp_bindable_label(self, label: QLabel, cfg_key: str, supports=('k', 'p')):
+        label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        label.customContextMenuRequested.connect(lambda _pos, w=label: self._show_kp_bind_menu(w, cfg_key, supports=supports))
+        if cfg_key in self._kp_ui:
+            self._kp_ui[cfg_key]['label'] = label
+        else:
+            self._kp_ui[cfg_key] = {
+                'container': None,
+                'base_label': None,
+                'rows': {},
+                'supports': tuple(supports),
+                'base_getter': None,
+                'label': label,
+            }
+        return label
+
+    def _update_kp_ui(self, cfg_key: str):
+        meta = self._kp_ui.get(cfg_key)
+        if not meta:
+            return
+        supports = meta.get('supports', ('k', 'p'))
+        enabled_any = any(self._kp_is_enabled(cfg_key, sig) for sig in supports)
+
+        label = meta.get('label', None)
+        if isinstance(label, QLabel):
+            label.setStyleSheet(f"color:{self._kp_accent_color};" if enabled_any else "")
+
+        container = meta.get('container', None)
+        if container is not None:
+            container.setVisible(bool(enabled_any))
+
+        base_label = meta.get('base_label', None)
+        base_getter = meta.get('base_getter', None)
+        if isinstance(base_label, QLabel) and callable(base_getter):
+            try:
+                base_value = base_getter()
+            except Exception:
+                base_value = None
+            base_label.setText(f"基准系数: {base_value}")
+
+        for sig, row_widget in (meta.get('rows', {}) or {}).items():
+            if row_widget is not None:
+                row_widget.setVisible(self._kp_is_enabled(cfg_key, sig))
+
+    def _update_all_kp_ui(self):
+        for cfg_key in list(self._kp_ui.keys()):
+            self._update_kp_ui(cfg_key)
+
+    def _toggle_mode(self):
+        self._mode = 'rgb' if self._mode == 'hsl' else 'hsl'
+        self._title.setText('RGB' if self._mode == 'rgb' else 'HSL')
+        self._hsl_group.setVisible(self._mode == 'hsl')
+        self._rgb_group.setVisible(self._mode == 'rgb')
+        self._update_preview()
+        self._update_hsl_slider_gradients()
+        self._update_rgb_slider_gradients()
+        self._update_all_kp_ui()
+
+    def _make_row(self, root_layout: QVBoxLayout, label_text, minimum, maximum, value, *, cfg_key: str):
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         lbl = QLabel(label_text)
         lbl.setFixedWidth(12)
-        row.addWidget(lbl)
+        row.addWidget(self._install_kp_bindable_label(lbl, cfg_key))
         slider = QSlider(Qt.Horizontal)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
-        slider.valueChanged.connect(self._update_preview)
+        slider.valueChanged.connect(self._on_any_changed)
         row.addWidget(slider)
-        root_layout.addLayout(row)
+        root_layout.addWidget(row_widget)
+        container = self._build_kp_container(cfg_key=cfg_key, base_getter=lambda s=slider: s.value(), decimals=3)
+        root_layout.addWidget(container)
+        self._update_kp_ui(cfg_key)
         return slider
+
+    def _on_any_changed(self, _value):
+        self._update_preview()
+        self._update_hsl_slider_gradients()
+        self._update_rgb_slider_gradients()
+        self._update_all_kp_ui()
+        # 实时同步到外部（不需要点“应用”确认）
+        self.colorSelected.emit(self.selected_rgb)
+
+    def _set_slider_gradient(self, slider: QSlider, stops: list[tuple[float, tuple[int, int, int]]]):
+        parts = []
+        for pos, (r, g, b) in stops:
+            parts.append(f"stop:{pos:.4f} rgb({int(r)},{int(g)},{int(b)})")
+        grad = "qlineargradient(x1:0, y1:0, x2:1, y2:0, " + ", ".join(parts) + ")"
+        slider.setStyleSheet(
+            "QSlider::groove:horizontal{height:7px;border-radius:4px;" +
+            "background:" + grad + ";}" +
+            "QSlider::handle:horizontal{width:12px;margin:-4px 0;border-radius:6px;" +
+            "background:rgba(255,255,255,210);border:1px solid rgba(0,0,0,120);}"
+        )
+
+    @staticmethod
+    def _hsl_to_rgb(h_deg: float, s_pct: float, l_pct: float) -> tuple[int, int, int]:
+        h = (float(h_deg) % 360.0) / 360.0
+        s = max(0.0, min(1.0, float(s_pct) / 100.0))
+        l = max(0.0, min(1.0, float(l_pct) / 100.0))
+        rr, gg, bb = colorsys.hls_to_rgb(h, l, s)
+        return (int(round(rr * 255.0)), int(round(gg * 255.0)), int(round(bb * 255.0)))
+
+    @staticmethod
+    def _rgb_to_hsl(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+        r, g, b = rgb
+        h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+        return (int(round(h * 359.0)), int(round(s * 100.0)), int(round(l * 100.0)))
+
+    def _update_hsl_slider_gradients(self):
+        h = self._hue_slider.value()
+        s = self._sat_slider.value()
+        l = self._light_slider.value()
+
+        # H：固定 S/L，覆盖色相环
+        hue_steps = 13
+        hue_stops = []
+        for i in range(hue_steps):
+            phase = i / (hue_steps - 1)
+            rr, gg, bb = self._hsl_to_rgb(phase * 359.0, s, l)
+            hue_stops.append((phase, (rr, gg, bb)))
+        self._set_slider_gradient(self._hue_slider, hue_stops)
+
+        # S：固定 H/L，0→1
+        r0, g0, b0 = self._hsl_to_rgb(h, 0.0, l)
+        r1, g1, b1 = self._hsl_to_rgb(h, 100.0, l)
+        self._set_slider_gradient(self._sat_slider, [(0.0, (r0, g0, b0)), (1.0, (r1, g1, b1))])
+
+        # L：固定 H/S，0→1
+        r2, g2, b2 = self._hsl_to_rgb(h, s, 0.0)
+        r3, g3, b3 = self._hsl_to_rgb(h, s, 100.0)
+        self._set_slider_gradient(self._light_slider, [(0.0, (r2, g2, b2)), (1.0, (r3, g3, b3))])
+
+    def _update_rgb_slider_gradients(self):
+        r = int(self._r_slider.value())
+        g = int(self._g_slider.value())
+        b = int(self._b_slider.value())
+        self._set_slider_gradient(self._r_slider, [(0.0, (0, g, b)), (1.0, (255, g, b))])
+        self._set_slider_gradient(self._g_slider, [(0.0, (r, 0, b)), (1.0, (r, 255, b))])
+        self._set_slider_gradient(self._b_slider, [(0.0, (r, g, 0)), (1.0, (r, g, 255))])
 
     def _move_to_cursor(self):
         self.adjustSize()
@@ -629,16 +997,39 @@ class QuickColorPicker(QDialog):
         return super().exec()
 
     def _current_rgb(self):
-        hue = self._hue_slider.value() / 359.0 if self._hue_slider.maximum() else 0.0
-        sat = self._sat_slider.value() / 100.0
-        val = self._val_slider.value() / 100.0
-        rgb = colorsys.hsv_to_rgb(hue, sat, val)
-        return tuple(int(round(channel * 255.0)) for channel in rgb)
+        if self._mode == 'rgb':
+            return (int(self._r_slider.value()), int(self._g_slider.value()), int(self._b_slider.value()))
+        return self._hsl_to_rgb(self._hue_slider.value(), self._sat_slider.value(), self._light_slider.value())
 
     def _update_preview(self):
         self.selected_rgb = self._current_rgb()
         r, g, b = self.selected_rgb
         self.preview.setStyleSheet(f"background:rgb({r},{g},{b}); border:1px solid #7f828a; border-radius:4px;")
+
+        # 两种模式之间保持同步，避免切换时跳变
+        if self._mode == 'hsl':
+            self._r_slider.blockSignals(True)
+            self._g_slider.blockSignals(True)
+            self._b_slider.blockSignals(True)
+            self._r_slider.setValue(int(r))
+            self._g_slider.setValue(int(g))
+            self._b_slider.setValue(int(b))
+            self._r_slider.blockSignals(False)
+            self._g_slider.blockSignals(False)
+            self._b_slider.blockSignals(False)
+        else:
+            h, s, l = self._rgb_to_hsl(self.selected_rgb)
+            self._hue_slider.blockSignals(True)
+            self._sat_slider.blockSignals(True)
+            self._light_slider.blockSignals(True)
+            self._hue_slider.setValue(int(h))
+            self._sat_slider.setValue(int(s))
+            self._light_slider.setValue(int(l))
+            self._hue_slider.blockSignals(False)
+            self._sat_slider.blockSignals(False)
+            self._light_slider.blockSignals(False)
+
+
 
     def _accept_current_color(self):
         self._update_preview()
@@ -981,6 +1372,9 @@ class VisualizerControlUI(QWidget):
         self._palette_refill_running = False
         self._section_preset_combos = {}
 
+        self._kp_binding_meta = {}
+        self._kp_accent_color = _active_palette_color(QPalette.ColorRole.Highlight).name()
+
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
 
@@ -1091,6 +1485,8 @@ class VisualizerControlUI(QWidget):
 
     def _update_cfg(self, key, value):
         self.config[key] = value
+        if hasattr(self, '_kp_binding_meta') and (key in self._kp_binding_meta or str(key).startswith('kp_bind_') or str(key).startswith('kp_')):
+            self._maybe_update_kp_binding_ui(str(key))
         if key == 'color_dynamic':
             self._sync_color_quick_widgets(bool(value))
         elif key in {'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'}:
@@ -1105,7 +1501,8 @@ class VisualizerControlUI(QWidget):
             'bar_independent_rise_damping', 'bar_independent_fall_damping',
             'color_dynamic', 'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1',
             'tentacle_on', 'tentacle_alpha', 'tentacle_thick', 'tentacle_count', 'tentacle_length',
-            'tentacle_length_jitter', 'tentacle_control_points_min', 'tentacle_control_points_max',
+            'tentacle_length_jitter', 'tentacle_length_jitter_speed', 'tentacle_length_jitter_random',
+            'tentacle_control_points_min', 'tentacle_control_points_max',
             'tentacle_tip_bias', 'tentacle_tip_thickness', 'tentacle_turbulence', 'tentacle_k_influence',
             'tentacle_sway_speed', 'tentacle_sway_density', 'tentacle_water_damping',
             'tentacle_angle_stiffness', 'tentacle_length_stiffness', 'tentacle_stretch_limit', 'tentacle_shader_enabled',
@@ -1114,9 +1511,141 @@ class VisualizerControlUI(QWidget):
             'tentacle_core_k_speed', 'tentacle_core_p_speed'
         } or re.match(r'^c[1-5]_color$', str(key)) or re.match(r'^(c[1245]|b(?:12|23|34|45))_(use_independent_damping|independent_rise_damping|independent_fall_damping)$', str(key)):
             self._refresh_single_bar_preview()
+        if str(key).startswith('kp_bind_tentacle_') or str(key).startswith('kp_tentacle_'):
+            self._refresh_single_bar_preview()
         if self._applying_config:
             return
         self._schedule_config_commit()
+
+    def _kp_enabled_key(self, cfg_key: str, sig: str) -> str:
+        return f'kp_bind_{cfg_key}_{sig}'
+
+    def _kp_wmin_key(self, cfg_key: str, sig: str) -> str:
+        return f'kp_{cfg_key}_{sig}_wmin'
+
+    def _kp_wmax_key(self, cfg_key: str, sig: str) -> str:
+        return f'kp_{cfg_key}_{sig}_wmax'
+
+    def _kp_is_enabled(self, cfg_key: str, sig: str) -> bool:
+        return bool(self.config.get(self._kp_enabled_key(cfg_key, sig), False))
+
+    def _show_kp_bind_menu(self, label: QLabel, cfg_key: str, supports=('k', 'p')):
+        menu = QMenu(label)
+        actions = {}
+        for sig, text in [('k', '绑定 K'), ('p', '绑定 P')]:
+            if sig not in supports:
+                continue
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(self._kp_is_enabled(cfg_key, sig))
+            actions[sig] = act
+
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        for sig, act in actions.items():
+            if chosen is act:
+                self._update_cfg(self._kp_enabled_key(cfg_key, sig), bool(act.isChecked()))
+                self._update_kp_binding_ui(cfg_key)
+                return
+
+    def _attach_kp_bindable_label(self, label: QLabel, cfg_key: str, supports=('k', 'p')):
+        label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        label.customContextMenuRequested.connect(lambda _pos, w=label: self._show_kp_bind_menu(w, cfg_key, supports=supports))
+        return label
+
+    def _build_kp_binding_container(
+        self,
+        *,
+        cfg_key: str,
+        supports=('k', 'p'),
+        wmin_default=0.0,
+        wmax_default=1.0,
+        defaults_by_sig: dict | None = None,
+        soft_min=-5.0,
+        soft_max=5.0,
+        hard_min=-100.0,
+        hard_max=100.0,
+        decimals=3,
+    ):
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(18, 0, 0, 0)
+        v.setSpacing(3)
+
+        base_label = QLabel("")
+        base_label.setStyleSheet("color:#888; font-size:8.5pt;")
+        v.addWidget(base_label)
+
+        rows = {}
+        weight_spins = {}
+        for sig in supports:
+            sig_defaults = (defaults_by_sig or {}).get(sig, None)
+            sig_wmin_default = sig_defaults[0] if sig_defaults is not None else wmin_default
+            sig_wmax_default = sig_defaults[1] if sig_defaults is not None else wmax_default
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(12, 0, 0, 0)
+            h.setSpacing(6)
+            tag = QLabel(sig.upper())
+            tag.setStyleSheet(f"color:{self._kp_accent_color}; font-weight:bold;")
+            h.addWidget(tag)
+            h.addWidget(QLabel("权重范围"))
+            # K/P 权重范围：用户要求“无上下按钮、无滑动/软范围、取消上下限限制”
+            wmin_spin = self._new_unbounded_float_input(
+                default_value=float(sig_wmin_default), decimals=int(decimals), width=72,
+                cfg_key=self._kp_wmin_key(cfg_key, sig),
+            )
+            wmax_spin = self._new_unbounded_float_input(
+                default_value=float(sig_wmax_default), decimals=int(decimals), width=72,
+                cfg_key=self._kp_wmax_key(cfg_key, sig),
+            )
+            h.addWidget(wmin_spin)
+            h.addWidget(QLabel("~"))
+            h.addWidget(wmax_spin)
+            h.addStretch()
+            v.addWidget(row)
+            rows[sig] = row
+            weight_spins[sig] = (wmin_spin, wmax_spin)
+
+        return container, base_label, rows, weight_spins
+
+    def _register_kp_binding_ui(self, *, cfg_key: str, label: QLabel, container: QWidget, base_label: QLabel, rows: dict, supports=('k', 'p'), weight_spins: dict | None = None):
+        self._kp_binding_meta[cfg_key] = {
+            'label': label,
+            'container': container,
+            'base_label': base_label,
+            'rows': rows,
+            'supports': tuple(supports),
+            'weight_spins': dict(weight_spins or {}),
+        }
+        self._update_kp_binding_ui(cfg_key)
+
+    def _maybe_update_kp_binding_ui(self, changed_key: str):
+        if changed_key in self._kp_binding_meta:
+            self._update_kp_binding_ui(changed_key)
+            return
+        for cfg_key in self._kp_binding_meta.keys():
+            if changed_key.startswith(f'kp_bind_{cfg_key}_') or changed_key.startswith(f'kp_{cfg_key}_'):
+                self._update_kp_binding_ui(cfg_key)
+                return
+
+    def _update_kp_binding_ui(self, cfg_key: str):
+        meta = self._kp_binding_meta.get(cfg_key)
+        if not meta:
+            return
+        supports = meta.get('supports', ())
+        enabled_any = any(self._kp_is_enabled(cfg_key, sig) for sig in supports)
+        meta['container'].setVisible(bool(enabled_any))
+
+        base_value = self.config.get(cfg_key, None)
+        meta['base_label'].setText(f"基准系数: {base_value}")
+
+        # 参数名：当绑定启用时用主题色
+        meta['label'].setStyleSheet(f"color:{self._kp_accent_color};" if enabled_any else "")
+
+        for sig, row_widget in meta.get('rows', {}).items():
+            row_widget.setVisible(self._kp_is_enabled(cfg_key, sig))
 
     def _schedule_config_commit(self):
         # 发送配置优先，短防抖保证交互手感
@@ -1181,6 +1710,24 @@ class VisualizerControlUI(QWidget):
         box.setSingleStep(step)
         if suffix:
             box.setSuffix(suffix)
+        if width is not None:
+            box.setFixedWidth(width)
+        initial = self.config.get(cfg_key, default_value) if cfg_key is not None else (default_value if value is None else value)
+        box.setValue(float(initial))
+        if cfg_key is not None:
+            box.valueChanged.connect(lambda v, k=cfg_key: self._update_cfg(k, float(v)))
+        return box
+
+    def _new_unbounded_float_input(self, *, default_value, decimals=3, width=None, cfg_key=None, value=None):
+        """无上下按钮、超大范围的浮点输入框（用于 K/P 权重范围等不需要软范围/滑块的场景）。"""
+        box = QDoubleSpinBox()
+        box.setDecimals(int(decimals))
+        # 取消上下限（用超大范围近似），并去掉右侧上下按钮
+        box.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        box.setKeyboardTracking(False)
+        # 避免滚轮误触引起跳变（保留键盘输入即可）
+        box.setFocusPolicy(Qt.StrongFocus)
         if width is not None:
             box.setFixedWidth(width)
         initial = self.config.get(cfg_key, default_value) if cfg_key is not None else (default_value if value is None else value)
@@ -1428,7 +1975,14 @@ class VisualizerControlUI(QWidget):
         left_layout.setSpacing(8)
         bottom.addWidget(left_column, 0)
 
-        self.preview_toggle_btn = QPushButton("▾ 左侧预览")
+        self.nav_tree = QTreeWidget()
+        self.nav_tree.setHeaderHidden(True)
+        self.nav_tree.setMinimumWidth(220)
+        self.nav_tree.setMaximumWidth(320)
+        self.nav_tree.setFrameShape(QFrame.StyledPanel)
+        left_layout.addWidget(self.nav_tree, 1)
+
+        self.preview_toggle_btn = QPushButton("▾ 图形预览")
         self.preview_toggle_btn.setCheckable(True)
         self.preview_toggle_btn.setChecked(True)
         self.preview_toggle_btn.toggled.connect(self._toggle_preview_sidebar)
@@ -1440,13 +1994,6 @@ class VisualizerControlUI(QWidget):
         preview_sidebar_layout.setSpacing(0)
         preview_sidebar_layout.addWidget(self.single_bar_panel)
         left_layout.addWidget(self.preview_sidebar)
-
-        self.nav_tree = QTreeWidget()
-        self.nav_tree.setHeaderHidden(True)
-        self.nav_tree.setMinimumWidth(220)
-        self.nav_tree.setMaximumWidth(320)
-        self.nav_tree.setFrameShape(QFrame.StyledPanel)
-        left_layout.addWidget(self.nav_tree, 1)
 
         self.detail_stack = QStackedWidget()
         self.detail_scroll = QScrollArea()
@@ -1504,7 +2051,7 @@ class VisualizerControlUI(QWidget):
 
     def _toggle_preview_sidebar(self, expanded):
         self.preview_sidebar.setVisible(bool(expanded))
-        self.preview_toggle_btn.setText("▾ 左侧预览" if expanded else "▸ 左侧预览")
+        self.preview_toggle_btn.setText("▾ 图形预览" if expanded else "▸ 图形预览")
 
     def _make_preview_card(self):
         card = QFrame()
@@ -1636,7 +2183,31 @@ class VisualizerControlUI(QWidget):
 
         row1 = QHBoxLayout(); row1.setSpacing(4)
         row1.addWidget(QLabel("条数:"))
+        self.bars_spin = self._new_int_box(
+            default_value=64, soft_min=1, soft_max=512,
+            hard_min=1, hard_max=8192, step=1, cfg_key='num_bars'
+        )
+        row1.addWidget(self.bars_spin)
+        row1.addStretch()
+        spec_layout.addLayout(row1)
+
+        row2 = QHBoxLayout(); row2.setSpacing(4)
+        row2.addWidget(QLabel("Hz:"))
+        self.freq_min_spin = self._new_int_box(
+            default_value=20, soft_min=0, soft_max=5000,
+            hard_min=0, hard_max=200000, step=1, cfg_key='freq_min'
+        )
+        self.freq_max_spin = self._new_int_box(
+            default_value=20000, soft_min=100, soft_max=40000,
+            hard_min=0, hard_max=200000, step=10, cfg_key='freq_max'
+        )
+        self.freq_min_spin.valueChanged.connect(self._on_freq_min_changed)
+        self.freq_max_spin.valueChanged.connect(self._on_freq_max_changed)
+        row2.addWidget(self.freq_min_spin)
+        row2.addWidget(QLabel("~"))
+        row2.addWidget(self.freq_max_spin)
         row2.addWidget(QLabel("Hz"))
+        row2.addStretch()
         spec_layout.addLayout(row2)
 
         row3 = QHBoxLayout(); row3.setSpacing(4)
@@ -2945,7 +3516,7 @@ class VisualizerControlUI(QWidget):
         return s
 
     def _build_tentacle_section(self):
-        s = _Collapsible("水母触须", expanded=True)
+        s = _Collapsible("水母", expanded=True)
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0, 0, 0, 0); r = 0
 
         chk = QCheckBox("显示")
@@ -2967,11 +3538,26 @@ class VisualizerControlUI(QWidget):
             hard_min=1, hard_max=1000, step=1, cfg_key='tentacle_thick'
         )
         self.tentacle_thick_spin = sp
-        ht = QHBoxLayout()
-        ht.addWidget(QLabel("根部粗:")); ht.addWidget(sp)
+        thick_label = self._attach_kp_bindable_label(QLabel("根部粗:"), 'tentacle_thick', supports=('k', 'p'))
+        ht = QHBoxLayout(); ht.setSpacing(6)
+        ht.addWidget(thick_label); ht.addWidget(sp)
         g.addLayout(ht, r, 2, 1, 2); r += 1
 
-        g.addWidget(QLabel("透明:"), r, 0)
+        thick_bind, thick_base_lbl, thick_rows, thick_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_thick', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-6.0, soft_max=6.0, hard_min=-200.0, hard_max=200.0,
+            decimals=2,
+        )
+        g.addWidget(thick_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_thick', label=thick_label,
+            container=thick_bind, base_label=thick_base_lbl,
+            rows=thick_rows, supports=('k', 'p'), weight_spins=thick_weight_spins,
+        )
+
+        alpha_label = self._attach_kp_bindable_label(QLabel("透明:"), 'tentacle_alpha', supports=('k', 'p'))
+        g.addWidget(alpha_label, r, 0)
         sl_a, alpha_box = self._new_bound_int_slider(
             cfg_key='tentacle_alpha', default_value=170,
             soft_min=0, soft_max=255, hard_min=0, hard_max=255,
@@ -2981,7 +3567,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_alpha_spin = alpha_box
         g.addWidget(sl_a, r, 1, 1, 2); g.addWidget(alpha_box, r, 3); r += 1
 
-        g.addWidget(QLabel("数量:"), r, 0)
+        alpha_bind, alpha_base_lbl, alpha_rows, alpha_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_alpha', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-80.0, soft_max=80.0, hard_min=-255.0, hard_max=255.0,
+            decimals=1,
+        )
+        g.addWidget(alpha_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_alpha', label=alpha_label,
+            container=alpha_bind, base_label=alpha_base_lbl,
+            rows=alpha_rows, supports=('k', 'p'), weight_spins=alpha_weight_spins,
+        )
+
+        cnt_label = self._attach_kp_bindable_label(QLabel("数量:"), 'tentacle_count', supports=('k', 'p'))
+        g.addWidget(cnt_label, r, 0)
         cnt_slider, cnt_box = self._new_bound_int_slider(
             cfg_key='tentacle_count', default_value=16,
             soft_min=4, soft_max=32, hard_min=1, hard_max=128,
@@ -2991,7 +3591,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_count_spin = cnt_box
         g.addWidget(cnt_slider, r, 1, 1, 2); g.addWidget(cnt_box, r, 3); r += 1
 
-        g.addWidget(QLabel("长度:"), r, 0)
+        cnt_bind, cnt_base_lbl, cnt_rows, cnt_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_count', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-12.0, soft_max=12.0, hard_min=-256.0, hard_max=256.0,
+            decimals=2,
+        )
+        g.addWidget(cnt_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_count', label=cnt_label,
+            container=cnt_bind, base_label=cnt_base_lbl,
+            rows=cnt_rows, supports=('k', 'p'), weight_spins=cnt_weight_spins,
+        )
+
+        len_label = self._attach_kp_bindable_label(QLabel("长度:"), 'tentacle_length', supports=('k', 'p'))
+        g.addWidget(len_label, r, 0)
         len_slider, len_box = self._new_bound_float_slider(
             cfg_key='tentacle_length', default_value=280.0,
             soft_min=40.0, soft_max=600.0, hard_min=0.0, hard_max=4000.0,
@@ -3001,7 +3615,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_length_spin = len_box
         g.addWidget(len_slider, r, 1, 1, 2); g.addWidget(len_box, r, 3); r += 1
 
-        g.addWidget(QLabel("扰动长度:"), r, 0)
+        len_bind, len_base_lbl, len_rows, len_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_length', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-240.0, soft_max=240.0, hard_min=-4000.0, hard_max=4000.0,
+            decimals=2,
+        )
+        g.addWidget(len_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_length', label=len_label,
+            container=len_bind, base_label=len_base_lbl,
+            rows=len_rows, supports=('k', 'p'), weight_spins=len_weight_spins,
+        )
+
+        jitter_label = self._attach_kp_bindable_label(QLabel("扰动长度:"), 'tentacle_length_jitter', supports=('k', 'p'))
+        g.addWidget(jitter_label, r, 0)
         jitter_slider, jitter_box = self._new_bound_float_slider(
             cfg_key='tentacle_length_jitter', default_value=80.0,
             soft_min=0.0, soft_max=240.0, hard_min=0.0, hard_max=2000.0,
@@ -3011,25 +3639,92 @@ class VisualizerControlUI(QWidget):
         self.tentacle_length_jitter_spin = jitter_box
         g.addWidget(jitter_slider, r, 1, 1, 2); g.addWidget(jitter_box, r, 3); r += 1
 
-        cp_row = QHBoxLayout(); cp_row.setSpacing(6)
-        cp_row.addWidget(QLabel("控制点:"))
+        jitter_bind, jitter_base_lbl, jitter_rows, jitter_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_length_jitter', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-240.0, soft_max=240.0, hard_min=-2000.0, hard_max=2000.0,
+            decimals=2,
+        )
+        g.addWidget(jitter_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_length_jitter', label=jitter_label,
+            container=jitter_bind, base_label=jitter_base_lbl,
+            rows=jitter_rows, supports=('k', 'p'), weight_spins=jitter_weight_spins,
+        )
+
+        jitter_spd_label = self._attach_kp_bindable_label(QLabel("扰动速度:"), 'tentacle_length_jitter_speed', supports=('k', 'p'))
+        g.addWidget(jitter_spd_label, r, 0)
+        jitter_spd_slider, jitter_spd_box = self._new_bound_float_slider(
+            cfg_key='tentacle_length_jitter_speed', default_value=0.35,
+            soft_min=0.0, soft_max=3.0, hard_min=0.0, hard_max=20.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.tentacle_length_jitter_speed_slider = jitter_spd_slider
+        self.tentacle_length_jitter_speed_spin = jitter_spd_box
+        g.addWidget(jitter_spd_slider, r, 1, 1, 2); g.addWidget(jitter_spd_box, r, 3); r += 1
+
+        jitter_spd_bind, jitter_spd_base_lbl, jitter_spd_rows, jitter_spd_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_length_jitter_speed', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-1.5, soft_max=1.5, hard_min=-20.0, hard_max=20.0,
+            decimals=3,
+        )
+        g.addWidget(jitter_spd_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_length_jitter_speed', label=jitter_spd_label,
+            container=jitter_spd_bind, base_label=jitter_spd_base_lbl,
+            rows=jitter_spd_rows, supports=('k', 'p'), weight_spins=jitter_spd_weight_spins,
+        )
+
+        self.tentacle_length_jitter_random_check = QCheckBox("启用随机扰动")
+        self.tentacle_length_jitter_random_check.setChecked(self.config.get('tentacle_length_jitter_random', False))
+        self.tentacle_length_jitter_random_check.toggled.connect(lambda v: self._update_cfg('tentacle_length_jitter_random', bool(v)))
+        g.addWidget(self.tentacle_length_jitter_random_check, r, 0, 1, 4); r += 1
+
+        cp_min_label = self._attach_kp_bindable_label(QLabel("控制点最小:"), 'tentacle_control_points_min', supports=('k', 'p'))
+        g.addWidget(cp_min_label, r, 0)
         cp_min_box = self._new_int_box(
             default_value=3, soft_min=3, soft_max=9,
             hard_min=2, hard_max=24, step=1, cfg_key='tentacle_control_points_min'
         )
+        self.tentacle_cp_min_spin = cp_min_box
+        g.addWidget(cp_min_box, r, 3); r += 1
+        cp_min_bind, cp_min_base_lbl, cp_min_rows, cp_min_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_control_points_min', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-3.0, soft_max=3.0, hard_min=-24.0, hard_max=24.0,
+            decimals=2,
+        )
+        g.addWidget(cp_min_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_control_points_min', label=cp_min_label,
+            container=cp_min_bind, base_label=cp_min_base_lbl,
+            rows=cp_min_rows, supports=('k', 'p'), weight_spins=cp_min_weight_spins,
+        )
+
+        cp_max_label = self._attach_kp_bindable_label(QLabel("控制点最大:"), 'tentacle_control_points_max', supports=('k', 'p'))
+        g.addWidget(cp_max_label, r, 0)
         cp_max_box = self._new_int_box(
             default_value=5, soft_min=3, soft_max=9,
             hard_min=2, hard_max=24, step=1, cfg_key='tentacle_control_points_max'
         )
-        self.tentacle_cp_min_spin = cp_min_box
         self.tentacle_cp_max_spin = cp_max_box
-        cp_row.addWidget(cp_min_box)
-        cp_row.addWidget(QLabel("~"))
-        cp_row.addWidget(cp_max_box)
-        cp_row.addStretch()
-        g.addLayout(cp_row, r, 0, 1, 4); r += 1
+        g.addWidget(cp_max_box, r, 3); r += 1
+        cp_max_bind, cp_max_base_lbl, cp_max_rows, cp_max_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_control_points_max', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-3.0, soft_max=3.0, hard_min=-24.0, hard_max=24.0,
+            decimals=2,
+        )
+        g.addWidget(cp_max_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_control_points_max', label=cp_max_label,
+            container=cp_max_bind, base_label=cp_max_base_lbl,
+            rows=cp_max_rows, supports=('k', 'p'), weight_spins=cp_max_weight_spins,
+        )
 
-        g.addWidget(QLabel("末端权重:"), r, 0)
+        tip_bias_label = self._attach_kp_bindable_label(QLabel("末端权重:"), 'tentacle_tip_bias', supports=('k', 'p'))
+        g.addWidget(tip_bias_label, r, 0)
         tip_slider, tip_box = self._new_bound_float_slider(
             cfg_key='tentacle_tip_bias', default_value=1.85,
             soft_min=0.5, soft_max=3.0, hard_min=0.1, hard_max=20.0,
@@ -3038,8 +3733,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_tip_bias_slider = tip_slider
         self.tentacle_tip_bias_spin = tip_box
         g.addWidget(tip_slider, r, 1, 1, 2); g.addWidget(tip_box, r, 3); r += 1
+        tip_bias_bind, tip_bias_base_lbl, tip_bias_rows, tip_bias_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_tip_bias', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-2.0, soft_max=2.0, hard_min=-20.0, hard_max=20.0,
+            decimals=3,
+        )
+        g.addWidget(tip_bias_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_tip_bias', label=tip_bias_label,
+            container=tip_bias_bind, base_label=tip_bias_base_lbl,
+            rows=tip_bias_rows, supports=('k', 'p'), weight_spins=tip_bias_weight_spins,
+        )
 
-        g.addWidget(QLabel("末端粗细:"), r, 0)
+        tip_thickness_label = self._attach_kp_bindable_label(QLabel("末端粗细:"), 'tentacle_tip_thickness', supports=('k', 'p'))
+        g.addWidget(tip_thickness_label, r, 0)
         tip_thickness_slider, tip_thickness_box = self._new_bound_float_slider(
             cfg_key='tentacle_tip_thickness', default_value=0.15,
             soft_min=0.0, soft_max=1.0, hard_min=0.0, hard_max=1.0,
@@ -3048,12 +3756,25 @@ class VisualizerControlUI(QWidget):
         self.tentacle_tip_thickness_slider = tip_thickness_slider
         self.tentacle_tip_thickness_spin = tip_thickness_box
         g.addWidget(tip_thickness_slider, r, 1, 1, 2); g.addWidget(tip_thickness_box, r, 3); r += 1
+        tip_thickness_bind, tip_thickness_base_lbl, tip_thickness_rows, tip_thickness_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_tip_thickness', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-5.0, hard_max=5.0,
+            decimals=3,
+        )
+        g.addWidget(tip_thickness_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_tip_thickness', label=tip_thickness_label,
+            container=tip_thickness_bind, base_label=tip_thickness_base_lbl,
+            rows=tip_thickness_rows, supports=('k', 'p'), weight_spins=tip_thickness_weight_spins,
+        )
 
         soft_hdr = QLabel("── 柔体 / 水阻尼 ──")
         soft_hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
         g.addWidget(soft_hdr, r, 0, 1, 4); r += 1
 
-        g.addWidget(QLabel("紊流强度:"), r, 0)
+        turb_label = self._attach_kp_bindable_label(QLabel("紊流强度:"), 'tentacle_turbulence', supports=('k', 'p'))
+        g.addWidget(turb_label, r, 0)
         turb_slider, turb_box = self._new_bound_float_slider(
             cfg_key='tentacle_turbulence', default_value=46.0,
             soft_min=0.0, soft_max=160.0, hard_min=0.0, hard_max=2000.0,
@@ -3063,17 +3784,27 @@ class VisualizerControlUI(QWidget):
         self.tentacle_turbulence_spin = turb_box
         g.addWidget(turb_slider, r, 1, 1, 2); g.addWidget(turb_box, r, 3); r += 1
 
-        g.addWidget(QLabel("K 影响:"), r, 0)
-        kinf_slider, kinf_box = self._new_bound_float_slider(
-            cfg_key='tentacle_k_influence', default_value=1.35,
-            soft_min=0.0, soft_max=3.0, hard_min=0.0, hard_max=20.0,
-            slider_scale=100, step=0.01, decimals=2, width=72
+        turb_bind, turb_base_lbl, turb_rows, turb_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_turbulence', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.22, 0.683), 'p': (0.0, 0.0)},
+            soft_min=-2.0, soft_max=2.0, hard_min=-10.0, hard_max=10.0,
+            decimals=3,
         )
-        self.tentacle_k_influence_slider = kinf_slider
-        self.tentacle_k_influence_spin = kinf_box
-        g.addWidget(kinf_slider, r, 1, 1, 2); g.addWidget(kinf_box, r, 3); r += 1
+        self.kp_tentacle_turbulence_k_wmin_spin, self.kp_tentacle_turbulence_k_wmax_spin = turb_weight_spins['k']
+        self.kp_tentacle_turbulence_p_wmin_spin, self.kp_tentacle_turbulence_p_wmax_spin = turb_weight_spins['p']
+        g.addWidget(turb_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_turbulence',
+            label=turb_label,
+            container=turb_bind,
+            base_label=turb_base_lbl,
+            rows=turb_rows,
+            supports=('k', 'p'),
+            weight_spins=turb_weight_spins,
+        )
 
-        g.addWidget(QLabel("漂浮速度:"), r, 0)
+        sway_label = self._attach_kp_bindable_label(QLabel("漂浮速度:"), 'tentacle_sway_speed', supports=('k', 'p'))
+        g.addWidget(sway_label, r, 0)
         sway_slider, sway_box = self._new_bound_float_slider(
             cfg_key='tentacle_sway_speed', default_value=1.1,
             soft_min=0.0, soft_max=4.0, hard_min=0.0, hard_max=20.0,
@@ -3082,8 +3813,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_sway_speed_slider = sway_slider
         self.tentacle_sway_speed_spin = sway_box
         g.addWidget(sway_slider, r, 1, 1, 2); g.addWidget(sway_box, r, 3); r += 1
+        sway_bind, sway_base_lbl, sway_rows, sway_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_sway_speed', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-2.0, soft_max=2.0, hard_min=-20.0, hard_max=20.0,
+            decimals=3,
+        )
+        g.addWidget(sway_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_sway_speed', label=sway_label,
+            container=sway_bind, base_label=sway_base_lbl,
+            rows=sway_rows, supports=('k', 'p'), weight_spins=sway_weight_spins,
+        )
 
-        g.addWidget(QLabel("流场密度:"), r, 0)
+        density_label = self._attach_kp_bindable_label(QLabel("流场密度:"), 'tentacle_sway_density', supports=('k', 'p'))
+        g.addWidget(density_label, r, 0)
         density_slider, density_box = self._new_bound_float_slider(
             cfg_key='tentacle_sway_density', default_value=2.4,
             soft_min=0.2, soft_max=6.0, hard_min=0.0, hard_max=20.0,
@@ -3092,8 +3836,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_sway_density_slider = density_slider
         self.tentacle_sway_density_spin = density_box
         g.addWidget(density_slider, r, 1, 1, 2); g.addWidget(density_box, r, 3); r += 1
+        density_bind, density_base_lbl, density_rows, density_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_sway_density', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-3.0, soft_max=3.0, hard_min=-50.0, hard_max=50.0,
+            decimals=3,
+        )
+        g.addWidget(density_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_sway_density', label=density_label,
+            container=density_bind, base_label=density_base_lbl,
+            rows=density_rows, supports=('k', 'p'), weight_spins=density_weight_spins,
+        )
 
-        g.addWidget(QLabel("水阻尼:"), r, 0)
+        water_label = self._attach_kp_bindable_label(QLabel("水阻尼:"), 'tentacle_water_damping', supports=('k', 'p'))
+        g.addWidget(water_label, r, 0)
         water_slider, water_box = self._new_bound_float_slider(
             cfg_key='tentacle_water_damping', default_value=0.84,
             soft_min=0.0, soft_max=0.99, hard_min=0.0, hard_max=0.999,
@@ -3102,8 +3859,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_water_damping_slider = water_slider
         self.tentacle_water_damping_spin = water_box
         g.addWidget(water_slider, r, 1, 1, 2); g.addWidget(water_box, r, 3); r += 1
+        water_bind, water_base_lbl, water_rows, water_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_water_damping', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.3, soft_max=0.3, hard_min=-1.0, hard_max=1.0,
+            decimals=4,
+        )
+        g.addWidget(water_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_water_damping', label=water_label,
+            container=water_bind, base_label=water_base_lbl,
+            rows=water_rows, supports=('k', 'p'), weight_spins=water_weight_spins,
+        )
 
-        g.addWidget(QLabel("弯曲力:"), r, 0)
+        angle_label = self._attach_kp_bindable_label(QLabel("弯曲力:"), 'tentacle_angle_stiffness', supports=('k', 'p'))
+        g.addWidget(angle_label, r, 0)
         angle_slider, angle_box = self._new_bound_float_slider(
             cfg_key='tentacle_angle_stiffness', default_value=0.18,
             soft_min=0.0, soft_max=1.0, hard_min=0.0, hard_max=5.0,
@@ -3112,8 +3882,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_angle_stiffness_slider = angle_slider
         self.tentacle_angle_stiffness_spin = angle_box
         g.addWidget(angle_slider, r, 1, 1, 2); g.addWidget(angle_box, r, 3); r += 1
+        angle_bind, angle_base_lbl, angle_rows, angle_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_angle_stiffness', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-5.0, hard_max=5.0,
+            decimals=3,
+        )
+        g.addWidget(angle_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_angle_stiffness', label=angle_label,
+            container=angle_bind, base_label=angle_base_lbl,
+            rows=angle_rows, supports=('k', 'p'), weight_spins=angle_weight_spins,
+        )
 
-        g.addWidget(QLabel("拉伸力:"), r, 0)
+        length_hold_label = self._attach_kp_bindable_label(QLabel("拉伸力:"), 'tentacle_length_stiffness', supports=('k', 'p'))
+        g.addWidget(length_hold_label, r, 0)
         length_hold_slider, length_hold_box = self._new_bound_float_slider(
             cfg_key='tentacle_length_stiffness', default_value=0.24,
             soft_min=0.0, soft_max=1.0, hard_min=0.0, hard_max=5.0,
@@ -3122,8 +3905,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_length_stiffness_slider = length_hold_slider
         self.tentacle_length_stiffness_spin = length_hold_box
         g.addWidget(length_hold_slider, r, 1, 1, 2); g.addWidget(length_hold_box, r, 3); r += 1
+        length_hold_bind, length_hold_base_lbl, length_hold_rows, length_hold_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_length_stiffness', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-5.0, hard_max=5.0,
+            decimals=3,
+        )
+        g.addWidget(length_hold_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_length_stiffness', label=length_hold_label,
+            container=length_hold_bind, base_label=length_hold_base_lbl,
+            rows=length_hold_rows, supports=('k', 'p'), weight_spins=length_hold_weight_spins,
+        )
 
-        g.addWidget(QLabel("拉伸限制:"), r, 0)
+        stretch_limit_label = self._attach_kp_bindable_label(QLabel("拉伸限制:"), 'tentacle_stretch_limit', supports=('k', 'p'))
+        g.addWidget(stretch_limit_label, r, 0)
         stretch_limit_slider, stretch_limit_box = self._new_bound_float_slider(
             cfg_key='tentacle_stretch_limit', default_value=1.12,
             soft_min=1.0, soft_max=2.0, hard_min=1.0, hard_max=10.0,
@@ -3132,6 +3928,18 @@ class VisualizerControlUI(QWidget):
         self.tentacle_stretch_limit_slider = stretch_limit_slider
         self.tentacle_stretch_limit_spin = stretch_limit_box
         g.addWidget(stretch_limit_slider, r, 1, 1, 2); g.addWidget(stretch_limit_box, r, 3); r += 1
+        stretch_bind, stretch_base_lbl, stretch_rows, stretch_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_stretch_limit', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-10.0, hard_max=10.0,
+            decimals=3,
+        )
+        g.addWidget(stretch_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_stretch_limit', label=stretch_limit_label,
+            container=stretch_bind, base_label=stretch_base_lbl,
+            rows=stretch_rows, supports=('k', 'p'), weight_spins=stretch_weight_spins,
+        )
 
         shader_hdr = QLabel("── Shader 渐变 ──")
         shader_hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
@@ -3153,7 +3961,8 @@ class VisualizerControlUI(QWidget):
         g.addWidget(QLabel("尾色"), r, 2)
         r += 1
 
-        g.addWidget(QLabel("起始透明:"), r, 0)
+        alpha_start_label = self._attach_kp_bindable_label(QLabel("起始透明:"), 'tentacle_shader_alpha_start', supports=('k', 'p'))
+        g.addWidget(alpha_start_label, r, 0)
         alpha_start_slider, alpha_start_box = self._new_bound_float_slider(
             cfg_key='tentacle_shader_alpha_start', default_value=1.0,
             soft_min=0.0, soft_max=1.0, hard_min=0.0, hard_max=1.0,
@@ -3162,8 +3971,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_shader_alpha_start_slider = alpha_start_slider
         self.tentacle_shader_alpha_start_spin = alpha_start_box
         g.addWidget(alpha_start_slider, r, 1, 1, 2); g.addWidget(alpha_start_box, r, 3); r += 1
+        alpha_start_bind, alpha_start_base_lbl, alpha_start_rows, alpha_start_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_shader_alpha_start', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-1.0, hard_max=1.0,
+            decimals=4,
+        )
+        g.addWidget(alpha_start_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_shader_alpha_start', label=alpha_start_label,
+            container=alpha_start_bind, base_label=alpha_start_base_lbl,
+            rows=alpha_start_rows, supports=('k', 'p'), weight_spins=alpha_start_weight_spins,
+        )
 
-        g.addWidget(QLabel("末端透明:"), r, 0)
+        alpha_end_label = self._attach_kp_bindable_label(QLabel("末端透明:"), 'tentacle_shader_alpha_end', supports=('k', 'p'))
+        g.addWidget(alpha_end_label, r, 0)
         alpha_end_slider, alpha_end_box = self._new_bound_float_slider(
             cfg_key='tentacle_shader_alpha_end', default_value=0.18,
             soft_min=0.0, soft_max=1.0, hard_min=0.0, hard_max=1.0,
@@ -3172,8 +3994,21 @@ class VisualizerControlUI(QWidget):
         self.tentacle_shader_alpha_end_slider = alpha_end_slider
         self.tentacle_shader_alpha_end_spin = alpha_end_box
         g.addWidget(alpha_end_slider, r, 1, 1, 2); g.addWidget(alpha_end_box, r, 3); r += 1
+        alpha_end_bind, alpha_end_base_lbl, alpha_end_rows, alpha_end_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_shader_alpha_end', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-0.5, soft_max=0.5, hard_min=-1.0, hard_max=1.0,
+            decimals=4,
+        )
+        g.addWidget(alpha_end_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_shader_alpha_end', label=alpha_end_label,
+            container=alpha_end_bind, base_label=alpha_end_base_lbl,
+            rows=alpha_end_rows, supports=('k', 'p'), weight_spins=alpha_end_weight_spins,
+        )
 
-        g.addWidget(QLabel("渐变偏置:"), r, 0)
+        shader_bias_label = self._attach_kp_bindable_label(QLabel("渐变偏置:"), 'tentacle_shader_bias', supports=('k', 'p'))
+        g.addWidget(shader_bias_label, r, 0)
         shader_bias_slider, shader_bias_box = self._new_bound_float_slider(
             cfg_key='tentacle_shader_bias', default_value=1.15,
             soft_min=0.1, soft_max=3.0, hard_min=0.1, hard_max=10.0,
@@ -3182,6 +4017,18 @@ class VisualizerControlUI(QWidget):
         self.tentacle_shader_bias_slider = shader_bias_slider
         self.tentacle_shader_bias_spin = shader_bias_box
         g.addWidget(shader_bias_slider, r, 1, 1, 2); g.addWidget(shader_bias_box, r, 3); r += 1
+        shader_bias_bind, shader_bias_base_lbl, shader_bias_rows, shader_bias_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_shader_bias', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-1.0, soft_max=1.0, hard_min=-10.0, hard_max=10.0,
+            decimals=3,
+        )
+        g.addWidget(shader_bias_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_shader_bias', label=shader_bias_label,
+            container=shader_bias_bind, base_label=shader_bias_base_lbl,
+            rows=shader_bias_rows, supports=('k', 'p'), weight_spins=shader_bias_weight_spins,
+        )
 
         core_hdr = QLabel("── 中心旋转驱动 ──")
         core_hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
@@ -3198,7 +4045,8 @@ class VisualizerControlUI(QWidget):
         self.tentacle_core_on_check = core_check
         g.addWidget(core_check, r, 0, 1, 4); r += 1
 
-        g.addWidget(QLabel("基础角加速度:"), r, 0)
+        core_base_label = self._attach_kp_bindable_label(QLabel("基础角加速度:"), 'tentacle_core_base_speed', supports=('k', 'p'))
+        g.addWidget(core_base_label, r, 0)
         core_base_slider, core_base_box = self._new_bound_float_slider(
             cfg_key='tentacle_core_base_speed', default_value=0.75,
             soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
@@ -3208,25 +4056,24 @@ class VisualizerControlUI(QWidget):
         self.tentacle_core_base_speed_spin = core_base_box
         g.addWidget(core_base_slider, r, 1, 1, 2); g.addWidget(core_base_box, r, 3); r += 1
 
-        g.addWidget(QLabel("K 角加速度:"), r, 0)
-        core_k_slider, core_k_box = self._new_bound_float_slider(
-            cfg_key='tentacle_core_k_speed', default_value=1.2,
+        core_bind, core_base_lbl, core_rows, core_weight_spins = self._build_kp_binding_container(
+            cfg_key='tentacle_core_base_speed', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 1.2), 'p': (0.0, 1.35)},
             soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
-            slider_scale=100, step=0.01, decimals=2, width=72
+            decimals=3,
         )
-        self.tentacle_core_k_speed_slider = core_k_slider
-        self.tentacle_core_k_speed_spin = core_k_box
-        g.addWidget(core_k_slider, r, 1, 1, 2); g.addWidget(core_k_box, r, 3); r += 1
-
-        g.addWidget(QLabel("P 角加速度:"), r, 0)
-        core_p_slider, core_p_box = self._new_bound_float_slider(
-            cfg_key='tentacle_core_p_speed', default_value=1.35,
-            soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
-            slider_scale=100, step=0.01, decimals=2, width=72
+        self.kp_tentacle_core_base_speed_k_wmin_spin, self.kp_tentacle_core_base_speed_k_wmax_spin = core_weight_spins['k']
+        self.kp_tentacle_core_base_speed_p_wmin_spin, self.kp_tentacle_core_base_speed_p_wmax_spin = core_weight_spins['p']
+        g.addWidget(core_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='tentacle_core_base_speed',
+            label=core_base_label,
+            container=core_bind,
+            base_label=core_base_lbl,
+            rows=core_rows,
+            supports=('k', 'p'),
+            weight_spins=core_weight_spins,
         )
-        self.tentacle_core_p_speed_slider = core_p_slider
-        self.tentacle_core_p_speed_spin = core_p_box
-        g.addWidget(core_p_slider, r, 1, 1, 2); g.addWidget(core_p_box, r, 3); r += 1
 
         s.add_layout(g)
         return s
@@ -3474,7 +4321,7 @@ class VisualizerControlUI(QWidget):
             ]
             props.append((bname, cat_props))
 
-        props.append(("水母触须", [
+        props.append(("水母", [
             ("显示", "tentacle_on", "bool"),
             ("颜色", "tentacle_color", "color"),
             ("透明度", "tentacle_alpha", "int", 0, 255),
@@ -3789,30 +4636,39 @@ class VisualizerControlUI(QWidget):
         else:
             cur = (255, 255, 255)
 
-        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
-        if picker.exec() != QDialog.Accepted or not picker.selected_rgb:
-            return
-        new_col = picker.selected_rgb
-
-        # 如果当前为自定义渐变并且存在对应控制点，则更新控制点
+        cfg_prefix = f"palette_cell_{idx}"
         if self.config.get('color_scheme', 'rainbow') == 'custom' and self.config.get('gradient_enabled', True):
             pts = list(self.config.get('gradient_points', []))
             if idx < len(pts):
-                pts[idx] = (pts[idx][0], new_col)
-            else:
-                # append at end with guessed position
-                pos = min(1.0, max(0.0, idx / max(1, len(self.palette_preview_cells) - 1)))
-                pts.append((pos, new_col))
-            self._update_cfg('gradient_points', pts)
+                cfg_prefix = f"gradient_points_{idx}_color"
         else:
-            # 否则映射到 c1..c5
             li = (idx % 5) + 1
-            key = f'c{li}_color'
-            self._update_cfg(key, new_col)
+            cfg_prefix = f"c{li}_color"
 
-        # 立即刷新 UI 与渲染
-        self._update_color_preview_strip()
-        self._apply_config_to_ui(self.config)
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=cfg_prefix)
+
+        def _apply(new_col):
+            # 如果当前为自定义渐变并且存在对应控制点，则更新控制点
+            if self.config.get('color_scheme', 'rainbow') == 'custom' and self.config.get('gradient_enabled', True):
+                pts = list(self.config.get('gradient_points', []))
+                if idx < len(pts):
+                    pts[idx] = (pts[idx][0], new_col)
+                else:
+                    pos = min(1.0, max(0.0, idx / max(1, len(self.palette_preview_cells) - 1)))
+                    pts.append((pos, new_col))
+                self._update_cfg('gradient_points', pts)
+            else:
+                li = (idx % 5) + 1
+                key = f'c{li}_color'
+                self._update_cfg(key, new_col)
+                if hasattr(self, f'c{li}_color_btn'):
+                    getattr(self, f'c{li}_color_btn').setStyleSheet(
+                        f"background:rgb({new_col[0]},{new_col[1]},{new_col[2]}); border:1px solid #aaa; border-radius:2px;"
+                    )
+            self._update_color_preview_strip()
+
+        picker.colorSelected.connect(_apply)
+        picker.exec()
 
     # ═══════════════════════════════════════════════════════
     #  颜色控制回调
@@ -3826,12 +4682,28 @@ class VisualizerControlUI(QWidget):
     def _pick_layer_color(self, layer_idx):
         key = f'c{layer_idx}_color'
         cur = self.config.get(key, (255, 255, 255))
-        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
-        if picker.exec() == QDialog.Accepted and picker.selected_rgb:
-            rgb = picker.selected_rgb
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=key)
+
+        def _apply(rgb):
             btn = getattr(self, f'c{layer_idx}_color_btn')
             btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
             self._update_cfg(key, rgb)
+            self._update_color_preview_strip()
+
+        picker.colorSelected.connect(_apply)
+        picker.exec()
+
+    def _pick_special_color(self, cfg_key: str, btn: QPushButton | None = None):
+        cur = self.config.get(cfg_key, (255, 255, 255))
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=cfg_key)
+
+        def _apply(rgb):
+            if btn is not None:
+                btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
+            self._update_cfg(cfg_key, rgb)
+
+        picker.colorSelected.connect(_apply)
+        picker.exec()
 
     def _on_dynamic_toggled(self, v):
         self._update_cfg('color_dynamic', v)
@@ -3882,12 +4754,18 @@ class VisualizerControlUI(QWidget):
         if idx >= len(pts):
             return
         cur = pts[idx][1]
-        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12))
-        if picker.exec() == QDialog.Accepted and picker.selected_rgb:
-            rgb = picker.selected_rgb
+        picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=f"gradient_points_{idx}_color")
+
+        def _apply(rgb):
             btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
-            pts[idx] = (pts[idx][0], rgb)
-            self._update_cfg('gradient_points', pts)
+            pts2 = list(self.config.get('gradient_points', []))
+            if idx < len(pts2):
+                pts2[idx] = (pts2[idx][0], rgb)
+                self._update_cfg('gradient_points', pts2)
+                self._update_color_preview_strip()
+
+        picker.colorSelected.connect(_apply)
+        picker.exec()
 
     def _add_gradient_point(self):
         pts = list(self.config.get('gradient_points', []))
@@ -4097,12 +4975,19 @@ class VisualizerControlUI(QWidget):
             self.tentacle_count_slider.setValue(d.get('tentacle_count', 16))
             self.tentacle_length_slider.setValue(int(round(float(d.get('tentacle_length', 280.0)) * 10)))
             self.tentacle_length_jitter_slider.setValue(int(round(float(d.get('tentacle_length_jitter', 80.0)) * 10)))
+            if hasattr(self, 'tentacle_length_jitter_speed_slider'):
+                self.tentacle_length_jitter_speed_slider.setValue(int(round(float(d.get('tentacle_length_jitter_speed', 0.35)) * 100)))
+            if hasattr(self, 'tentacle_length_jitter_random_check'):
+                self.tentacle_length_jitter_random_check.setChecked(bool(d.get('tentacle_length_jitter_random', False)))
             _ssv(self.tentacle_cp_min_spin, d.get('tentacle_control_points_min', 3))
             _ssv(self.tentacle_cp_max_spin, d.get('tentacle_control_points_max', 5))
             self.tentacle_tip_bias_slider.setValue(int(round(float(d.get('tentacle_tip_bias', 1.85)) * 100)))
             self.tentacle_tip_thickness_slider.setValue(int(round(float(d.get('tentacle_tip_thickness', 0.15)) * 100)))
             self.tentacle_turbulence_slider.setValue(int(round(float(d.get('tentacle_turbulence', 46.0)) * 10)))
-            self.tentacle_k_influence_slider.setValue(int(round(float(d.get('tentacle_k_influence', 1.35)) * 100)))
+            if hasattr(self, 'kp_tentacle_turbulence_k_wmin_spin'):
+                _ssv(self.kp_tentacle_turbulence_k_wmin_spin, float(d.get('kp_tentacle_turbulence_k_wmin', 0.22)))
+            if hasattr(self, 'kp_tentacle_turbulence_k_wmax_spin'):
+                _ssv(self.kp_tentacle_turbulence_k_wmax_spin, float(d.get('kp_tentacle_turbulence_k_wmax', 0.683)))
             self.tentacle_sway_speed_slider.setValue(int(round(float(d.get('tentacle_sway_speed', 1.1)) * 100)))
             self.tentacle_sway_density_slider.setValue(int(round(float(d.get('tentacle_sway_density', 2.4)) * 100)))
             self.tentacle_water_damping_slider.setValue(int(round(float(d.get('tentacle_water_damping', 0.84)) * 1000)))
@@ -4118,8 +5003,24 @@ class VisualizerControlUI(QWidget):
             self.tentacle_shader_bias_slider.setValue(int(round(float(d.get('tentacle_shader_bias', 1.15)) * 100)))
             self.tentacle_core_on_check.setChecked(d.get('tentacle_core_on', True))
             self.tentacle_core_base_speed_slider.setValue(int(round(float(d.get('tentacle_core_base_speed', 0.75)) * 100)))
-            self.tentacle_core_k_speed_slider.setValue(int(round(float(d.get('tentacle_core_k_speed', 1.2)) * 100)))
-            self.tentacle_core_p_speed_slider.setValue(int(round(float(d.get('tentacle_core_p_speed', 1.35)) * 100)))
+            if hasattr(self, 'kp_tentacle_core_base_speed_k_wmin_spin'):
+                _ssv(self.kp_tentacle_core_base_speed_k_wmin_spin, float(d.get('kp_tentacle_core_base_speed_k_wmin', 0.0)))
+            if hasattr(self, 'kp_tentacle_core_base_speed_k_wmax_spin'):
+                _ssv(self.kp_tentacle_core_base_speed_k_wmax_spin, float(d.get('kp_tentacle_core_base_speed_k_wmax', 1.2)))
+            if hasattr(self, 'kp_tentacle_core_base_speed_p_wmin_spin'):
+                _ssv(self.kp_tentacle_core_base_speed_p_wmin_spin, float(d.get('kp_tentacle_core_base_speed_p_wmin', 0.0)))
+            if hasattr(self, 'kp_tentacle_core_base_speed_p_wmax_spin'):
+                _ssv(self.kp_tentacle_core_base_speed_p_wmax_spin, float(d.get('kp_tentacle_core_base_speed_p_wmax', 1.35)))
+
+            # K/P 绑定：统一回填权重范围，并刷新显隐/高亮
+            if hasattr(self, '_kp_binding_meta'):
+                for _cfg_key, _meta in self._kp_binding_meta.items():
+                    _weight_spins = _meta.get('weight_spins') or {}
+                    for _sig, (_wmin_spin, _wmax_spin) in _weight_spins.items():
+                        _ssv(_wmin_spin, float(d.get(self._kp_wmin_key(_cfg_key, _sig), _wmin_spin.value())))
+                        _ssv(_wmax_spin, float(d.get(self._kp_wmax_key(_cfg_key, _sig), _wmax_spin.value())))
+                    if hasattr(self, '_update_kp_binding_ui'):
+                        self._update_kp_binding_ui(_cfg_key)
         finally:
             self._applying_config = False
 
