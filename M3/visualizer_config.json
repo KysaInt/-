@@ -170,8 +170,8 @@
   "tentacle_on": true,
   "tentacle_color": [
     0,
-    116,
-    189
+    224,
+    131
   ],
   "tentacle_alpha": 255,
   "tentacle_thick": 1,
@@ -338,7 +338,7 @@
   "kp_tentacle_thick_p_wmax": 0.0,
   "kp_tentacle_thick_p_wmin": 150.0,
   "kp_bind_tentacle_thick_k": true,
-  "kp_tentacle_thick_k_wmax": 200.0,
+  "kp_tentacle_thick_k_wmax": 250.0,
   "kp_tentacle_thick_k_wmin": 0.0,
   "kp_bind_tentacle_length_k": true,
   "kp_tentacle_length_k_wmax": 300.0,
@@ -348,8 +348,8 @@
   "kp_tentacle_shader_alpha_start_p_wmax": 1.0,
   "kp_bind_tentacle_shader_alpha_start_k": false,
   "kp_tentacle_shader_alpha_start_k_wmax": 1.0,
-  "kp_bind_tentacle_color__l_k": true,
-  "kp_tentacle_color__l_k_wmax": 20.0,
+  "kp_bind_tentacle_color__l_k": false,
+  "kp_tentacle_color__l_k_wmax": 100.0,
   "kp_bind_tentacle_shader_tip_color__l_p": false,
   "kp_tentacle_shader_tip_color__l_p_wmax": 255.0,
   "kp_tentacle_shader_tip_color__l_p_wmin": 200.0,
@@ -357,10 +357,12 @@
   "kp_tentacle_shader_tip_color__l_k_wmin": 0.0,
   "kp_tentacle_shader_tip_color__l_k_wmax": 255.0,
   "kp_bind_tentacle_color__h_k": false,
-  "kp_tentacle_color__h_k_wmax": 255.0,
-  "kp_tentacle_color__h_k_wmin": 255.0,
+  "kp_tentacle_color__h_k_wmax": 150.0,
+  "kp_tentacle_color__h_k_wmin": 120.0,
   "kp_bind_tentacle_color__s_k": false,
   "kp_tentacle_color__s_k_wmax": 255.0,
   "kp_bind_tentacle_length_jitter_k": true,
-  "kp_tentacle_length_jitter_k_wmax": 8000.0
+  "kp_tentacle_length_jitter_k_wmax": 8000.0,
+  "kp_bind_tentacle_color__h_p": false,
+  "kp_tentacle_color__h_p_wmax": 255.0
 }
