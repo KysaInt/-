@@ -503,9 +503,6 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
             for tentacle_item in state.get("tentacles", []):
                 self.owner._paint_weighted_segments(painter, tentacle_item["segments"])
 
-            for blackhole_item in state.get("blackholes", []):
-                self.owner._paint_blackhole_effect(painter, blackhole_item)
-
             for bar_item in state.get("bars", []):
                 self.owner._paint_segments(painter, bar_item["segments"], bar_item["thickness"])
 
@@ -605,7 +602,7 @@ class CircularVisualizerWindow(QWidget):
         self.current_radius = float(self.config.get("circle_radius", 150))
         self.radius_velocity = 0.0
 
-        self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "blackholes": [], "bars": [], "lines": []}
+        self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "bars": [], "lines": []}
         self._window_ready = False
 
         self._update_colors()
@@ -1193,244 +1190,6 @@ class CircularVisualizerWindow(QWidget):
         pos_y = cy + radius * np.sin(angles)
         return list(zip(pos_x, pos_y))
 
-    @staticmethod
-    def _gas_noise(t, i, freq1=0.068, freq2=0.187, freq3=0.031, freq4=0.29):
-        """多频正弦叠加模拟气体密度噪波，返回 [0, 1]."""
-        return max(0.0, min(1.0, 0.5
-            + math.sin(t       + i * freq1) * 0.38
-            + math.sin(t * 1.73 + i * freq2 + 1.3) * 0.28
-            + math.sin(t * 2.51 + i * freq3 - 0.7) * 0.14
-            + math.sin(t * 0.63 + i * freq4 + 2.2) * 0.09
-        ))
-
-    @staticmethod
-    def _build_heart_points(cx, cy, size, rotation=0.0, vertical_scale=1.0, samples=180):
-        count = max(64, int(samples))
-        angles = np.linspace(0.0, math.tau, count, endpoint=False)
-        cos_r = math.cos(rotation)
-        sin_r = math.sin(rotation)
-        points = []
-        denom = 17.0
-        for angle in angles:
-            local_x = 16.0 * math.sin(angle) ** 3
-            local_y = -(13.0 * math.cos(angle) - 5.0 * math.cos(2.0 * angle) - 2.0 * math.cos(3.0 * angle) - math.cos(4.0 * angle))
-            local_x = local_x / denom * size
-            local_y = local_y / denom * size * vertical_scale
-            rot_x = local_x * cos_r - local_y * sin_r
-            rot_y = local_x * sin_r + local_y * cos_r
-            points.append((cx + rot_x, cy + rot_y))
-        return points
-
-    @staticmethod
-    def _build_ellipse_points(cx, cy, radius_x, radius_y, rotation=0.0, samples=144, wobble=0.0, wobble_freq=3.0, phase=0.0, shear=0.0):
-        count = max(48, int(samples))
-        angles = np.linspace(0.0, math.tau, count, endpoint=False)
-        cos_r = math.cos(rotation)
-        sin_r = math.sin(rotation)
-        points = []
-        for angle in angles:
-            radius_scale = 1.0
-            if wobble > 1e-6:
-                radius_scale += wobble * math.sin(angle * wobble_freq + phase)
-                radius_scale += wobble * 0.45 * math.cos(angle * (wobble_freq * 0.5 + 0.7) - phase * 0.6)
-            local_x = math.cos(angle) * radius_x * radius_scale
-            local_y = math.sin(angle) * radius_y * (1.0 - wobble * 0.35 * math.cos(angle - phase))
-            local_x += local_y * shear
-            rot_x = local_x * cos_r - local_y * sin_r
-            rot_y = local_x * sin_r + local_y * cos_r
-            points.append((cx + rot_x, cy + rot_y))
-        return points
-
-    def _build_blackhole_heart_effect(self, cx, cy, radius, scale):
-        if not self.config.get("blackhole_heart_on", True):
-            return None
-
-        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
-        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
-
-        def _kp_bind_key(cfg_key: str, sig: str) -> str:
-            return f"kp_bind_{cfg_key}_{sig}"
-
-        def _kp_wmin_key(cfg_key: str, sig: str) -> str:
-            return f"kp_{cfg_key}_{sig}_wmin"
-
-        def _kp_wmax_key(cfg_key: str, sig: str) -> str:
-            return f"kp_{cfg_key}_{sig}_wmax"
-
-        def _kp_delta(cfg_key: str, sig: str, normalized: float) -> float:
-            if not bool(self.config.get(_kp_bind_key(cfg_key, sig), False)):
-                return 0.0
-            wmin = float(self.config.get(_kp_wmin_key(cfg_key, sig), 0.0))
-            wmax = float(self.config.get(_kp_wmax_key(cfg_key, sig), 0.0))
-            return wmin + (wmax - wmin) * max(0.0, min(1.0, float(normalized)))
-
-        def _kp_add(cfg_key: str, base_value: float) -> float:
-            return float(base_value) + _kp_delta(cfg_key, "k", normalized_k) + _kp_delta(cfg_key, "p", normalized_p)
-
-        base_color = tuple(int(channel) for channel in self.config.get("blackhole_heart_color", (255, 88, 118)))
-        warm_color = self._lerp_color(base_color, (255, 194, 82), 0.58)
-        cool_color = self._lerp_color(base_color, (88, 190, 255), 0.52)
-        white_hot = self._lerp_color(base_color, (255, 244, 224), 0.78)
-
-        heart_alpha = int(round(_kp_add("blackhole_heart_alpha", float(self.config.get("blackhole_heart_alpha", 220)))))
-        heart_alpha = max(0, min(255, heart_alpha))
-        heart_size = max(6.0, _kp_add("blackhole_heart_size", float(self.config.get("blackhole_heart_size", 28.0))) * scale)
-        heart_thickness = max(0.6, _kp_add("blackhole_heart_thick", float(self.config.get("blackhole_heart_thick", 2.8))))
-        shadow_radius = max(10.0, _kp_add("blackhole_shadow_radius", float(self.config.get("blackhole_shadow_radius", 30.0))) * scale)
-        disk_radius = max(shadow_radius * 1.35, _kp_add("blackhole_disk_radius", float(self.config.get("blackhole_disk_radius", 108.0))) * scale)
-        disk_thickness = max(4.0, _kp_add("blackhole_disk_thickness", float(self.config.get("blackhole_disk_thickness", 34.0))) * scale)
-        spin_speed = max(-6.0, min(6.0, _kp_add("blackhole_spin_speed", float(self.config.get("blackhole_spin_speed", 0.28)))))
-        curvature = max(0.0, min(1.8, _kp_add("blackhole_curvature", float(self.config.get("blackhole_curvature", 0.40)))))
-        lens_strength = max(0.0, min(2.4, _kp_add("blackhole_lens_strength", float(self.config.get("blackhole_lens_strength", 0.70)))))
-        turbulence = max(0.0, min(2.5, _kp_add("blackhole_disk_turbulence", float(self.config.get("blackhole_disk_turbulence", 0.20)))))
-        glow = max(0.0, min(2.0, _kp_add("blackhole_glow", float(self.config.get("blackhole_glow", 0.65)))))
-        loop_thick_head = max(0.5, float(self.config.get("blackhole_loop_thick_head", 3.2)))
-        loop_thick_tail = max(0.1, min(loop_thick_head - 0.1, float(self.config.get("blackhole_loop_thick_tail", 0.35))))
-
-        pulse = 1.0 + normalized_k * 0.13 + normalized_p * 0.07
-        heart_size *= pulse
-        shadow_radius *= 0.96 + normalized_k * 0.08
-        # 极慢旋转：time系数大幅降低，tentacle_core_rotation几乎不混入
-        swirl_phase = time.time() * (0.022 + abs(spin_speed) * 0.038) + self.tentacle_core_rotation * 0.028
-        shear = math.sin(swirl_phase * 0.08) * (0.06 + curvature * 0.14)
-
-        heart_points = self._build_heart_points(
-            cx,
-            cy,
-            heart_size,
-            rotation=swirl_phase * 0.02,
-            vertical_scale=0.86 + curvature * 0.16,
-            samples=180,
-        )
-
-        # ── 吸积盘：每段独立颜色/透明度/粗细 + 气体噪波 ──
-        disk_segments = []
-        layer_count = 5
-        for layer_index in range(layer_count):
-            layer_ratio = layer_index / max(1, layer_count - 1)
-            orbit_radius_x = disk_radius + (layer_ratio - 0.5) * disk_thickness * 0.95
-            orbit_radius_y = max(shadow_radius * 0.42, orbit_radius_x * (0.13 + curvature * 0.07) * (1.0 + layer_ratio * 0.16))
-            points = self._build_ellipse_points(
-                cx, cy, orbit_radius_x, orbit_radius_y,
-                rotation=swirl_phase * 0.06 + layer_ratio * 0.10 * (1.0 if spin_speed >= 0.0 else -1.0),
-                samples=156,
-                wobble=(0.012 + turbulence * 0.022) * (0.5 + layer_ratio * 0.8),
-                wobble_freq=3.0 + layer_index,
-                phase=swirl_phase * (0.09 + layer_ratio * 0.025),
-                shear=shear,
-            )
-            point_count = len(points)
-            noise_seed_a = swirl_phase * 0.14 + layer_index * 5.7
-            noise_seed_t = swirl_phase * 0.11 + layer_index * 3.2 + 1.8
-            for index in range(point_count):
-                start = points[index]
-                end = points[(index + 1) % point_count]
-                angle = (index / max(1, point_count)) * math.tau
-                doppler = 0.5 + 0.5 * math.cos(angle - swirl_phase * 0.07)
-                hot_mix = min(1.0, max(0.0, 0.18 + doppler * (0.82 + normalized_p * 0.25)))
-                color = self._lerp_color(cool_color, warm_color, hot_mix)
-                if doppler > 0.72:
-                    color = self._lerp_color(color, white_hot, (doppler - 0.72) / 0.28)
-                gas_a = self._gas_noise(noise_seed_a, index, freq1=0.068, freq2=0.17, freq3=0.031)
-                base_alpha = (48 + (1.0 - layer_ratio) * 120 + normalized_k * 32) * (0.55 + glow * 0.65) * (0.58 + doppler * 0.62)
-                alpha = int(round(base_alpha * (0.30 + gas_a * 0.70)))
-                alpha = max(0, min(255, alpha))
-                gas_t = self._gas_noise(noise_seed_t, index, freq1=0.055, freq2=0.13)
-                base_thick = loop_thick_tail + (loop_thick_head - loop_thick_tail) * (1.0 - layer_ratio) * (0.5 + doppler * 0.5)
-                thickness = base_thick * (0.45 + gas_t * 0.65)
-                if alpha <= 0:
-                    continue
-                disk_segments.append((start, end, (*color, alpha), max(0.2, thickness)))
-
-        # ── 透镜环：每段气体噪波 + 首尾锥度 ──
-        lens_loops = []
-        for ring_index in range(3):
-            ring_ratio = ring_index / 2.0
-            loop_radius_x = shadow_radius * (1.16 + ring_index * 0.26) + disk_thickness * 0.08
-            loop_radius_y = loop_radius_x * (0.56 + curvature * 0.18 + ring_ratio * 0.05)
-            loop_points = self._build_ellipse_points(
-                cx, cy, loop_radius_x, loop_radius_y,
-                rotation=swirl_phase * (0.009 + ring_ratio * 0.005) - ring_ratio * 0.2,
-                samples=112,
-                wobble=(0.010 + lens_strength * 0.016) * (1.0 + ring_ratio * 0.3),
-                wobble_freq=2.0 + ring_index,
-                phase=swirl_phase * 0.055 + ring_ratio,
-                shear=shear * 0.25,
-            )
-            loop_base_color = self._lerp_color((196, 214, 255), warm_color, 0.18 + ring_ratio * 0.16)
-            base_alpha = (58 + lens_strength * 68) * (1.0 - ring_ratio * 0.18) * (0.50 + glow * 0.50)
-            ns_a = swirl_phase * 0.11 + ring_index * 3.8 + 10.0
-            ns_t = swirl_phase * 0.09 + ring_index * 2.6 + 13.5
-            N = len(loop_points)
-            loop_segs = []
-            for i in range(N):
-                start = loop_points[i]
-                end = loop_points[(i + 1) % N]
-                angle_t = i / max(1, N)
-                doppler = 0.5 + 0.5 * (0.5 + 0.5 * math.cos(angle_t * math.tau - swirl_phase * 0.06 + ring_index))
-                gas_a = self._gas_noise(ns_a, i, freq1=0.091, freq2=0.203, freq3=0.047)
-                gas_t2 = self._gas_noise(ns_t, i, freq1=0.059, freq2=0.128)
-                taper_wave = 0.5 + 0.5 * math.sin(angle_t * math.tau * 2.5 + swirl_phase * 0.04 + ring_index * 1.2)
-                thickness = (loop_thick_tail + (loop_thick_head - loop_thick_tail) * taper_wave) * (0.55 + gas_t2 * 0.55)
-                final_alpha = int(round(base_alpha * gas_a * doppler))
-                final_alpha = max(0, min(255, final_alpha))
-                if final_alpha > 0:
-                    loop_segs.append((start, end, (*loop_base_color, final_alpha), max(0.2, thickness)))
-            lens_loops.append({"segments": loop_segs})
-
-        # ── 辉光环：每段气体噪波 + 首尾锥度 ──
-        glow_loops = []
-        for glow_index in range(2):
-            glow_ratio = glow_index / 1.0
-            glow_radius_x = shadow_radius * (1.02 + glow_ratio * 0.18)
-            glow_radius_y = glow_radius_x * (0.84 + curvature * 0.06)
-            glow_points = self._build_ellipse_points(
-                cx, cy, glow_radius_x, glow_radius_y,
-                rotation=swirl_phase * 0.018 + glow_ratio * 0.35,
-                samples=108,
-                wobble=(0.008 + glow * 0.010) * (1.0 + glow_ratio * 0.25),
-                wobble_freq=2.0 + glow_index,
-                phase=swirl_phase * 0.065,
-                shear=shear * 0.15,
-            )
-            glow_base_color = self._lerp_color(warm_color, white_hot, 0.35 + glow_ratio * 0.22)
-            base_alpha = (56 + glow * 88) * (1.0 - glow_ratio * 0.22)
-            ns_a = swirl_phase * 0.09 + glow_index * 7.2 + 20.0
-            ns_t = swirl_phase * 0.07 + glow_index * 5.1 + 24.0
-            N = len(glow_points)
-            glow_segs = []
-            for i in range(N):
-                start = glow_points[i]
-                end = glow_points[(i + 1) % N]
-                angle_t = i / max(1, N)
-                gas_a = self._gas_noise(ns_a, i, freq1=0.075, freq2=0.183, freq3=0.038)
-                gas_t2 = self._gas_noise(ns_t, i, freq1=0.048, freq2=0.107)
-                taper_wave = 0.5 + 0.5 * math.sin(angle_t * math.tau * 1.8 + swirl_phase * 0.03 + glow_index * 2.3)
-                thickness = (loop_thick_tail + (loop_thick_head - loop_thick_tail) * taper_wave) * (0.50 + gas_t2 * 0.60)
-                final_alpha = int(round(base_alpha * gas_a * (0.65 + glow * 0.35)))
-                final_alpha = max(0, min(255, final_alpha))
-                if final_alpha > 0:
-                    glow_segs.append((start, end, (*glow_base_color, final_alpha), max(0.2, thickness)))
-            glow_loops.append({"segments": glow_segs})
-
-        return {
-            "center": (cx, cy),
-            "shadow_radius": shadow_radius,
-            "shadow_alpha": int(round(180 + glow * 42 + normalized_k * 16)),
-            "glow_alpha": int(round(34 + glow * 42)),
-            "heart_fill_points": heart_points,
-            "heart_fill_color": (*self._lerp_color(base_color, white_hot, 0.26), max(0, min(255, int(round(heart_alpha * (0.22 + glow * 0.2)))))),
-            "heart_line_points": heart_points,
-            "heart_line_color": (*self._lerp_color(base_color, white_hot, 0.5), heart_alpha),
-            "heart_line_thickness": heart_thickness,
-            "disk_segments": disk_segments,
-            "lens_loops": lens_loops,
-            "glow_loops": glow_loops,
-            "photon_ring_color": (*self._lerp_color(warm_color, white_hot, 0.4), max(0, min(255, int(round(124 + glow * 72))))),
-            "photon_ring_thickness": 1.3 + glow * 1.2,
-            "photon_ring_radii": (shadow_radius * (1.03 + curvature * 0.06), shadow_radius * (0.8 + curvature * 0.04)),
-        }
-
     def _build_bar_segments(self, cx, cy, radii_a, radii_b, rot_a, rot_b, segments, seg_angle, lengths, key):
         fixed = self.config.get(f"{key}_fixed", False)
         fixed_len = float(self.config.get(f"{key}_fixed_len", 30))
@@ -1787,7 +1546,7 @@ class CircularVisualizerWindow(QWidget):
     def _update_visual_state(self, bar_values):
         if not self.config.get("master_visible", True):
             self.preview_spectrum_values = [0.0] * self.NUM_BARS
-            self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "blackholes": [], "bars": [], "lines": []}
+            self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "bars": [], "lines": []}
             return
 
         cx = float(self.center_x)
@@ -1948,8 +1707,6 @@ class CircularVisualizerWindow(QWidget):
         else:
             self.tentacle_core_angular_velocity *= 0.82
         tentacles = self._build_tentacle_curves(cx, cy, radius, scale, shared_lengths)
-        blackhole_item = self._build_blackhole_heart_effect(cx, cy, radius, scale)
-        blackholes = [blackhole_item] if blackhole_item else []
 
         bars = []
         if bars_enabled:
@@ -1983,7 +1740,7 @@ class CircularVisualizerWindow(QWidget):
                     thickness = int(self.config.get(f"c{layer_index}_thick", 2))
                     lines.append({"points": points, "color": (*color, alpha), "thickness": thickness})
 
-        self.render_state = {"center": (cx, cy), "fills": fills, "tentacles": tentacles, "blackholes": blackholes, "bars": bars, "lines": lines}
+        self.render_state = {"center": (cx, cy), "fills": fills, "tentacles": tentacles, "bars": bars, "lines": lines}
 
     @staticmethod
     def _gl_set_color(color):
@@ -2073,87 +1830,6 @@ class CircularVisualizerWindow(QWidget):
                 QPointF(float(start[0]), float(start[1])),
                 QPointF(float(end[0]), float(end[1])),
             )
-
-    def _paint_blackhole_effect(self, painter, item):
-        if not item:
-            return
-
-        center_x, center_y = item.get("center", (0.0, 0.0))
-        shadow_radius = float(item.get("shadow_radius", 0.0))
-        shadow_alpha = max(0, min(255, int(item.get("shadow_alpha", 200))))
-        glow_alpha = max(0, min(255, int(item.get("glow_alpha", 60))))
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        for layer_index in range(4, 0, -1):
-            radius_scale = 1.0 + layer_index * 0.18
-            alpha = int(round(glow_alpha * (layer_index / 4.0) ** 1.9))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(18, 10, 16, alpha))
-            painter.drawEllipse(
-                QRect(
-                    int(round(center_x - shadow_radius * radius_scale)),
-                    int(round(center_y - shadow_radius * radius_scale)),
-                    int(round(shadow_radius * 2.0 * radius_scale)),
-                    int(round(shadow_radius * 2.0 * radius_scale)),
-                )
-            )
-
-        for loop in item.get("glow_loops", []):
-            self._paint_weighted_segments(painter, loop.get("segments", []))
-
-        self._paint_weighted_segments(painter, item.get("disk_segments", []))
-
-        for loop in item.get("lens_loops", []):
-            self._paint_weighted_segments(painter, loop.get("segments", []))
-
-        photon_rx, photon_ry = item.get("photon_ring_radii", (shadow_radius, shadow_radius))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(self._make_round_pen(item.get("photon_ring_color", (255, 255, 255, 128)), item.get("photon_ring_thickness", 1.5)))
-        painter.drawEllipse(
-            QRect(
-                int(round(center_x - photon_rx)),
-                int(round(center_y - photon_ry)),
-                int(round(photon_rx * 2.0)),
-                int(round(photon_ry * 2.0)),
-            )
-        )
-
-        for layer_index in range(3, 0, -1):
-            radius_scale = 1.0 - layer_index * 0.1
-            alpha = int(round(shadow_alpha * (0.38 + layer_index * 0.18)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, max(0, min(255, alpha))))
-            painter.drawEllipse(
-                QRect(
-                    int(round(center_x - shadow_radius * radius_scale)),
-                    int(round(center_y - shadow_radius * radius_scale)),
-                    int(round(shadow_radius * 2.0 * radius_scale)),
-                    int(round(shadow_radius * 2.0 * radius_scale)),
-                )
-            )
-
-        fill_points = item.get("heart_fill_points") or []
-        if len(fill_points) >= 3:
-            path = QPainterPath()
-            first_x, first_y = fill_points[0]
-            path.moveTo(QPointF(float(first_x), float(first_y)))
-            for pos_x, pos_y in fill_points[1:]:
-                path.lineTo(QPointF(float(pos_x), float(pos_y)))
-            path.closeSubpath()
-            painter.setPen(Qt.PenStyle.NoPen)
-            fill_color = item.get("heart_fill_color", (255, 80, 100, 80))
-            painter.setBrush(QColor(fill_color[0], fill_color[1], fill_color[2], fill_color[3]))
-            painter.drawPath(path)
-
-        self._paint_line_loop(
-            painter,
-            item.get("heart_line_points"),
-            item.get("heart_line_color", (255, 255, 255, 180)),
-            item.get("heart_line_thickness", 2.0),
-        )
-        painter.restore()
 
     def _paint_segments(self, painter, segments, thickness):
         if not segments:
