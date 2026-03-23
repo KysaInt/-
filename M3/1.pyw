@@ -205,21 +205,6 @@ _DEFAULT_CONFIG = {
     "tentacle_core_base_speed": 0.75,
     "tentacle_core_k_speed": 1.2,
     "tentacle_core_p_speed": 1.35,
-    "blackhole_heart_on": True,
-    "blackhole_heart_color": (255, 88, 118),
-    "blackhole_heart_alpha": 220,
-    "blackhole_heart_size": 28.0,
-    "blackhole_heart_thick": 2.8,
-    "blackhole_shadow_radius": 30.0,
-    "blackhole_disk_radius": 108.0,
-    "blackhole_disk_thickness": 34.0,
-    "blackhole_spin_speed": 0.28,
-    "blackhole_curvature": 0.40,
-    "blackhole_lens_strength": 0.70,
-    "blackhole_disk_turbulence": 0.20,
-    "blackhole_glow": 0.65,
-    "blackhole_loop_thick_head": 3.2,
-    "blackhole_loop_thick_tail": 0.35,
 
     # K/P 绑定（触须相关：用于替代旧的“K影响 / K角加速度 / P角加速度”独立调节）
     "kp_bind_tentacle_turbulence_k": True,
@@ -231,33 +216,6 @@ _DEFAULT_CONFIG = {
     "kp_bind_tentacle_core_base_speed_p": True,
     "kp_tentacle_core_base_speed_p_wmin": 0.0,
     "kp_tentacle_core_base_speed_p_wmax": 1.35,
-    "kp_bind_blackhole_heart_size_k": True,
-    "kp_blackhole_heart_size_k_wmin": 0.0,
-    "kp_blackhole_heart_size_k_wmax": 18.0,
-    "kp_bind_blackhole_disk_radius_k": True,
-    "kp_blackhole_disk_radius_k_wmin": 0.0,
-    "kp_blackhole_disk_radius_k_wmax": 42.0,
-    "kp_bind_blackhole_spin_speed_k": True,
-    "kp_blackhole_spin_speed_k_wmin": 0.0,
-    "kp_blackhole_spin_speed_k_wmax": 0.85,
-    "kp_bind_blackhole_spin_speed_p": True,
-    "kp_blackhole_spin_speed_p_wmin": -0.45,
-    "kp_blackhole_spin_speed_p_wmax": 1.1,
-    "kp_bind_blackhole_curvature_k": True,
-    "kp_blackhole_curvature_k_wmin": 0.0,
-    "kp_blackhole_curvature_k_wmax": 0.22,
-    "kp_bind_blackhole_curvature_p": True,
-    "kp_blackhole_curvature_p_wmin": 0.0,
-    "kp_blackhole_curvature_p_wmax": 0.28,
-    "kp_bind_blackhole_lens_strength_k": True,
-    "kp_blackhole_lens_strength_k_wmin": 0.0,
-    "kp_blackhole_lens_strength_k_wmax": 0.45,
-    "kp_bind_blackhole_glow_k": True,
-    "kp_blackhole_glow_k_wmin": 0.0,
-    "kp_blackhole_glow_k_wmax": 0.35,
-    "kp_bind_blackhole_glow_p": True,
-    "kp_blackhole_glow_p_wmin": 0.0,
-    "kp_blackhole_glow_p_wmax": 0.22,
 }
 
 for _prefix in _DAMPED_OBJECT_KEYS[1:]:
@@ -335,7 +293,7 @@ def _normalize_loaded_config(data):
 _ON_FIELD_ORDER = [
     "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
     "b12_on", "b23_on", "b34_on", "b45_on",
-    "tentacle_on", "tentacle_core_on", "blackhole_heart_on",
+    "tentacle_on", "tentacle_core_on"
 ]
 
 _NOINTERP_KEYS = frozenset({
@@ -345,7 +303,6 @@ _NOINTERP_KEYS = frozenset({
     "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
     "b12_on", "b23_on", "b34_on", "b45_on",
     "tentacle_on", "tentacle_core_on",
-    "blackhole_heart_on",
     "master_visible",
     "gradient_enabled", "color_dynamic", "circle_a1_rotation", "circle_a1_radius",
     "tentacle_shader_enabled",

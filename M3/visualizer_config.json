@@ -16,52 +16,6 @@
   "bar_use_independent_damping": false,
   "bar_independent_rise_damping": 0.02,
   "bar_independent_fall_damping": 0.02,
-  "bar_use_independent_time_window": false,
-  "bar_time_window": 0.01,
-  "rotation_base": 1.0,
-  "main_radius_scale": 1.0,
-  "bar_height_min": 167,
-  "bar_height_max": 762,
-  "bar_default_height": 0.0,
-  "bar_internal_min": 0.0,
-  "bar_internal_max": 300.0,
-  "color_scheme": "custom",
-  "gradient_points": [
-    [
-      0.0,
-      [
-        235,
-        0,
-        0
-      ]
-    ],
-    [
-      0.51,
-      [
-        0,
-        255,
-        0
-      ]
-    ],
-    [
-      0.5,
-      [
-        0,
-        0,
-        255
-      ]
-    ]
-  ],
-  "gradient_enabled": false,
-  "gradient_mode": "height",
-  "color_dynamic": true,
-  "color_cycle_speed": 0.06,
-  "color_cycle_pow": 0.12,
-  "color_cycle_a1": true,
-  "circle_radius": 300,
-  "circle_segments": 2,
-  "circle_a1_rotation": true,
-  "circle_a1_radius": true,
   "radius_damping": 0.67,
   "radius_spring": 0.12,
   "radius_gravity": 0.12,
