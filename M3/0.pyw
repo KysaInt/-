@@ -123,6 +123,21 @@ _DEFAULT_CONFIG = {
     'tentacle_core_base_speed': 0.75,
     'tentacle_core_k_speed': 1.2,
     'tentacle_core_p_speed': 1.35,
+    'blackhole_heart_on': True,
+    'blackhole_heart_color': (255, 88, 118),
+    'blackhole_heart_alpha': 220,
+    'blackhole_heart_size': 28.0,
+    'blackhole_heart_thick': 2.8,
+    'blackhole_shadow_radius': 30.0,
+    'blackhole_disk_radius': 108.0,
+    'blackhole_disk_thickness': 34.0,
+    'blackhole_spin_speed': 0.28,
+    'blackhole_curvature': 0.40,
+    'blackhole_lens_strength': 0.70,
+    'blackhole_disk_turbulence': 0.20,
+    'blackhole_glow': 0.65,
+    'blackhole_loop_thick_head': 3.2,
+    'blackhole_loop_thick_tail': 0.35,
 
     # K/P 绑定（触须相关：用于替代旧的“K影响 / K角加速度 / P角加速度”独立调节）
     'kp_bind_tentacle_turbulence_k': True,
@@ -134,6 +149,33 @@ _DEFAULT_CONFIG = {
     'kp_bind_tentacle_core_base_speed_p': True,
     'kp_tentacle_core_base_speed_p_wmin': 0.0,
     'kp_tentacle_core_base_speed_p_wmax': 1.35,
+    'kp_bind_blackhole_heart_size_k': True,
+    'kp_blackhole_heart_size_k_wmin': 0.0,
+    'kp_blackhole_heart_size_k_wmax': 18.0,
+    'kp_bind_blackhole_disk_radius_k': True,
+    'kp_blackhole_disk_radius_k_wmin': 0.0,
+    'kp_blackhole_disk_radius_k_wmax': 42.0,
+    'kp_bind_blackhole_spin_speed_k': True,
+    'kp_blackhole_spin_speed_k_wmin': 0.0,
+    'kp_blackhole_spin_speed_k_wmax': 0.85,
+    'kp_bind_blackhole_spin_speed_p': True,
+    'kp_blackhole_spin_speed_p_wmin': -0.45,
+    'kp_blackhole_spin_speed_p_wmax': 1.1,
+    'kp_bind_blackhole_curvature_k': True,
+    'kp_blackhole_curvature_k_wmin': 0.0,
+    'kp_blackhole_curvature_k_wmax': 0.22,
+    'kp_bind_blackhole_curvature_p': True,
+    'kp_blackhole_curvature_p_wmin': 0.0,
+    'kp_blackhole_curvature_p_wmax': 0.28,
+    'kp_bind_blackhole_lens_strength_k': True,
+    'kp_blackhole_lens_strength_k_wmin': 0.0,
+    'kp_blackhole_lens_strength_k_wmax': 0.45,
+    'kp_bind_blackhole_glow_k': True,
+    'kp_blackhole_glow_k_wmin': 0.0,
+    'kp_blackhole_glow_k_wmax': 0.35,
+    'kp_bind_blackhole_glow_p': True,
+    'kp_blackhole_glow_p_wmin': 0.0,
+    'kp_blackhole_glow_p_wmax': 0.22,
     'random_checked': [],
     'random_object_count_min': 1,
     'random_object_count_max': 10,
@@ -903,7 +945,8 @@ class QuickColorPicker(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         lbl = QLabel(label_text)
-        lbl.setFixedWidth(12)
+        lbl.setFixedWidth(18)
+        lbl.setAlignment(Qt.AlignCenter)
         row.addWidget(self._install_kp_bindable_label(lbl, cfg_key))
         slider = QSlider(Qt.Horizontal)
         slider.setRange(minimum, maximum)
@@ -964,15 +1007,17 @@ class QuickColorPicker(QDialog):
             hue_stops.append((phase, (rr, gg, bb)))
         self._set_slider_gradient(self._hue_slider, hue_stops)
 
-        # S：固定 H/L，0→1
+        # S：固定 H/L，0 为灰阶，1 为当前色相的全饱和版本。
         r0, g0, b0 = self._hsl_to_rgb(h, 0.0, l)
+        rm, gm, bm = self._hsl_to_rgb(h, 50.0, l)
         r1, g1, b1 = self._hsl_to_rgb(h, 100.0, l)
-        self._set_slider_gradient(self._sat_slider, [(0.0, (r0, g0, b0)), (1.0, (r1, g1, b1))])
+        self._set_slider_gradient(self._sat_slider, [(0.0, (r0, g0, b0)), (0.5, (rm, gm, bm)), (1.0, (r1, g1, b1))])
 
-        # L：固定 H/S，0→1
+        # L：HSL 亮度需要明确经过“当前色相”，否则 0/100 极值附近切换时会显得异常。
         r2, g2, b2 = self._hsl_to_rgb(h, s, 0.0)
+        rmid, gmid, bmid = self._hsl_to_rgb(h, s, 50.0)
         r3, g3, b3 = self._hsl_to_rgb(h, s, 100.0)
-        self._set_slider_gradient(self._light_slider, [(0.0, (r2, g2, b2)), (1.0, (r3, g3, b3))])
+        self._set_slider_gradient(self._light_slider, [(0.0, (r2, g2, b2)), (0.5, (rmid, gmid, bmid)), (1.0, (r3, g3, b3))])
 
     def _update_rgb_slider_gradients(self):
         r = int(self._r_slider.value())
@@ -1001,6 +1046,18 @@ class QuickColorPicker(QDialog):
             return (int(self._r_slider.value()), int(self._g_slider.value()), int(self._b_slider.value()))
         return self._hsl_to_rgb(self._hue_slider.value(), self._sat_slider.value(), self._light_slider.value())
 
+    def _rgb_to_hsl_preserving_context(self, rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+        h, s, l = self._rgb_to_hsl(rgb)
+        fallback_h = self._hue_slider.value() if hasattr(self, '_hue_slider') else h
+        fallback_s = self._sat_slider.value() if hasattr(self, '_sat_slider') else s
+
+        # 黑/白/灰没有稳定色相；保留当前 H/S，避免一旦触到极值就回跳到 0° 红色。
+        if s <= 0 or l <= 0 or l >= 100:
+            h = fallback_h
+        if l <= 0 or l >= 100:
+            s = fallback_s
+        return (int(h), int(s), int(l))
+
     def _update_preview(self):
         self.selected_rgb = self._current_rgb()
         r, g, b = self.selected_rgb
@@ -1018,7 +1075,7 @@ class QuickColorPicker(QDialog):
             self._g_slider.blockSignals(False)
             self._b_slider.blockSignals(False)
         else:
-            h, s, l = self._rgb_to_hsl(self.selected_rgb)
+            h, s, l = self._rgb_to_hsl_preserving_context(self.selected_rgb)
             self._hue_slider.blockSignals(True)
             self._sat_slider.blockSignals(True)
             self._light_slider.blockSignals(True)
@@ -1491,7 +1548,7 @@ class VisualizerControlUI(QWidget):
             self._sync_color_quick_widgets(bool(value))
         elif key in {'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'}:
             self._sync_color_quick_widgets()
-        if key in {'color_scheme', 'gradient_enabled', 'gradient_points', 'tentacle_color', 'tentacle_shader_tip_color'} or re.match(r'^c[1-5]_color$', str(key)):
+        if key in {'color_scheme', 'gradient_enabled', 'gradient_points', 'tentacle_color', 'tentacle_shader_tip_color', 'blackhole_heart_color'} or re.match(r'^c[1-5]_color$', str(key)):
             self._update_color_preview_strip()
         if key in {
             'num_bars', 'circle_segments', 'bar_length_min', 'bar_length_max', 'freq_min', 'freq_max',
@@ -1508,10 +1565,17 @@ class VisualizerControlUI(QWidget):
             'tentacle_angle_stiffness', 'tentacle_length_stiffness', 'tentacle_stretch_limit', 'tentacle_shader_enabled',
             'tentacle_shader_alpha_start', 'tentacle_shader_alpha_end', 'tentacle_shader_bias',
             'tentacle_core_on', 'tentacle_core_base_speed',
-            'tentacle_core_k_speed', 'tentacle_core_p_speed'
+            'tentacle_core_k_speed', 'tentacle_core_p_speed',
+            'blackhole_heart_on', 'blackhole_heart_alpha', 'blackhole_heart_size', 'blackhole_heart_thick',
+            'blackhole_shadow_radius', 'blackhole_disk_radius', 'blackhole_disk_thickness',
+            'blackhole_spin_speed', 'blackhole_curvature', 'blackhole_lens_strength',
+            'blackhole_disk_turbulence', 'blackhole_glow',
+            'blackhole_loop_thick_head', 'blackhole_loop_thick_tail'
         } or re.match(r'^c[1-5]_color$', str(key)) or re.match(r'^(c[1245]|b(?:12|23|34|45))_(use_independent_damping|independent_rise_damping|independent_fall_damping)$', str(key)):
             self._refresh_single_bar_preview()
         if str(key).startswith('kp_bind_tentacle_') or str(key).startswith('kp_tentacle_'):
+            self._refresh_single_bar_preview()
+        if str(key).startswith('kp_bind_blackhole_') or str(key).startswith('kp_blackhole_'):
             self._refresh_single_bar_preview()
         if self._applying_config:
             return
@@ -1770,6 +1834,26 @@ class VisualizerControlUI(QWidget):
         )
         box.bind_slider(slider, slider_scale)
         return slider, box
+
+    def _make_graphics_form_row(self, *, label_text=None, label_widget=None, widgets=None,
+                                label_width=78, indent=0, stretch=True):
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(indent, 0, 0, 0)
+        row.setSpacing(6)
+
+        current_label = label_widget if label_widget is not None else (QLabel(label_text) if label_text is not None else None)
+        if current_label is not None:
+            current_label.setFixedWidth(label_width)
+            current_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(current_label)
+
+        for widget in widgets or []:
+            row.addWidget(widget)
+
+        if stretch:
+            row.addStretch()
+        return row_widget
 
     # ═══════════════════════════════════════════════════════
     #  UI 构建
@@ -3148,6 +3232,7 @@ class VisualizerControlUI(QWidget):
         v.addLayout(self._build_section_action_row('graphics'))
         v.addWidget(self._build_contour_section())
         v.addWidget(self._build_tentacle_section())
+        v.addWidget(self._build_blackhole_heart_section())
         v.addWidget(self._build_bars_section())
         v.addStretch()
         return w
@@ -3227,7 +3312,12 @@ class VisualizerControlUI(QWidget):
                 'tentacle_angle_stiffness', 'tentacle_length_stiffness', 'tentacle_stretch_limit',
                 'tentacle_shader_enabled', 'tentacle_shader_tip_color',
                 'tentacle_shader_alpha_start', 'tentacle_shader_alpha_end', 'tentacle_shader_bias',
-                'tentacle_core_base_speed', 'tentacle_core_k_speed', 'tentacle_core_p_speed'
+                'tentacle_core_base_speed', 'tentacle_core_k_speed', 'tentacle_core_p_speed',
+                'blackhole_heart_on', 'blackhole_heart_color', 'blackhole_heart_alpha', 'blackhole_heart_size',
+                'blackhole_heart_thick', 'blackhole_shadow_radius', 'blackhole_disk_radius',
+                'blackhole_disk_thickness', 'blackhole_spin_speed', 'blackhole_curvature',
+                'blackhole_lens_strength', 'blackhole_disk_turbulence', 'blackhole_glow',
+                'blackhole_loop_thick_head', 'blackhole_loop_thick_tail'
             ])
             return keys
         return []
@@ -3402,8 +3492,8 @@ class VisualizerControlUI(QWidget):
     # ── 五层轮廓 ──────────────────────────────────────────
 
     def _build_contour_section(self):
-        s = _Collapsible("五层轮廓 (L1~L5)", expanded=False)
-        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
+        s = _Collapsible("五层填充 (L1~L5)", expanded=False)
+        g = QGridLayout(); g.setSpacing(6); g.setContentsMargins(0,0,0,0); r = 0
         _layers = [
             (1, "L1 内缓慢", True, True),
             (2, "L2 内快速", True, False),
@@ -3412,7 +3502,7 @@ class VisualizerControlUI(QWidget):
             (5, "L5 外缓慢", True, True),
         ]
         for li, lname, has_step, has_decay in _layers:
-            hdr = QLabel(f"── {lname} ──")
+            hdr = QLabel(f"── 填充 {lname} ──")
             hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
             g.addWidget(hdr, r, 0, 1, 4); r += 1
 
@@ -3420,7 +3510,6 @@ class VisualizerControlUI(QWidget):
             chk.setChecked(self.config.get(f'c{li}_on', False))
             chk.toggled.connect(lambda v, k=f'c{li}_on': self._update_cfg(k, v))
             setattr(self, f'c{li}_on_check', chk)
-            g.addWidget(chk, r, 0)
 
             cbtn = QPushButton()
             cc = self.config.get(f'c{li}_color', (255, 255, 255))
@@ -3428,18 +3517,15 @@ class VisualizerControlUI(QWidget):
             cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
             cbtn.clicked.connect(lambda _, i=li: self._pick_layer_color(i))
             setattr(self, f'c{li}_color_btn', cbtn)
-            g.addWidget(cbtn, r, 1)
 
             sp = self._new_int_box(
                 default_value=2, soft_min=1, soft_max=20,
                 hard_min=1, hard_max=1000, step=1, cfg_key=f'c{li}_thick'
             )
             setattr(self, f'c{li}_thick_spin', sp)
-            ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            g.addLayout(ht, r, 2, 1, 2); r += 1
+            head_row = self._make_graphics_form_row(widgets=[chk, cbtn, QLabel("粗:"), sp], label_width=0)
+            g.addWidget(head_row, r, 0, 1, 4); r += 1
 
-            g.addWidget(QLabel("透明:"), r, 0)
             sl_a, alpha_box = self._new_bound_int_slider(
                 cfg_key=f'c{li}_alpha', default_value=180,
                 soft_min=0, soft_max=255, hard_min=0, hard_max=255,
@@ -3447,13 +3533,12 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'c{li}_alpha_slider', sl_a)
             setattr(self, f'c{li}_alpha_spin', alpha_box)
-            g.addWidget(sl_a, r, 1, 1, 2); g.addWidget(alpha_box, r, 3); r += 1
+            g.addWidget(self._make_graphics_form_row(label_text="透明:", widgets=[sl_a, alpha_box]), r, 0, 1, 4); r += 1
 
             fc = QCheckBox("填充")
             fc.setChecked(self.config.get(f'c{li}_fill', False))
             fc.toggled.connect(lambda v, k=f'c{li}_fill': self._update_cfg(k, v))
             setattr(self, f'c{li}_fill_check', fc)
-            g.addWidget(fc, r, 0)
             fsl, fill_box = self._new_bound_int_slider(
                 cfg_key=f'c{li}_fill_alpha', default_value=50,
                 soft_min=0, soft_max=255, hard_min=0, hard_max=255,
@@ -3461,19 +3546,18 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'c{li}_fill_alpha_slider', fsl)
             setattr(self, f'c{li}_fill_alpha_spin', fill_box)
-            g.addWidget(fsl, r, 1, 1, 2); g.addWidget(fill_box, r, 3); r += 1
+            fill_row = self._make_graphics_form_row(widgets=[fc, fsl, fill_box], label_width=0)
+            g.addWidget(fill_row, r, 0, 1, 4); r += 1
 
             if has_step:
-                g.addWidget(QLabel("间隔:"), r, 0)
                 ssp = self._new_int_box(
                     default_value=2, soft_min=1, soft_max=32,
                     hard_min=1, hard_max=4096, step=1, cfg_key=f'c{li}_step'
                 )
                 setattr(self, f'c{li}_step_spin', ssp)
-                g.addWidget(ssp, r, 1); r += 1
+                g.addWidget(self._make_graphics_form_row(label_text="间隔:", widgets=[ssp]), r, 0, 1, 4); r += 1
 
             if has_decay:
-                g.addWidget(QLabel("衰减:"), r, 0)
                 dsl, decay_box = self._new_bound_float_slider(
                     cfg_key=f'c{li}_decay', default_value=0.995,
                     soft_min=0.9, soft_max=1.0, hard_min=0.0, hard_max=2.0,
@@ -3481,7 +3565,7 @@ class VisualizerControlUI(QWidget):
                 )
                 setattr(self, f'c{li}_decay_slider', dsl)
                 setattr(self, f'c{li}_decay_spin', decay_box)
-                g.addWidget(dsl, r, 1, 1, 2); g.addWidget(decay_box, r, 3); r += 1
+                g.addWidget(self._make_graphics_form_row(label_text="衰减:", widgets=[dsl, decay_box]), r, 0, 1, 4); r += 1
 
             if li in (1, 2, 4, 5):
                 damp_check, damp_widget, rise_box, fall_box = self._build_independent_damping_controls(f'c{li}')
@@ -3492,7 +3576,6 @@ class VisualizerControlUI(QWidget):
                 g.addWidget(damp_check, r, 0, 1, 4); r += 1
                 g.addWidget(damp_widget, r, 0, 1, 4); r += 1
 
-            g.addWidget(QLabel("转速:"), r, 0)
             rsl, speed_box = self._new_bound_float_slider(
                 cfg_key=f'c{li}_rot_speed', default_value=1.0,
                 soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
@@ -3500,9 +3583,8 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'c{li}_rot_speed_slider', rsl)
             setattr(self, f'c{li}_rot_speed_spin', speed_box)
-            g.addWidget(rsl, r, 1, 1, 2); g.addWidget(speed_box, r, 3); r += 1
+            g.addWidget(self._make_graphics_form_row(label_text="转速:", widgets=[rsl, speed_box]), r, 0, 1, 4); r += 1
 
-            g.addWidget(QLabel("pow:"), r, 0)
             psl, pow_box = self._new_bound_float_slider(
                 cfg_key=f'c{li}_rot_pow', default_value=0.5,
                 soft_min=-3.0, soft_max=3.0, hard_min=-100.0, hard_max=100.0,
@@ -3510,7 +3592,7 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'c{li}_rot_pow_slider', psl)
             setattr(self, f'c{li}_rot_pow_spin', pow_box)
-            g.addWidget(psl, r, 1, 1, 2); g.addWidget(pow_box, r, 3); r += 1
+            g.addWidget(self._make_graphics_form_row(label_text="Pow:", widgets=[psl, pow_box]), r, 0, 1, 4); r += 1
 
         s.add_layout(g)
         return s
@@ -3682,13 +3764,12 @@ class VisualizerControlUI(QWidget):
         g.addWidget(self.tentacle_length_jitter_random_check, r, 0, 1, 4); r += 1
 
         cp_min_label = self._attach_kp_bindable_label(QLabel("控制点最小:"), 'tentacle_control_points_min', supports=('k', 'p'))
-        g.addWidget(cp_min_label, r, 0)
         cp_min_box = self._new_int_box(
             default_value=3, soft_min=3, soft_max=9,
             hard_min=2, hard_max=24, step=1, cfg_key='tentacle_control_points_min'
         )
         self.tentacle_cp_min_spin = cp_min_box
-        g.addWidget(cp_min_box, r, 3); r += 1
+        g.addWidget(self._make_graphics_form_row(label_widget=cp_min_label, widgets=[cp_min_box], label_width=92), r, 0, 1, 4); r += 1
         cp_min_bind, cp_min_base_lbl, cp_min_rows, cp_min_weight_spins = self._build_kp_binding_container(
             cfg_key='tentacle_control_points_min', supports=('k', 'p'),
             wmin_default=0.0, wmax_default=0.0,
@@ -3703,13 +3784,12 @@ class VisualizerControlUI(QWidget):
         )
 
         cp_max_label = self._attach_kp_bindable_label(QLabel("控制点最大:"), 'tentacle_control_points_max', supports=('k', 'p'))
-        g.addWidget(cp_max_label, r, 0)
         cp_max_box = self._new_int_box(
             default_value=5, soft_min=3, soft_max=9,
             hard_min=2, hard_max=24, step=1, cfg_key='tentacle_control_points_max'
         )
         self.tentacle_cp_max_spin = cp_max_box
-        g.addWidget(cp_max_box, r, 3); r += 1
+        g.addWidget(self._make_graphics_form_row(label_widget=cp_max_label, widgets=[cp_max_box], label_width=92), r, 0, 1, 4); r += 1
         cp_max_bind, cp_max_base_lbl, cp_max_rows, cp_max_weight_spins = self._build_kp_binding_container(
             cfg_key='tentacle_control_points_max', supports=('k', 'p'),
             wmin_default=0.0, wmax_default=0.0,
@@ -4078,43 +4158,341 @@ class VisualizerControlUI(QWidget):
         s.add_layout(g)
         return s
 
+    def _build_blackhole_heart_section(self):
+        s = _Collapsible("黑洞之心", expanded=False)
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0, 0, 0, 0); r = 0
+
+        chk = QCheckBox("显示")
+        chk.setChecked(self.config.get('blackhole_heart_on', True))
+        chk.toggled.connect(lambda v: self._update_cfg('blackhole_heart_on', v))
+        self.blackhole_heart_on_check = chk
+        g.addWidget(chk, r, 0)
+
+        cbtn = QPushButton()
+        cc = self.config.get('blackhole_heart_color', (255, 88, 118))
+        cbtn.setFixedSize(22, 22)
+        cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
+        cbtn.clicked.connect(lambda: self._pick_special_color('blackhole_heart_color', self.blackhole_heart_color_btn))
+        self.blackhole_heart_color_btn = cbtn
+        g.addWidget(cbtn, r, 1)
+        g.addWidget(QLabel("中心色"), r, 2)
+        r += 1
+
+        alpha_label = self._attach_kp_bindable_label(QLabel("心透明:"), 'blackhole_heart_alpha', supports=('k', 'p'))
+        g.addWidget(alpha_label, r, 0)
+        alpha_slider, alpha_box = self._new_bound_int_slider(
+            cfg_key='blackhole_heart_alpha', default_value=220,
+            soft_min=0, soft_max=255, hard_min=0, hard_max=255,
+            step=1, width=58
+        )
+        self.blackhole_heart_alpha_slider = alpha_slider
+        self.blackhole_heart_alpha_spin = alpha_box
+        g.addWidget(alpha_slider, r, 1, 1, 2); g.addWidget(alpha_box, r, 3); r += 1
+        alpha_bind, alpha_base_lbl, alpha_rows, alpha_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_heart_alpha', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-120.0, soft_max=120.0, hard_min=-255.0, hard_max=255.0,
+            decimals=1,
+        )
+        g.addWidget(alpha_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_heart_alpha', label=alpha_label,
+            container=alpha_bind, base_label=alpha_base_lbl,
+            rows=alpha_rows, supports=('k', 'p'), weight_spins=alpha_weight_spins,
+        )
+
+        size_label = self._attach_kp_bindable_label(QLabel("心尺寸:"), 'blackhole_heart_size', supports=('k', 'p'))
+        g.addWidget(size_label, r, 0)
+        size_slider, size_box = self._new_bound_float_slider(
+            cfg_key='blackhole_heart_size', default_value=28.0,
+            soft_min=6.0, soft_max=90.0, hard_min=1.0, hard_max=500.0,
+            slider_scale=10, step=0.1, decimals=1, width=72
+        )
+        self.blackhole_heart_size_slider = size_slider
+        self.blackhole_heart_size_spin = size_box
+        g.addWidget(size_slider, r, 1, 1, 2); g.addWidget(size_box, r, 3); r += 1
+        size_bind, size_base_lbl, size_rows, size_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_heart_size', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 18.0), 'p': (0.0, 0.0)},
+            soft_min=-40.0, soft_max=40.0, hard_min=-500.0, hard_max=500.0,
+            decimals=2,
+        )
+        g.addWidget(size_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_heart_size', label=size_label,
+            container=size_bind, base_label=size_base_lbl,
+            rows=size_rows, supports=('k', 'p'), weight_spins=size_weight_spins,
+        )
+
+        thick_label = self._attach_kp_bindable_label(QLabel("心边宽:"), 'blackhole_heart_thick', supports=('k', 'p'))
+        g.addWidget(thick_label, r, 0)
+        thick_slider, thick_box = self._new_bound_float_slider(
+            cfg_key='blackhole_heart_thick', default_value=2.8,
+            soft_min=0.5, soft_max=8.0, hard_min=0.1, hard_max=40.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_heart_thick_slider = thick_slider
+        self.blackhole_heart_thick_spin = thick_box
+        g.addWidget(thick_slider, r, 1, 1, 2); g.addWidget(thick_box, r, 3); r += 1
+        thick_bind, thick_base_lbl, thick_rows, thick_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_heart_thick', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-3.0, soft_max=3.0, hard_min=-50.0, hard_max=50.0,
+            decimals=3,
+        )
+        g.addWidget(thick_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_heart_thick', label=thick_label,
+            container=thick_bind, base_label=thick_base_lbl,
+            rows=thick_rows, supports=('k', 'p'), weight_spins=thick_weight_spins,
+        )
+
+        shadow_label = self._attach_kp_bindable_label(QLabel("阴影半径:"), 'blackhole_shadow_radius', supports=('k', 'p'))
+        g.addWidget(shadow_label, r, 0)
+        shadow_slider, shadow_box = self._new_bound_float_slider(
+            cfg_key='blackhole_shadow_radius', default_value=30.0,
+            soft_min=8.0, soft_max=120.0, hard_min=1.0, hard_max=600.0,
+            slider_scale=10, step=0.1, decimals=1, width=72
+        )
+        self.blackhole_shadow_radius_slider = shadow_slider
+        self.blackhole_shadow_radius_spin = shadow_box
+        g.addWidget(shadow_slider, r, 1, 1, 2); g.addWidget(shadow_box, r, 3); r += 1
+        shadow_bind, shadow_base_lbl, shadow_rows, shadow_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_shadow_radius', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-50.0, soft_max=50.0, hard_min=-600.0, hard_max=600.0,
+            decimals=2,
+        )
+        g.addWidget(shadow_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_shadow_radius', label=shadow_label,
+            container=shadow_bind, base_label=shadow_base_lbl,
+            rows=shadow_rows, supports=('k', 'p'), weight_spins=shadow_weight_spins,
+        )
+
+        disk_hdr = QLabel("── 吸积盘 / 曲率 ──")
+        disk_hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(disk_hdr, r, 0, 1, 4); r += 1
+
+        disk_radius_label = self._attach_kp_bindable_label(QLabel("盘半径:"), 'blackhole_disk_radius', supports=('k', 'p'))
+        g.addWidget(disk_radius_label, r, 0)
+        disk_radius_slider, disk_radius_box = self._new_bound_float_slider(
+            cfg_key='blackhole_disk_radius', default_value=108.0,
+            soft_min=24.0, soft_max=260.0, hard_min=1.0, hard_max=1200.0,
+            slider_scale=10, step=0.1, decimals=1, width=72
+        )
+        self.blackhole_disk_radius_slider = disk_radius_slider
+        self.blackhole_disk_radius_spin = disk_radius_box
+        g.addWidget(disk_radius_slider, r, 1, 1, 2); g.addWidget(disk_radius_box, r, 3); r += 1
+        disk_radius_bind, disk_radius_base_lbl, disk_radius_rows, disk_radius_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_disk_radius', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 42.0), 'p': (0.0, 0.0)},
+            soft_min=-80.0, soft_max=80.0, hard_min=-1200.0, hard_max=1200.0,
+            decimals=2,
+        )
+        g.addWidget(disk_radius_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_disk_radius', label=disk_radius_label,
+            container=disk_radius_bind, base_label=disk_radius_base_lbl,
+            rows=disk_radius_rows, supports=('k', 'p'), weight_spins=disk_radius_weight_spins,
+        )
+
+        disk_thickness_label = self._attach_kp_bindable_label(QLabel("盘厚度:"), 'blackhole_disk_thickness', supports=('k', 'p'))
+        g.addWidget(disk_thickness_label, r, 0)
+        disk_thickness_slider, disk_thickness_box = self._new_bound_float_slider(
+            cfg_key='blackhole_disk_thickness', default_value=34.0,
+            soft_min=2.0, soft_max=120.0, hard_min=0.1, hard_max=600.0,
+            slider_scale=10, step=0.1, decimals=1, width=72
+        )
+        self.blackhole_disk_thickness_slider = disk_thickness_slider
+        self.blackhole_disk_thickness_spin = disk_thickness_box
+        g.addWidget(disk_thickness_slider, r, 1, 1, 2); g.addWidget(disk_thickness_box, r, 3); r += 1
+        disk_thickness_bind, disk_thickness_base_lbl, disk_thickness_rows, disk_thickness_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_disk_thickness', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-50.0, soft_max=50.0, hard_min=-600.0, hard_max=600.0,
+            decimals=2,
+        )
+        g.addWidget(disk_thickness_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_disk_thickness', label=disk_thickness_label,
+            container=disk_thickness_bind, base_label=disk_thickness_base_lbl,
+            rows=disk_thickness_rows, supports=('k', 'p'), weight_spins=disk_thickness_weight_spins,
+        )
+
+        spin_label = self._attach_kp_bindable_label(QLabel("旋转速度:"), 'blackhole_spin_speed', supports=('k', 'p'))
+        g.addWidget(spin_label, r, 0)
+        spin_slider, spin_box = self._new_bound_float_slider(
+            cfg_key='blackhole_spin_speed', default_value=1.05,
+            soft_min=-3.0, soft_max=3.0, hard_min=-20.0, hard_max=20.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_spin_speed_slider = spin_slider
+        self.blackhole_spin_speed_spin = spin_box
+        g.addWidget(spin_slider, r, 1, 1, 2); g.addWidget(spin_box, r, 3); r += 1
+        spin_bind, spin_base_lbl, spin_rows, spin_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_spin_speed', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 0.85), 'p': (-0.45, 1.1)},
+            soft_min=-3.0, soft_max=3.0, hard_min=-20.0, hard_max=20.0,
+            decimals=3,
+        )
+        g.addWidget(spin_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_spin_speed', label=spin_label,
+            container=spin_bind, base_label=spin_base_lbl,
+            rows=spin_rows, supports=('k', 'p'), weight_spins=spin_weight_spins,
+        )
+
+        curvature_label = self._attach_kp_bindable_label(QLabel("引力曲率:"), 'blackhole_curvature', supports=('k', 'p'))
+        g.addWidget(curvature_label, r, 0)
+        curvature_slider, curvature_box = self._new_bound_float_slider(
+            cfg_key='blackhole_curvature', default_value=0.46,
+            soft_min=0.0, soft_max=1.5, hard_min=0.0, hard_max=5.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_curvature_slider = curvature_slider
+        self.blackhole_curvature_spin = curvature_box
+        g.addWidget(curvature_slider, r, 1, 1, 2); g.addWidget(curvature_box, r, 3); r += 1
+        curvature_bind, curvature_base_lbl, curvature_rows, curvature_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_curvature', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 0.22), 'p': (0.0, 0.28)},
+            soft_min=-1.0, soft_max=1.0, hard_min=-5.0, hard_max=5.0,
+            decimals=3,
+        )
+        g.addWidget(curvature_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_curvature', label=curvature_label,
+            container=curvature_bind, base_label=curvature_base_lbl,
+            rows=curvature_rows, supports=('k', 'p'), weight_spins=curvature_weight_spins,
+        )
+
+        lens_label = self._attach_kp_bindable_label(QLabel("透镜强度:"), 'blackhole_lens_strength', supports=('k', 'p'))
+        g.addWidget(lens_label, r, 0)
+        lens_slider, lens_box = self._new_bound_float_slider(
+            cfg_key='blackhole_lens_strength', default_value=0.78,
+            soft_min=0.0, soft_max=2.0, hard_min=0.0, hard_max=8.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_lens_strength_slider = lens_slider
+        self.blackhole_lens_strength_spin = lens_box
+        g.addWidget(lens_slider, r, 1, 1, 2); g.addWidget(lens_box, r, 3); r += 1
+        lens_bind, lens_base_lbl, lens_rows, lens_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_lens_strength', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 0.45), 'p': (0.0, 0.0)},
+            soft_min=-1.5, soft_max=1.5, hard_min=-8.0, hard_max=8.0,
+            decimals=3,
+        )
+        g.addWidget(lens_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_lens_strength', label=lens_label,
+            container=lens_bind, base_label=lens_base_lbl,
+            rows=lens_rows, supports=('k', 'p'), weight_spins=lens_weight_spins,
+        )
+
+        turb_label = self._attach_kp_bindable_label(QLabel("盘面扰动:"), 'blackhole_disk_turbulence', supports=('k', 'p'))
+        g.addWidget(turb_label, r, 0)
+        turb_slider, turb_box = self._new_bound_float_slider(
+            cfg_key='blackhole_disk_turbulence', default_value=0.58,
+            soft_min=0.0, soft_max=2.0, hard_min=0.0, hard_max=8.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_disk_turbulence_slider = turb_slider
+        self.blackhole_disk_turbulence_spin = turb_box
+        g.addWidget(turb_slider, r, 1, 1, 2); g.addWidget(turb_box, r, 3); r += 1
+        turb_bind, turb_base_lbl, turb_rows, turb_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_disk_turbulence', supports=('k', 'p'),
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=-1.5, soft_max=1.5, hard_min=-8.0, hard_max=8.0,
+            decimals=3,
+        )
+        g.addWidget(turb_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_disk_turbulence', label=turb_label,
+            container=turb_bind, base_label=turb_base_lbl,
+            rows=turb_rows, supports=('k', 'p'), weight_spins=turb_weight_spins,
+        )
+
+        glow_label = self._attach_kp_bindable_label(QLabel("辉光强度:"), 'blackhole_glow', supports=('k', 'p'))
+        g.addWidget(glow_label, r, 0)
+        glow_slider, glow_box = self._new_bound_float_slider(
+            cfg_key='blackhole_glow', default_value=0.72,
+            soft_min=0.0, soft_max=2.0, hard_min=0.0, hard_max=8.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_glow_slider = glow_slider
+        self.blackhole_glow_spin = glow_box
+        g.addWidget(glow_slider, r, 1, 1, 2); g.addWidget(glow_box, r, 3); r += 1
+        glow_bind, glow_base_lbl, glow_rows, glow_weight_spins = self._build_kp_binding_container(
+            cfg_key='blackhole_glow', supports=('k', 'p'),
+            defaults_by_sig={'k': (0.0, 0.35), 'p': (0.0, 0.22)},
+            soft_min=-1.5, soft_max=1.5, hard_min=-8.0, hard_max=8.0,
+            decimals=3,
+        )
+        g.addWidget(glow_bind, r, 0, 1, 4); r += 1
+        self._register_kp_binding_ui(
+            cfg_key='blackhole_glow', label=glow_label,
+            container=glow_bind, base_label=glow_base_lbl,
+            rows=glow_rows, supports=('k', 'p'), weight_spins=glow_weight_spins,
+        )
+
+        loop_hdr = QLabel("── 气体环线 首/尾宽 ──")
+        loop_hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
+        g.addWidget(loop_hdr, r, 0, 1, 4); r += 1
+
+        g.addWidget(QLabel("首(最粗):"), r, 0)
+        head_slider, head_box = self._new_bound_float_slider(
+            cfg_key='blackhole_loop_thick_head', default_value=3.2,
+            soft_min=0.5, soft_max=10.0, hard_min=0.1, hard_max=40.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_loop_thick_head_slider = head_slider
+        self.blackhole_loop_thick_head_spin = head_box
+        g.addWidget(head_slider, r, 1, 1, 2); g.addWidget(head_box, r, 3); r += 1
+
+        g.addWidget(QLabel("尾(最细):"), r, 0)
+        tail_slider, tail_box = self._new_bound_float_slider(
+            cfg_key='blackhole_loop_thick_tail', default_value=0.35,
+            soft_min=0.0, soft_max=4.0, hard_min=0.0, hard_max=10.0,
+            slider_scale=100, step=0.01, decimals=2, width=72
+        )
+        self.blackhole_loop_thick_tail_slider = tail_slider
+        self.blackhole_loop_thick_tail_spin = tail_box
+        g.addWidget(tail_slider, r, 1, 1, 2); g.addWidget(tail_box, r, 3); r += 1
+
+        s.add_layout(g)
+        return s
+
     # ── 四层条形 ──────────────────────────────────────────
 
     def _build_bars_section(self):
-        s = _Collapsible("四层条形 (B12~B45)", expanded=False)
-        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0,0,0,0); r = 0
+        s = _Collapsible("四层连线 (B12~B45)", expanded=False)
+        g = QGridLayout(); g.setSpacing(6); g.setContentsMargins(0,0,0,0); r = 0
         for key, bname in [('b12', 'L1-L2 间'), ('b23', 'L2-L3 间'),
                            ('b34', 'L3-L4 间'), ('b45', 'L4-L5 间')]:
-            hdr = QLabel(f"── {bname} ──")
+            hdr = QLabel(f"── 连线 {bname} ──")
             hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
-            g.addWidget(hdr, r, 0, 1, 3); r += 1
+            g.addWidget(hdr, r, 0, 1, 4); r += 1
 
             chk = QCheckBox("显示")
             chk.setChecked(self.config.get(f'{key}_on', False))
             chk.toggled.connect(lambda v, k=f'{key}_on': self._update_cfg(k, v))
             setattr(self, f'{key}_on_check', chk)
-            g.addWidget(chk, r, 0)
             sp = self._new_int_box(
                 default_value=3, soft_min=1, soft_max=20,
                 hard_min=1, hard_max=1000, step=1, cfg_key=f'{key}_thick'
             )
             setattr(self, f'{key}_thick_spin', sp)
-            ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            g.addLayout(ht, r, 1, 1, 2); r += 1
+            g.addWidget(self._make_graphics_form_row(widgets=[chk, QLabel("粗:"), sp], label_width=0), r, 0, 1, 4); r += 1
 
             fchk = QCheckBox("固定长度")
             fchk.setChecked(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_fixed_check', fchk)
-            g.addWidget(fchk, r, 0)
             fsp = self._new_int_box(
                 default_value=30, soft_min=1, soft_max=500,
                 hard_min=1, hard_max=10000, step=1, cfg_key=f'{key}_fixed_len'
             )
             setattr(self, f'{key}_fixed_len_spin', fsp)
-            fh = QHBoxLayout()
-            fh.addWidget(fsp); fh.addWidget(QLabel("px"))
-            g.addLayout(fh, r, 1, 1, 2); r += 1
+            g.addWidget(self._make_graphics_form_row(widgets=[fchk, fsp, QLabel("px")], label_width=0), r, 0, 1, 4); r += 1
 
             mode_w = QWidget()
             ml = QHBoxLayout(mode_w); ml.setContentsMargins(10,0,0,0); ml.setSpacing(8)
@@ -4133,7 +4511,7 @@ class VisualizerControlUI(QWidget):
             ml.addWidget(cs); ml.addWidget(ce); ml.addWidget(cc)
             mode_w.setVisible(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_mode_widget', mode_w)
-            g.addWidget(mode_w, r, 0, 1, 3); r += 1
+            g.addWidget(mode_w, r, 0, 1, 4); r += 1
 
             fchk.toggled.connect(lambda v, k=key, w=mode_w: (self._update_cfg(f'{k}_fixed', v), w.setVisible(v)))
 
@@ -4142,8 +4520,8 @@ class VisualizerControlUI(QWidget):
             setattr(self, f'{key}_independent_damping_widget', damp_widget)
             setattr(self, f'{key}_independent_rise_damping_spin', rise_box)
             setattr(self, f'{key}_independent_fall_damping_spin', fall_box)
-            g.addWidget(damp_check, r, 0, 1, 3); r += 1
-            g.addWidget(damp_widget, r, 0, 1, 3); r += 1
+            g.addWidget(damp_check, r, 0, 1, 4); r += 1
+            g.addWidget(damp_widget, r, 0, 1, 4); r += 1
 
         s.add_layout(g)
         return s
@@ -4350,6 +4728,24 @@ class VisualizerControlUI(QWidget):
             ("基础角加速度", "tentacle_core_base_speed", "float", -5.0, 5.0),
             ("K角加速度", "tentacle_core_k_speed", "float", -5.0, 5.0),
             ("P角加速度", "tentacle_core_p_speed", "float", -5.0, 5.0),
+        ]))
+
+        props.append(("黑洞之心", [
+            ("显示", "blackhole_heart_on", "bool"),
+            ("中心色", "blackhole_heart_color", "color"),
+            ("心透明", "blackhole_heart_alpha", "int", 0, 255),
+            ("心尺寸", "blackhole_heart_size", "float", 6.0, 90.0),
+            ("心边宽", "blackhole_heart_thick", "float", 0.5, 8.0),
+            ("阴影半径", "blackhole_shadow_radius", "float", 8.0, 120.0),
+            ("盘半径", "blackhole_disk_radius", "float", 24.0, 260.0),
+            ("盘厚度", "blackhole_disk_thickness", "float", 2.0, 120.0),
+            ("旋转速度", "blackhole_spin_speed", "float", -3.0, 3.0),
+            ("引力曲率", "blackhole_curvature", "float", 0.0, 1.5),
+            ("透镜强度", "blackhole_lens_strength", "float", 0.0, 2.0),
+            ("盘面扰动", "blackhole_disk_turbulence", "float", 0.0, 2.0),
+            ("辉光强度", "blackhole_glow", "float", 0.0, 2.0),
+            ("环线最粗", "blackhole_loop_thick_head", "float", 0.5, 8.0),
+            ("环线最细", "blackhole_loop_thick_tail", "float", 0.0, 2.0),
         ]))
 
         props.append(("高级控制", [
@@ -5011,6 +5407,24 @@ class VisualizerControlUI(QWidget):
                 _ssv(self.kp_tentacle_core_base_speed_p_wmin_spin, float(d.get('kp_tentacle_core_base_speed_p_wmin', 0.0)))
             if hasattr(self, 'kp_tentacle_core_base_speed_p_wmax_spin'):
                 _ssv(self.kp_tentacle_core_base_speed_p_wmax_spin, float(d.get('kp_tentacle_core_base_speed_p_wmax', 1.35)))
+
+            self.blackhole_heart_on_check.setChecked(d.get('blackhole_heart_on', True))
+            bhc = d.get('blackhole_heart_color', (255, 88, 118))
+            self.blackhole_heart_color_btn.setStyleSheet(
+                f"background:rgb({bhc[0]},{bhc[1]},{bhc[2]}); border:1px solid #aaa; border-radius:2px;")
+            self.blackhole_heart_alpha_slider.setValue(int(d.get('blackhole_heart_alpha', 220)))
+            self.blackhole_heart_size_slider.setValue(int(round(float(d.get('blackhole_heart_size', 28.0)) * 10)))
+            self.blackhole_heart_thick_slider.setValue(int(round(float(d.get('blackhole_heart_thick', 2.8)) * 100)))
+            self.blackhole_shadow_radius_slider.setValue(int(round(float(d.get('blackhole_shadow_radius', 30.0)) * 10)))
+            self.blackhole_disk_radius_slider.setValue(int(round(float(d.get('blackhole_disk_radius', 108.0)) * 10)))
+            self.blackhole_disk_thickness_slider.setValue(int(round(float(d.get('blackhole_disk_thickness', 34.0)) * 10)))
+            self.blackhole_spin_speed_slider.setValue(int(round(float(d.get('blackhole_spin_speed', 1.05)) * 100)))
+            self.blackhole_curvature_slider.setValue(int(round(float(d.get('blackhole_curvature', 0.46)) * 100)))
+            self.blackhole_lens_strength_slider.setValue(int(round(float(d.get('blackhole_lens_strength', 0.78)) * 100)))
+            self.blackhole_disk_turbulence_slider.setValue(int(round(float(d.get('blackhole_disk_turbulence', 0.58)) * 100)))
+            self.blackhole_glow_slider.setValue(int(round(float(d.get('blackhole_glow', 0.65)) * 100)))
+            self.blackhole_loop_thick_head_slider.setValue(int(round(float(d.get('blackhole_loop_thick_head', 3.2)) * 100)))
+            self.blackhole_loop_thick_tail_slider.setValue(int(round(float(d.get('blackhole_loop_thick_tail', 0.35)) * 100)))
 
             # K/P 绑定：统一回填权重范围，并刷新显隐/高亮
             if hasattr(self, '_kp_binding_meta'):
