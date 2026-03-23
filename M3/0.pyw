@@ -34,6 +34,27 @@ CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 PRESETS_DIR = Path(__file__).parent / 'presets'
 SECTION_PRESETS_DIR = Path(__file__).parent / 'section_presets'
 
+PRESET_CATEGORY_ALL = 'all'
+PRESET_CATEGORY_CLASSIC = 'classic'
+PRESET_CATEGORY_JELLYFISH = 'jellyfish'
+PRESET_CATEGORY_LABELS = {
+    PRESET_CATEGORY_ALL: '全部预设',
+    PRESET_CATEGORY_CLASSIC: '原有主题',
+    PRESET_CATEGORY_JELLYFISH: '水母主题',
+}
+PRESET_CATEGORY_BADGES = {
+    PRESET_CATEGORY_CLASSIC: '原有',
+    PRESET_CATEGORY_JELLYFISH: '水母',
+}
+SECTION_PRESET_LABELS = {
+    'color': '颜色方案',
+    'physics': '运动表现',
+    'contour': '轮廓图元',
+    'tentacle': '水母图元',
+    'bars': '连线图元',
+    'graphics': '图元设置',
+}
+
 _DAMPED_OBJECT_KEYS = ('bar', 'c1', 'c2', 'c4', 'c5', 'b12', 'b23', 'b34', 'b45')
 
 _DEFAULT_CONFIG = {
@@ -169,6 +190,7 @@ def _clamp_time_window(value, fallback=10.0):
 def _normalize_loaded_config(data):
     cfg = _get_defaults()
     loaded = dict(data or {})
+    loaded.pop('__preset_category', None)
 
     legacy_rise = float(loaded.get('bar_rise_damping', loaded.get('damping', cfg['k_rise_damping'])))
     legacy_fall = float(loaded.get('bar_fall_damping', loaded.get('damping', cfg['k_fall_damping'])))
@@ -223,6 +245,7 @@ def _normalize_loaded_config(data):
     cfg.pop('damping', None)
     cfg.pop('spring_strength', None)
     cfg.pop('gravity', None)
+    cfg.pop('preset_category_filter', None)
     return cfg
 
 
@@ -1835,7 +1858,7 @@ class VisualizerControlUI(QWidget):
         self.k2_lbl.hide()
         r += 1
 
-        tg.addWidget(QLabel("预设管理:"), r, 0)
+        tg.addWidget(QLabel("主预设:"), r, 0)
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
@@ -2515,6 +2538,14 @@ class VisualizerControlUI(QWidget):
         v = QVBoxLayout(); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
 
         row1 = QHBoxLayout(); row1.setSpacing(6)
+        row1.addWidget(QLabel("分类:"))
+        self.preset_category_combo = QComboBox()
+        for category, label in PRESET_CATEGORY_LABELS.items():
+            self.preset_category_combo.addItem(label, category)
+        self._set_preset_category_combo_silent(PRESET_CATEGORY_ALL)
+        self.preset_category_combo.currentIndexChanged.connect(self._on_preset_category_changed)
+        row1.addWidget(self.preset_category_combo)
+
         row1.addWidget(QLabel("预设:"))
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
@@ -2604,7 +2635,80 @@ class VisualizerControlUI(QWidget):
         clean = ''.join('_' if ch in invalid else ch for ch in name).strip().strip('.')
         return clean
 
-    def _get_ordered_preset_files(self):
+    @staticmethod
+    def _normalize_preset_category(category):
+        category = str(category or PRESET_CATEGORY_ALL)
+        return category if category in PRESET_CATEGORY_LABELS else PRESET_CATEGORY_ALL
+
+    def _get_selected_preset_category(self):
+        return PRESET_CATEGORY_ALL
+
+    def _set_preset_category_combo_silent(self, category):
+        if not hasattr(self, 'preset_category_combo'):
+            return
+        target = self._normalize_preset_category(category)
+        for index in range(self.preset_category_combo.count()):
+            if self.preset_category_combo.itemData(index) == target:
+                if self.preset_category_combo.currentIndex() != index:
+                    self.preset_category_combo.blockSignals(True)
+                    self.preset_category_combo.setCurrentIndex(index)
+                    self.preset_category_combo.blockSignals(False)
+                return
+
+    @staticmethod
+    def _infer_preset_category_from_name(name: str):
+        text = str(name or '')
+        lower = text.lower()
+        if any(token in text for token in ('水母', '触须')):
+            return PRESET_CATEGORY_JELLYFISH
+        if any(token in lower for token in ('jellyfish', 'medusa', 'tentacle')):
+            return PRESET_CATEGORY_JELLYFISH
+        return PRESET_CATEGORY_CLASSIC
+
+    def _infer_preset_category_from_config(self, data, stem=''):
+        by_name = self._infer_preset_category_from_name(stem)
+        if by_name != PRESET_CATEGORY_CLASSIC:
+            return by_name
+        cfg = dict(data or {})
+        if not bool(cfg.get('tentacle_on', False)):
+            return PRESET_CATEGORY_CLASSIC
+        tentacle_count = float(cfg.get('tentacle_count', 0) or 0)
+        tentacle_length = float(cfg.get('tentacle_length', 0) or 0)
+        turbulence = float(cfg.get('tentacle_turbulence', 0) or 0)
+        sway_density = float(cfg.get('tentacle_sway_density', 0) or 0)
+        shader_enabled = bool(cfg.get('tentacle_shader_enabled', False))
+        if tentacle_count >= 12 and tentacle_length >= 300 and turbulence >= 40 and sway_density >= 2.0 and shader_enabled:
+            return PRESET_CATEGORY_JELLYFISH
+        return PRESET_CATEGORY_CLASSIC
+
+    @staticmethod
+    def _read_preset_json(fp: Path):
+        with open(fp, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def _get_preset_category_for_file(self, fp: Path):
+        try:
+            raw = self._read_preset_json(fp)
+        except Exception:
+            return self._infer_preset_category_from_name(fp.stem)
+        explicit = self._normalize_preset_category(raw.get('__preset_category'))
+        if explicit != PRESET_CATEGORY_ALL:
+            return explicit
+        return self._infer_preset_category_from_config(raw, fp.stem)
+
+    def _get_preset_display_name(self, fp: Path, category: str):
+        return fp.stem
+
+    def _select_preset_by_path(self, preset_path):
+        target = str(preset_path) if preset_path else None
+        if not target:
+            return
+        for index in range(self.preset_combo.count()):
+            if str(self.preset_combo.itemData(index)) == target:
+                self.preset_combo.setCurrentIndex(index)
+                return
+
+    def _get_all_ordered_preset_files(self):
         files = sorted(PRESETS_DIR.glob('*.json'), key=lambda p: p.name.lower())
         order = [str(x) for x in self.config.get('preset_order', []) if str(x).strip()]
         if not order:
@@ -2614,8 +2718,14 @@ class VisualizerControlUI(QWidget):
         ordered.extend([fp for fp in files if fp.stem not in order])
         return ordered
 
-    def _save_preset_order(self, stems):
-        self.config['preset_order'] = [str(s) for s in stems if str(s).strip()]
+    def _get_ordered_preset_files(self, category=None):
+        return self._get_all_ordered_preset_files()
+
+    def _save_preset_order(self, stems, category=None):
+        requested = [str(s) for s in stems if str(s).strip()]
+        current_all = [fp.stem for fp in self._get_all_ordered_preset_files()]
+        new_order = requested + [stem for stem in current_all if stem not in requested]
+        self.config['preset_order'] = new_order
         self._schedule_config_commit()
 
     def _refresh_preset_list(self):
@@ -2623,19 +2733,20 @@ class VisualizerControlUI(QWidget):
         current_fp = self.preset_combo.currentData()
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        files = self._get_ordered_preset_files()
+        files = self._get_all_ordered_preset_files()
         selected_idx = -1
         for fp in files:
-            self.preset_combo.addItem(fp.stem, str(fp))
+            self.preset_combo.addItem(self._get_preset_display_name(fp, PRESET_CATEGORY_ALL), str(fp))
             if current_fp and str(fp) == str(current_fp):
                 selected_idx = self.preset_combo.count() - 1
-        # 清理不存在的排序项
-        normalized_order = [Path(self.preset_combo.itemData(i)).stem for i in range(self.preset_combo.count())]
+        normalized_order = [fp.stem for fp in self._get_all_ordered_preset_files()]
         if normalized_order != self.config.get('preset_order', []):
             self.config['preset_order'] = normalized_order
             self._schedule_config_commit()
         if selected_idx >= 0:
             self.preset_combo.setCurrentIndex(selected_idx)
+        elif self.preset_combo.count() > 0:
+            self.preset_combo.setCurrentIndex(0)
         self.preset_combo.blockSignals(False)
         self._update_preset_preview()
 
@@ -2663,7 +2774,7 @@ class VisualizerControlUI(QWidget):
 
         def _reload_list(select_stem=None):
             lw.clear()
-            for fp in self._get_ordered_preset_files():
+            for fp in self._get_all_ordered_preset_files():
                 lw.addItem(fp.stem)
             if lw.count() == 0:
                 return
@@ -2773,6 +2884,9 @@ class VisualizerControlUI(QWidget):
     def _on_preset_changed(self, _idx):
         self._load_selected_preset(show_message=False)
 
+    def _on_preset_category_changed(self, _idx):
+        self._refresh_preset_list()
+
     def _on_preset_auto_toggled(self, v):
         self._update_cfg('preset_auto_switch', v)
         if v:
@@ -2868,9 +2982,7 @@ class VisualizerControlUI(QWidget):
             with open(fp, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, indent=2, ensure_ascii=False)
             self._refresh_preset_list()
-            idx = self.preset_combo.findText(safe_name)
-            if idx >= 0:
-                self.preset_combo.setCurrentIndex(idx)
+            self._select_preset_by_path(fp)
             QMessageBox.information(self, "成功", f"预设已保存: {safe_name}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存预设失败: {e}")
@@ -2912,9 +3024,7 @@ class VisualizerControlUI(QWidget):
             ]
             self._schedule_config_commit()
             self._refresh_preset_list()
-            idx = self.preset_combo.findText(safe_name)
-            if idx >= 0:
-                self.preset_combo.setCurrentIndex(idx)
+            self._select_preset_by_path(new_fp)
             self._set_info_bar(f"已重命名预设: {old_stem} → {safe_name}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"重命名预设失败: {e}")
@@ -2953,7 +3063,9 @@ class VisualizerControlUI(QWidget):
         try:
             from_config = self.config.copy()
             with open(fp, 'r', encoding='utf-8') as f:
-                cfg = _normalize_loaded_config(json.load(f))
+                raw_cfg = json.load(f)
+            raw_cfg.pop('__preset_category', None)
+            cfg = _normalize_loaded_config(raw_cfg)
             # 保留运行态设置，不被预设覆盖
             runtime_keep_keys = (
                 'pos_x', 'pos_y',
@@ -3180,7 +3292,6 @@ class VisualizerControlUI(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
-        v.addLayout(self._build_section_action_row('graphics'))
         v.addWidget(self._build_contour_section())
         v.addWidget(self._build_tentacle_section())
         v.addWidget(self._build_bars_section())
@@ -3198,6 +3309,8 @@ class VisualizerControlUI(QWidget):
         btn_reset.setMinimumHeight(26)
         btn_reset.clicked.connect(lambda: self._reset_section_to_default(section))
         row.addWidget(btn_reset)
+        section_label = SECTION_PRESET_LABELS.get(section, section)
+        row.addWidget(QLabel(f"{section_label}子预设:"))
         sec_combo = QComboBox()
         sec_combo.setMinimumWidth(150)
         row.addWidget(sec_combo)
@@ -3219,7 +3332,9 @@ class VisualizerControlUI(QWidget):
         if section == 'color':
             return [
                 'color_scheme', 'gradient_enabled', 'gradient_mode', 'gradient_points',
-                'color_dynamic', 'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'
+                'color_dynamic', 'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1',
+                'c1_color', 'c2_color', 'c3_color', 'c4_color', 'c5_color',
+                'tentacle_color', 'tentacle_shader_tip_color', 'tentacle_core_color',
             ]
         if section == 'physics':
             return [
@@ -3228,8 +3343,20 @@ class VisualizerControlUI(QWidget):
                 'k_rise_damping', 'k_fall_damping',
                 'bar_use_independent_damping', 'bar_independent_rise_damping', 'bar_independent_fall_damping',
                 'bar_default_height', 'bar_internal_min', 'bar_internal_max',
-                'bar_height_min', 'bar_height_max'
+                'bar_height_min', 'bar_height_max',
+                'circle_a1_rotation', 'circle_a1_radius',
+                'radius_damping', 'radius_spring', 'radius_gravity',
             ]
+        defaults = _get_defaults()
+        if section == 'contour':
+            return [key for key in defaults if re.match(r'^c[1-5]_', key)]
+        if section == 'tentacle':
+            return [
+                key for key in defaults
+                if key.startswith('tentacle_') or key.startswith('kp_bind_tentacle_') or key.startswith('kp_tentacle_')
+            ]
+        if section == 'bars':
+            return [key for key in defaults if re.match(r'^b(?:12|23|34|45)_', key)]
         if section == 'graphics':
             keys = []
             for li in range(1, 6):
@@ -3334,7 +3461,7 @@ class VisualizerControlUI(QWidget):
                 imax = float(self.config.get('bar_internal_max', 300.0))
                 if imin > imax:
                     self.config['bar_internal_min'], self.config['bar_internal_max'] = imax, imin
-            if section == 'graphics':
+            if section in {'graphics', 'contour', 'bars'}:
                 self._enforce_random_object_count()
             self._apply_config_to_ui(self.config)
 
@@ -3392,7 +3519,8 @@ class VisualizerControlUI(QWidget):
             return
         combo = self._section_preset_combos.get(section)
         default_name = combo.currentText().strip() if combo else ""
-        name, ok = QInputDialog.getText(self, "保存分区预设", "请输入名称:", text=default_name)
+        section_label = SECTION_PRESET_LABELS.get(section, section)
+        name, ok = QInputDialog.getText(self, "保存子主题预设", f"请输入{section_label}预设名称:", text=default_name)
         if not ok:
             return
         safe = self._safe_preset_name(name)
@@ -3407,9 +3535,9 @@ class VisualizerControlUI(QWidget):
             self._refresh_section_preset_combo(section)
             if combo is not None:
                 combo.setCurrentText(safe)
-            self._set_info_bar(f"已保存{section}分区预设: {safe}")
+            self._set_info_bar(f"已保存{section_label}子预设: {safe}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存分区预设失败: {e}")
+            QMessageBox.critical(self, "错误", f"保存{section_label}子预设失败: {e}")
 
     def _load_section_preset(self, section: str):
         keys = self._section_keys(section)
@@ -3418,27 +3546,29 @@ class VisualizerControlUI(QWidget):
         combo = self._section_preset_combos.get(section)
         if combo is None:
             return
+        section_label = SECTION_PRESET_LABELS.get(section, section)
         name = combo.currentText().strip()
         if not name:
-            QMessageBox.warning(self, "提示", "请先选择分区预设")
+            QMessageBox.warning(self, "提示", f"请先选择{section_label}子预设")
             return
         presets = self._read_section_presets(section)
         data = presets.get(name)
         if not isinstance(data, dict):
-            QMessageBox.warning(self, "提示", "分区预设不存在或已损坏")
+            QMessageBox.warning(self, "提示", f"{section_label}子预设不存在或已损坏")
             self._refresh_section_preset_combo(section)
             return
         for key in keys:
             if key in data:
                 self.config[key] = data[key]
         self._apply_config_to_ui(self.config)
-        self._set_info_bar(f"已读取{section}分区预设: {name}")
+        self._set_info_bar(f"已读取{section_label}子预设: {name}")
 
     # ── 五层轮廓 ──────────────────────────────────────────
 
     def _build_contour_section(self):
         s = _Collapsible("五层填充 (L1~L5)", expanded=False)
         g = QGridLayout(); g.setSpacing(6); g.setContentsMargins(0,0,0,0); r = 0
+        g.addLayout(self._build_section_action_row('contour'), r, 0, 1, 4); r += 1
         _layers = [
             (1, "L1 内缓慢", True, True),
             (2, "L2 内快速", True, False),
@@ -3545,6 +3675,7 @@ class VisualizerControlUI(QWidget):
     def _build_tentacle_section(self):
         s = _Collapsible("水母", expanded=True)
         g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0, 0, 0, 0); r = 0
+        g.addLayout(self._build_section_action_row('tentacle'), r, 0, 1, 4); r += 1
 
         chk = QCheckBox("显示")
         chk.setChecked(self.config.get('tentacle_on', True))
@@ -4108,6 +4239,7 @@ class VisualizerControlUI(QWidget):
     def _build_bars_section(self):
         s = _Collapsible("四层连线 (B12~B45)", expanded=False)
         g = QGridLayout(); g.setSpacing(6); g.setContentsMargins(0,0,0,0); r = 0
+        g.addLayout(self._build_section_action_row('bars'), r, 0, 1, 4); r += 1
         for key, bname in [('b12', 'L1-L2 间'), ('b23', 'L2-L3 间'),
                            ('b34', 'L3-L4 间'), ('b45', 'L4-L5 间')]:
             hdr = QLabel(f"── 连线 {bname} ──")

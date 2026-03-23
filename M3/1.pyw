@@ -236,6 +236,7 @@ def _normalize_loaded_config(data):
 
     cfg = copy.deepcopy(_DEFAULT_CONFIG)
     loaded = dict(data or {})
+    loaded.pop("__preset_category", None)
 
     legacy_rise = float(loaded.get("bar_rise_damping", loaded.get("damping", cfg["k_rise_damping"])))
     legacy_fall = float(loaded.get("bar_fall_damping", loaded.get("damping", cfg["k_fall_damping"])))
