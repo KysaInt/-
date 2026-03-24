@@ -61,12 +61,12 @@ if errorlevel 1 (
 
 echo [4/4] 启动程序...
 if /I "%RUN_MODE%"=="debug" (
-    echo [调试] 当前为控制台调试模式。
-    echo [调试] 如需普通启动，直接双击本文件或不带参数运行。
+    echo [DEBUG] Console mode enabled.
+    echo [DEBUG] Run without arguments for normal startup.
     echo.
     call "%PYTHON_EXE%" "%TARGET%"
     echo.
-    echo [调试] 程序已退出，退出码: !errorlevel!
+    echo [DEBUG] Exit code: !errorlevel!
     pause
     exit /b !errorlevel!
 )

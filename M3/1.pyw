@@ -512,6 +512,46 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         painter.end()
 
 
+class PainterVisualizerWidget(QWidget):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, _event):
+        state = self.owner.render_state
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        if self.owner.config.get("bg_transparent", True):
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        else:
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
+
+        if state:
+            for fill_item in state.get("fills", []):
+                self.owner._paint_fill(painter, fill_item["points"], fill_item["color"])
+
+            for tentacle_item in state.get("tentacles", []):
+                self.owner._paint_weighted_segments(painter, tentacle_item["segments"])
+
+            for bar_item in state.get("bars", []):
+                self.owner._paint_segments(painter, bar_item["segments"], bar_item["thickness"])
+
+            for line_item in state.get("lines", []):
+                self.owner._paint_line_loop(painter, line_item["points"], line_item["color"], line_item["thickness"])
+
+        painter.end()
+
+
+def _should_use_painter_renderer(config):
+    return sys.platform.startswith("win")
+
+
 class CircularVisualizerWindow(QWidget):
     def __init__(self, config_queue=None, status_queue=None):
         super().__init__(None)
@@ -537,7 +577,10 @@ class CircularVisualizerWindow(QWidget):
         self.resize(self.WIDTH, self.HEIGHT)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        self.gl_widget = OpenGLVisualizerWidget(self)
+        if _should_use_painter_renderer(self.config):
+            self.gl_widget = PainterVisualizerWidget(self)
+        else:
+            self.gl_widget = OpenGLVisualizerWidget(self)
         self.overlay = OverlayControlLayer(self)
 
         self.window_alpha = int(self.config.get("alpha", 255))
@@ -1799,6 +1842,21 @@ class CircularVisualizerWindow(QWidget):
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(self._make_round_pen(color, thickness))
+        painter.drawPath(path)
+
+    def _paint_fill(self, painter, points, color):
+        if not points or len(points) < 3:
+            return
+
+        path = QPainterPath()
+        first_x, first_y = points[0]
+        path.moveTo(QPointF(float(first_x), float(first_y)))
+        for pos_x, pos_y in points[1:]:
+            path.lineTo(QPointF(float(pos_x), float(pos_y)))
+        path.closeSubpath()
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color[0], color[1], color[2], color[3]))
         painter.drawPath(path)
 
     def _paint_polyline(self, painter, points, color, thickness):
