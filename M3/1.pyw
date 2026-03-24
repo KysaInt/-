@@ -42,6 +42,17 @@ CONFIG_FILE = Path(__file__).parent / "visualizer_config.json"
 
 _DAMPED_OBJECT_KEYS = ("bar", "c1", "c2", "c4", "c5", "b12", "b23", "b34", "b45")
 
+_CONTOUR_KP_KEYS = tuple(
+    f"c{layer}_{suffix}"
+    for layer in range(1, 6)
+    for suffix in ("thick", "alpha", "fill_alpha", "step", "decay", "rot_speed", "rot_pow")
+)
+_BAR_KP_KEYS = tuple(
+    f"{prefix}_{suffix}"
+    for prefix in ("b12", "b23", "b34", "b45")
+    for suffix in ("thick", "fixed_len")
+)
+
 _DEFAULT_CONFIG = {
     "width": 0,
     "height": 0,
@@ -53,6 +64,7 @@ _DEFAULT_CONFIG = {
     "drag_adjust_mode": False,
     "bg_transparent": True,
     "always_on_top": True,
+    "window_layer": "top",
     "num_bars": 64,
     "smoothing": 0.7,
     "k_rise_damping": 0.1,
@@ -223,6 +235,12 @@ for _prefix in _DAMPED_OBJECT_KEYS[1:]:
     _DEFAULT_CONFIG[f"{_prefix}_independent_rise_damping"] = 0.1
     _DEFAULT_CONFIG[f"{_prefix}_independent_fall_damping"] = 0.999
 
+for _cfg_key in _CONTOUR_KP_KEYS + _BAR_KP_KEYS:
+    for _sig in ("k", "p"):
+        _DEFAULT_CONFIG[f"kp_bind_{_cfg_key}_{_sig}"] = False
+        _DEFAULT_CONFIG[f"kp_{_cfg_key}_{_sig}_wmin"] = 0.0
+        _DEFAULT_CONFIG[f"kp_{_cfg_key}_{_sig}_wmax"] = 0.0
+
 
 def _clamp_time_window(value, fallback=10.0):
     try:
@@ -246,6 +264,7 @@ def _normalize_loaded_config(data):
     loaded.setdefault("bar_independent_fall_damping", max(0.0, min(0.999, legacy_fall)))
     loaded.setdefault("bar_use_independent_time_window", False)
     loaded.setdefault("bar_time_window", _clamp_time_window(loaded.get("a1_time_window", cfg["a1_time_window"]), cfg["a1_time_window"]))
+    loaded.setdefault("window_layer", "top" if loaded.get("always_on_top", cfg["always_on_top"]) else "normal")
     for prefix in _DAMPED_OBJECT_KEYS[1:]:
         loaded.setdefault(f"{prefix}_use_independent_damping", False)
         loaded.setdefault(f"{prefix}_independent_rise_damping", loaded["k_rise_damping"])
@@ -285,6 +304,9 @@ def _normalize_loaded_config(data):
     cfg.pop("damping", None)
     cfg.pop("spring_strength", None)
     cfg.pop("gravity", None)
+    if cfg.get("window_layer") not in {"top", "normal", "bottom"}:
+        cfg["window_layer"] = "top" if cfg.get("always_on_top", True) else "normal"
+    cfg["always_on_top"] = cfg.get("window_layer") == "top"
     return cfg
 
 
@@ -306,7 +328,7 @@ _NOINTERP_KEYS = frozenset({
     "master_visible",
     "gradient_enabled", "color_dynamic", "circle_a1_rotation", "circle_a1_radius",
     "tentacle_shader_enabled",
-    "k2_enabled", "color_cycle_a1", "drag_adjust_mode", "always_on_top", "bg_transparent",
+    "k2_enabled", "color_cycle_a1", "drag_adjust_mode", "always_on_top", "bg_transparent", "window_layer",
     "bar_use_independent_damping", "bar_use_independent_time_window",
     "c1_fill", "c2_fill", "c3_fill", "c4_fill", "c5_fill",
     "c1_use_independent_damping", "c2_use_independent_damping",
@@ -337,6 +359,51 @@ def _ease_value(t, mode):
     if mode == "cubic":
         return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     return t
+
+
+def _sample_gradient_color(points, ratio):
+    normalized = []
+    for entry in (points or []):
+        if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+            continue
+        pos, color = entry[0], entry[1]
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            continue
+        try:
+            normalized.append((float(pos), (int(color[0]), int(color[1]), int(color[2]))))
+        except Exception:
+            continue
+    if not normalized:
+        return (255, 255, 255)
+    normalized.sort(key=lambda item: item[0])
+    ratio = max(0.0, min(1.0, float(ratio)))
+    for index in range(len(normalized) - 1):
+        pos1, color1 = normalized[index]
+        pos2, color2 = normalized[index + 1]
+        if pos1 <= ratio <= pos2:
+            blend = (ratio - pos1) / (pos2 - pos1) if pos2 > pos1 else 0.0
+            return tuple(
+                int(round(color1[channel] + (color2[channel] - color1[channel]) * blend))
+                for channel in range(3)
+            )
+    return normalized[0][1] if ratio <= normalized[0][0] else normalized[-1][1]
+
+
+def _interpolate_gradient_points(from_points, to_points, ratio, count=8):
+    steps = max(2, int(count))
+    blended = []
+    for index in range(steps):
+        pos = index / max(1, steps - 1)
+        from_color = _sample_gradient_color(from_points, pos)
+        to_color = _sample_gradient_color(to_points, pos)
+        blended.append((
+            pos,
+            tuple(
+                int(round(from_color[channel] + (to_color[channel] - from_color[channel]) * ratio))
+                for channel in range(3)
+            )
+        ))
+    return blended
 
 
 def _load_config():
@@ -666,6 +733,21 @@ class CircularVisualizerWindow(QWidget):
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self._tick)
 
+    def _runtime_kp_delta(self, cfg_key: str, sig: str, normalized: float) -> float:
+        if not bool(self.config.get(f"kp_bind_{cfg_key}_{sig}", False)):
+            return 0.0
+        wmin = float(self.config.get(f"kp_{cfg_key}_{sig}_wmin", 0.0))
+        wmax = float(self.config.get(f"kp_{cfg_key}_{sig}_wmax", 0.0))
+        normalized = max(0.0, min(1.0, float(normalized)))
+        return wmin + (wmax - wmin) * normalized
+
+    def _runtime_kp_add(self, cfg_key: str, base_value: float, normalized_k: float, normalized_p: float) -> float:
+        return (
+            float(base_value)
+            + self._runtime_kp_delta(cfg_key, 'k', normalized_k)
+            + self._runtime_kp_delta(cfg_key, 'p', normalized_p)
+        )
+
     def resizeEvent(self, event):
         self.gl_widget.setGeometry(0, 0, self.width(), self.height())
         self.overlay.setGeometry(0, 0, self.width(), self.height())
@@ -930,6 +1012,7 @@ class CircularVisualizerWindow(QWidget):
                     "k2": float(self.k2_value),
                     "spectrum_bars": list(self.preview_spectrum_values),
                     "color_preview": [tuple(int(channel) for channel in color) for color in self.colors],
+                    "runtime_color_state": self._build_runtime_color_state(),
                     "color_cycle_hue": float(self.color_cycle_hue),
                     "color_cycle_rate": float(self.current_color_cycle_rate),
                     "drag_adjust_mode": bool(self.config.get("drag_adjust_mode", False)),
@@ -939,6 +1022,21 @@ class CircularVisualizerWindow(QWidget):
             )
         except Exception:
             pass
+
+    def _build_runtime_color_state(self):
+        state = {
+            'palette_preview': [tuple(int(channel) for channel in color[:3]) for color in (self.colors[:8] or [])],
+            'gradient_points': [
+                (float(entry[0]), tuple(int(channel) for channel in entry[1][:3]))
+                for entry in (self.config.get('gradient_points', []) or [])
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], (list, tuple)) and len(entry[1]) >= 3
+            ],
+            'tentacle_color': tuple(int(channel) for channel in self.config.get('tentacle_color', (130, 240, 220))[:3]),
+            'tentacle_shader_tip_color': tuple(int(channel) for channel in self.config.get('tentacle_shader_tip_color', (88, 170, 255))[:3]),
+        }
+        for layer_index in range(1, 6):
+            state[f'c{layer_index}_color'] = tuple(int(channel) for channel in self.config.get(f'c{layer_index}_color', (255, 255, 255))[:3])
+        return state
 
     def _update_colors(self):
         scheme = self.config.get("color_scheme", "rainbow")
@@ -1087,6 +1185,7 @@ class CircularVisualizerWindow(QWidget):
         WS_EX_TRANSPARENT = 0x00000020
         HWND_TOPMOST = -1
         HWND_NOTOPMOST = -2
+        HWND_BOTTOM = 1
         SWP_NOMOVE = 0x0002
         SWP_NOSIZE = 0x0001
         SWP_NOACTIVATE = 0x0010
@@ -1100,7 +1199,13 @@ class CircularVisualizerWindow(QWidget):
             style |= WS_EX_TRANSPARENT
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
-        z_order = HWND_TOPMOST if self.config.get("always_on_top", True) else HWND_NOTOPMOST
+        layer = self.config.get("window_layer", "top" if self.config.get("always_on_top", True) else "normal")
+        if layer == "bottom":
+            z_order = HWND_BOTTOM
+        elif layer == "top":
+            z_order = HWND_TOPMOST
+        else:
+            z_order = HWND_NOTOPMOST
         user32.SetWindowPos(hwnd, z_order, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)
 
         opacity = max(0.05, min(1.0, self.window_alpha / 255.0))
@@ -1234,8 +1339,10 @@ class CircularVisualizerWindow(QWidget):
         return list(zip(pos_x, pos_y))
 
     def _build_bar_segments(self, cx, cy, radii_a, radii_b, rot_a, rot_b, segments, seg_angle, lengths, key):
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
         fixed = self.config.get(f"{key}_fixed", False)
-        fixed_len = float(self.config.get(f"{key}_fixed_len", 30))
+        fixed_len = self._runtime_kp_add(key + "_fixed_len", float(self.config.get(f"{key}_fixed_len", 30)), normalized_k, normalized_p)
         from_start = self.config.get(f"{key}_from_start", True)
         from_end = self.config.get(f"{key}_from_end", False)
         from_center = self.config.get(f"{key}_from_center", False)
@@ -1653,8 +1760,11 @@ class CircularVisualizerWindow(QWidget):
 
         self.preview_spectrum_values = [float(value) for value in object_lengths["bar"].tolist()]
 
-        decay_inner = float(self.config.get("c1_decay", 0.995))
-        decay_outer = float(self.config.get("c5_decay", 0.995))
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+
+        decay_inner = self._runtime_kp_add("c1_decay", float(self.config.get("c1_decay", 0.995)), normalized_k, normalized_p)
+        decay_outer = self._runtime_kp_add("c5_decay", float(self.config.get("c5_decay", 0.995)), normalized_k, normalized_p)
         self.peak_inner_heights = np.maximum(object_lengths["c1"], self.peak_inner_heights * decay_inner)
         self.peak_outer_heights = np.maximum(object_lengths["c5"], self.peak_outer_heights * decay_outer)
 
@@ -1662,8 +1772,8 @@ class CircularVisualizerWindow(QWidget):
         self.prev_a1_value = effective_a1
         normalized_delta = min(a1_delta / 500.0, 1.0)
         for layer_index in range(1, 6):
-            speed = float(self.config.get(f"c{layer_index}_rot_speed", 1.0))
-            power = float(self.config.get(f"c{layer_index}_rot_pow", 0.5))
+            speed = self._runtime_kp_add(f"c{layer_index}_rot_speed", float(self.config.get(f"c{layer_index}_rot_speed", 1.0)), normalized_k, normalized_p)
+            power = self._runtime_kp_add(f"c{layer_index}_rot_pow", float(self.config.get(f"c{layer_index}_rot_pow", 0.5)), normalized_k, normalized_p)
             if self.config.get("circle_a1_rotation", True) and normalized_delta > 1e-4:
                 if power >= 0:
                     factor = pow(normalized_delta + 0.001, power)
@@ -1696,7 +1806,7 @@ class CircularVisualizerWindow(QWidget):
                 need_fill = self.config.get(f"c{layer_index}_fill", False)
                 if not (need_line or need_fill):
                     continue
-                step = max(1, int(self.config.get(f"c{layer_index}_step", 2)))
+                step = max(1, int(round(self._runtime_kp_add(f"c{layer_index}_step", float(self.config.get(f"c{layer_index}_step", 2)), normalized_k, normalized_p))))
                 contour_points[layer_index] = self._contour_from_radii(cx, cy, radius_map[layer_index], rot[layer_index], segments, seg_angle, step)
 
             circle_points = self._circle_points(cx, cy, radius, max(96, self.NUM_BARS * segments * 4), rot[3])
@@ -1707,7 +1817,8 @@ class CircularVisualizerWindow(QWidget):
                 points = circle_points if layer_index == 3 else contour_points.get(layer_index)
                 if points and len(points) >= 3:
                     color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
-                    alpha = int(self.config.get(f"c{layer_index}_fill_alpha", 50))
+                    alpha = int(round(self._runtime_kp_add(f"c{layer_index}_fill_alpha", float(self.config.get(f"c{layer_index}_fill_alpha", 50)), normalized_k, normalized_p)))
+                    alpha = max(0, min(255, alpha))
                     fills.append({"points": points, "color": (*color, alpha)})
 
         if tentacles_enabled and self.config.get("tentacle_core_on", True):
@@ -1756,7 +1867,8 @@ class CircularVisualizerWindow(QWidget):
             for layer_a, layer_b, key in ((4, 5, "b45"), (3, 4, "b34"), (2, 3, "b23"), (1, 2, "b12")):
                 if not self.config.get(f"{key}_on", False):
                     continue
-                thickness = int(self.config.get(f"{key}_thick", 3))
+                thickness = int(round(self._runtime_kp_add(f"{key}_thick", float(self.config.get(f"{key}_thick", 3)), normalized_k, normalized_p)))
+                thickness = max(1, thickness)
                 segments_data = self._build_bar_segments(
                     cx,
                     cy,
@@ -1779,8 +1891,10 @@ class CircularVisualizerWindow(QWidget):
                 points = circle_points if layer_index == 3 else contour_points.get(layer_index)
                 if points and len(points) >= 3:
                     color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
-                    alpha = int(self.config.get(f"c{layer_index}_alpha", 180))
-                    thickness = int(self.config.get(f"c{layer_index}_thick", 2))
+                    alpha = int(round(self._runtime_kp_add(f"c{layer_index}_alpha", float(self.config.get(f"c{layer_index}_alpha", 180)), normalized_k, normalized_p)))
+                    alpha = max(0, min(255, alpha))
+                    thickness = int(round(self._runtime_kp_add(f"c{layer_index}_thick", float(self.config.get(f"c{layer_index}_thick", 2)), normalized_k, normalized_p)))
+                    thickness = max(1, thickness)
                     lines.append({"points": points, "color": (*color, alpha), "thickness": thickness})
 
         self.render_state = {"center": (cx, cy), "fills": fills, "tentacles": tentacles, "bars": bars, "lines": lines}
@@ -1916,6 +2030,13 @@ class CircularVisualizerWindow(QWidget):
                     if new_config["command"] == "center_window":
                         self._center_window(reset_visual_center=True)
                         self._send_status()
+                    elif new_config["command"] == "set_window_layer":
+                        mode = str(new_config.get("mode", "normal")).lower()
+                        if mode not in {"top", "normal", "bottom"}:
+                            mode = "normal"
+                        self.config["window_layer"] = mode
+                        self.config["always_on_top"] = mode == "top"
+                        self._apply_window_styles(force=True)
                     elif new_config["command"] == "preset_transition":
                         self._start_transition(
                             new_config.get("from_config", {}),
@@ -2118,6 +2239,10 @@ class CircularVisualizerWindow(QWidget):
 
         interp = self._transition_target.copy()
         et = _ease_value(t, self._transition_easing)
+
+        from_gradient = self._transition_from.get('gradient_points', [])
+        to_gradient = self._transition_target.get('gradient_points', [])
+        interp['gradient_points'] = _interpolate_gradient_points(from_gradient, to_gradient, et, count=max(2, len(from_gradient), len(to_gradient), 8))
 
         # ── 数值插值（跳过透明度调度控制的键和布尔开关）────────────
         skip_interp = _NOINTERP_KEYS | getattr(self, '_transition_alpha_controlled', set())

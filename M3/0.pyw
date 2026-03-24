@@ -9,6 +9,7 @@ import json
 import time
 import random
 import re
+import subprocess
 import colorsys
 import threading
 import multiprocessing as mp
@@ -36,11 +37,39 @@ SECTION_PRESETS_DIR = Path(__file__).parent / 'section_presets'
 
 _DAMPED_OBJECT_KEYS = ('bar', 'c1', 'c2', 'c4', 'c5', 'b12', 'b23', 'b34', 'b45')
 
+_THEME_PRESET_SECTIONS = (
+    'theme_classic_kaleidoscope',
+    'theme_kaleidoscope_fill',
+    'theme_kaleidoscope_lines',
+    'theme_softbody',
+)
+
+_CONTOUR_KP_KEYS = tuple(
+    f'c{layer}_{suffix}'
+    for layer in range(1, 6)
+    for suffix in ('thick', 'alpha', 'fill_alpha', 'step', 'decay', 'rot_speed', 'rot_pow')
+)
+_BAR_KP_KEYS = tuple(
+    f'{prefix}_{suffix}'
+    for prefix in ('b12', 'b23', 'b34', 'b45')
+    for suffix in ('thick', 'fixed_len')
+)
+
+_SECTION_DISPLAY_NAMES = {
+    'color': '颜色方案',
+    'physics': '运动表现',
+    'graphics': '图元设置',
+    'theme_classic_kaleidoscope': '经典主题',
+    'theme_kaleidoscope_fill': '填充子主题',
+    'theme_kaleidoscope_lines': '连线子主题',
+    'theme_softbody': '柔体主题',
+}
+
 _DEFAULT_CONFIG = {
     'width': 0, 'height': 0, 'alpha': 255, 'ui_alpha': 180,
     'global_scale': 1.0, 'pos_x': -1, 'pos_y': -1,
     'drag_adjust_mode': False,
-    'bg_transparent': True, 'always_on_top': True,
+    'bg_transparent': True, 'always_on_top': True, 'window_layer': 'top',
     'num_bars': 64, 'smoothing': 0.7,
     'k_rise_damping': 0.1, 'k_fall_damping': 0.999,
     'bar_use_independent_damping': False,
@@ -62,6 +91,7 @@ _DEFAULT_CONFIG = {
     'a1_time_window': 10,
     'k2_enabled': False, 'k2_pow': 1.0,
     'master_visible': True,
+    'contours_enabled': True, 'bars_enabled': True, 'tentacles_enabled': True,
     # C1 内缓慢  C2 内快速  C3 基圆  C4 外快速  C5 外缓慢
     'c1_on': True,  'c1_color': (100,180,255), 'c1_alpha': 100, 'c1_thick': 1,
     'c1_fill': False, 'c1_fill_alpha': 30, 'c1_step': 2, 'c1_decay': 0.995,
@@ -153,6 +183,22 @@ for _prefix in _DAMPED_OBJECT_KEYS[1:]:
     _DEFAULT_CONFIG[f'{_prefix}_independent_rise_damping'] = 0.1
     _DEFAULT_CONFIG[f'{_prefix}_independent_fall_damping'] = 0.999
 
+for _cfg_key in _CONTOUR_KP_KEYS + _BAR_KP_KEYS:
+    for _sig in ('k', 'p'):
+        _DEFAULT_CONFIG[f'kp_bind_{_cfg_key}_{_sig}'] = False
+        _DEFAULT_CONFIG[f'kp_{_cfg_key}_{_sig}_wmin'] = 0.0
+        _DEFAULT_CONFIG[f'kp_{_cfg_key}_{_sig}_wmax'] = 0.0
+
+
+def _kp_binding_config_keys(cfg_keys, supports=('k', 'p')):
+    keys = []
+    for cfg_key in cfg_keys:
+        for sig in supports:
+            keys.append(f'kp_bind_{cfg_key}_{sig}')
+            keys.append(f'kp_{cfg_key}_{sig}_wmin')
+            keys.append(f'kp_{cfg_key}_{sig}_wmax')
+    return keys
+
 
 def _get_defaults():
     import copy
@@ -179,6 +225,7 @@ def _normalize_loaded_config(data):
     loaded.setdefault('bar_independent_fall_damping', max(0.0, min(0.999, legacy_fall)))
     loaded.setdefault('bar_use_independent_time_window', False)
     loaded.setdefault('bar_time_window', _clamp_time_window(loaded.get('a1_time_window', cfg['a1_time_window']), cfg['a1_time_window']))
+    loaded.setdefault('window_layer', 'top' if loaded.get('always_on_top', cfg['always_on_top']) else 'normal')
     for prefix in _DAMPED_OBJECT_KEYS[1:]:
         loaded.setdefault(f'{prefix}_use_independent_damping', False)
         loaded.setdefault(f'{prefix}_independent_rise_damping', loaded['k_rise_damping'])
@@ -223,6 +270,9 @@ def _normalize_loaded_config(data):
     cfg.pop('damping', None)
     cfg.pop('spring_strength', None)
     cfg.pop('gravity', None)
+    if cfg.get('window_layer') not in {'top', 'normal', 'bottom'}:
+        cfg['window_layer'] = 'top' if cfg.get('always_on_top', True) else 'normal'
+    cfg['always_on_top'] = (cfg.get('window_layer') == 'top')
     return cfg
 
 
@@ -1371,6 +1421,7 @@ class VisualizerControlUI(QWidget):
         self._palette_cache = []
         self._palette_refill_running = False
         self._section_preset_combos = {}
+        self._theme_nav_checks = {}
 
         self._kp_binding_meta = {}
         self._kp_accent_color = _active_palette_color(QPalette.ColorRole.Highlight).name()
@@ -1483,6 +1534,79 @@ class VisualizerControlUI(QWidget):
         self._set_spin_silent(getattr(self, 'cyc_pow_spin', None), float(self.config.get('color_cycle_pow', 2.0)))
         self._set_spin_silent(getattr(self, 'color_cycle_pow_quick_spin', None), float(self.config.get('color_cycle_pow', 2.0)))
 
+    def _sync_theme_enable_widgets(self):
+        classic_enabled = bool(self.config.get('contours_enabled', True) or self.config.get('bars_enabled', True))
+        self._set_checkbox_silent(self._theme_nav_checks.get('theme_classic_kaleidoscope'), classic_enabled)
+        self._set_checkbox_silent(self._theme_nav_checks.get('theme_kaleidoscope_fill'), bool(self.config.get('contours_enabled', True)))
+        self._set_checkbox_silent(self._theme_nav_checks.get('theme_kaleidoscope_lines'), bool(self.config.get('bars_enabled', True)))
+        self._set_checkbox_silent(self._theme_nav_checks.get('theme_softbody'), bool(self.config.get('tentacles_enabled', True)))
+
+    def _set_classic_theme_enabled(self, enabled):
+        enabled = bool(enabled)
+        self._update_cfg('contours_enabled', enabled)
+        self._update_cfg('bars_enabled', enabled)
+
+    def _set_theme_section_enabled(self, section, enabled):
+        if section == 'theme_classic_kaleidoscope':
+            self._set_classic_theme_enabled(enabled)
+            return
+        if section == 'theme_kaleidoscope_fill':
+            self._update_cfg('contours_enabled', bool(enabled))
+            return
+        if section == 'theme_kaleidoscope_lines':
+            self._update_cfg('bars_enabled', bool(enabled))
+            return
+        if section == 'theme_softbody':
+            self._update_cfg('tentacles_enabled', bool(enabled))
+
+    def _create_theme_nav_check(self, section):
+        checkbox = QCheckBox()
+        checkbox.setToolTip('启用该主题')
+        checkbox.setFixedSize(18, 18)
+        checkbox.setStyleSheet('QCheckBox::indicator { width: 11px; height: 11px; }')
+        checkbox.toggled.connect(lambda checked, s=section: self._set_theme_section_enabled(s, checked))
+        self._theme_nav_checks[section] = checkbox
+
+        holder = QWidget()
+        holder.setStyleSheet('background: transparent;')
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addStretch()
+        layout.addWidget(checkbox)
+        layout.addStretch()
+        return holder
+
+    def _section_display_name(self, section: str):
+        return _SECTION_DISPLAY_NAMES.get(section, section)
+
+    def _build_theme_mix_payload(self, config_data):
+        payload = {}
+        for section in _THEME_PRESET_SECTIONS:
+            keys = self._section_keys(section)
+            payload[section] = {key: config_data.get(key) for key in keys if key in config_data}
+        return payload
+
+    def _build_full_preset_payload(self):
+        save_data = {key: value for key, value in self.config.items() if key not in ('pos_x', 'pos_y')}
+        save_data['_preset_meta'] = {
+            'format': 'theme-mix-v2',
+            'theme_sections': list(_THEME_PRESET_SECTIONS),
+        }
+        save_data['_theme_mix'] = self._build_theme_mix_payload(save_data)
+        return save_data
+
+    def _inflate_loaded_preset_data(self, raw_data):
+        if not isinstance(raw_data, dict):
+            return {}
+        config_data = {key: value for key, value in raw_data.items() if not str(key).startswith('_')}
+        theme_mix = raw_data.get('_theme_mix', {})
+        if isinstance(theme_mix, dict):
+            for section_data in theme_mix.values():
+                if isinstance(section_data, dict):
+                    config_data.update(section_data)
+        return config_data
+
     def _update_cfg(self, key, value):
         self.config[key] = value
         if hasattr(self, '_kp_binding_meta') and (key in self._kp_binding_meta or str(key).startswith('kp_bind_') or str(key).startswith('kp_')):
@@ -1491,6 +1615,8 @@ class VisualizerControlUI(QWidget):
             self._sync_color_quick_widgets(bool(value))
         elif key in {'color_cycle_speed', 'color_cycle_pow', 'color_cycle_a1'}:
             self._sync_color_quick_widgets()
+        elif key in {'contours_enabled', 'bars_enabled', 'tentacles_enabled'}:
+            self._sync_theme_enable_widgets()
         if key in {'color_scheme', 'gradient_enabled', 'gradient_points', 'tentacle_color', 'tentacle_shader_tip_color'} or re.match(r'^c[1-5]_color$', str(key)):
             self._update_color_preview_strip()
         if key in {
@@ -1620,6 +1746,119 @@ class VisualizerControlUI(QWidget):
             'weight_spins': dict(weight_spins or {}),
         }
         self._update_kp_binding_ui(cfg_key)
+
+    def _add_kp_slider_row(
+        self,
+        grid,
+        row,
+        *,
+        label_text,
+        cfg_key,
+        default_value,
+        soft_min,
+        soft_max,
+        hard_min,
+        hard_max,
+        supports=('k', 'p'),
+        slider_scale=100,
+        step=0.01,
+        decimals=2,
+        width=72,
+        integer=False,
+        kp_soft_min=-1.0,
+        kp_soft_max=1.0,
+        kp_hard_min=-100.0,
+        kp_hard_max=100.0,
+        kp_decimals=3,
+    ):
+        label = self._attach_kp_bindable_label(QLabel(label_text), cfg_key, supports=supports)
+        grid.addWidget(label, row, 0)
+        if integer:
+            slider, box = self._new_bound_int_slider(
+                cfg_key=cfg_key, default_value=default_value,
+                soft_min=soft_min, soft_max=soft_max,
+                hard_min=hard_min, hard_max=hard_max,
+                step=int(step), width=width,
+            )
+        else:
+            slider, box = self._new_bound_float_slider(
+                cfg_key=cfg_key, default_value=default_value,
+                soft_min=soft_min, soft_max=soft_max,
+                hard_min=hard_min, hard_max=hard_max,
+                slider_scale=slider_scale, step=step, decimals=decimals, width=width,
+            )
+        grid.addWidget(slider, row, 1, 1, 2)
+        grid.addWidget(box, row, 3)
+        row += 1
+        bind_widget, base_label, bind_rows, weight_spins = self._build_kp_binding_container(
+            cfg_key=cfg_key, supports=supports,
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=kp_soft_min, soft_max=kp_soft_max,
+            hard_min=kp_hard_min, hard_max=kp_hard_max,
+            decimals=kp_decimals,
+        )
+        grid.addWidget(bind_widget, row, 0, 1, 4)
+        row += 1
+        self._register_kp_binding_ui(
+            cfg_key=cfg_key, label=label,
+            container=bind_widget, base_label=base_label,
+            rows=bind_rows, supports=supports, weight_spins=weight_spins,
+        )
+        return row, label, slider, box
+
+    def _add_kp_spin_row(
+        self,
+        grid,
+        row,
+        *,
+        label_text,
+        cfg_key,
+        default_value,
+        soft_min,
+        soft_max,
+        hard_min,
+        hard_max,
+        supports=('k', 'p'),
+        step=1,
+        decimals=2,
+        width=72,
+        integer=True,
+        suffix='',
+        kp_soft_min=-1.0,
+        kp_soft_max=1.0,
+        kp_hard_min=-100.0,
+        kp_hard_max=100.0,
+        kp_decimals=3,
+    ):
+        label = self._attach_kp_bindable_label(QLabel(label_text), cfg_key, supports=supports)
+        grid.addWidget(label, row, 0)
+        if integer:
+            box = self._new_int_box(
+                default_value=default_value, soft_min=soft_min, soft_max=soft_max,
+                hard_min=hard_min, hard_max=hard_max, step=int(step), width=width, suffix=suffix, cfg_key=cfg_key,
+            )
+        else:
+            box = self._new_float_box(
+                default_value=default_value, soft_min=soft_min, soft_max=soft_max,
+                hard_min=hard_min, hard_max=hard_max, step=step, decimals=decimals, width=width, suffix=suffix, cfg_key=cfg_key,
+            )
+        grid.addWidget(box, row, 3)
+        row += 1
+        bind_widget, base_label, bind_rows, weight_spins = self._build_kp_binding_container(
+            cfg_key=cfg_key, supports=supports,
+            wmin_default=0.0, wmax_default=0.0,
+            soft_min=kp_soft_min, soft_max=kp_soft_max,
+            hard_min=kp_hard_min, hard_max=kp_hard_max,
+            decimals=kp_decimals,
+        )
+        grid.addWidget(bind_widget, row, 0, 1, 4)
+        row += 1
+        self._register_kp_binding_ui(
+            cfg_key=cfg_key, label=label,
+            container=bind_widget, base_label=base_label,
+            rows=bind_rows, supports=supports, weight_spins=weight_spins,
+        )
+        return row, label, box
 
     def _maybe_update_kp_binding_ui(self, changed_key: str):
         if changed_key in self._kp_binding_meta:
@@ -1789,10 +2028,29 @@ class VisualizerControlUI(QWidget):
         tg.setVerticalSpacing(6)
 
         r = 0
+        top_action_row = QHBoxLayout()
+        top_action_row.setSpacing(8)
         self.master_visible_check = QCheckBox("总开关（显示全部）")
         self.master_visible_check.setChecked(self.config.get('master_visible', True))
         self.master_visible_check.toggled.connect(lambda v: self._update_cfg('master_visible', v))
-        tg.addWidget(self.master_visible_check, r, 0, 1, 10)
+        top_action_row.addWidget(self.master_visible_check)
+        top_action_row.addStretch()
+
+        self.pin_top_btn = QPushButton("置于顶层")
+        self.pin_top_btn.setMinimumHeight(24)
+        self.pin_top_btn.clicked.connect(lambda: self._set_window_layer_mode('top'))
+        top_action_row.addWidget(self.pin_top_btn)
+
+        self.pin_bottom_btn = QPushButton("置于底层")
+        self.pin_bottom_btn.setMinimumHeight(24)
+        self.pin_bottom_btn.clicked.connect(lambda: self._set_window_layer_mode('bottom'))
+        top_action_row.addWidget(self.pin_bottom_btn)
+
+        self.restart_program_btn = QPushButton("重启程序")
+        self.restart_program_btn.setMinimumHeight(24)
+        self.restart_program_btn.clicked.connect(self._restart_visualizer_process)
+        top_action_row.addWidget(self.restart_program_btn)
+        tg.addLayout(top_action_row, r, 0, 1, 10)
 
         self.a1_lbl = QLabel("0.00")
         self.k2_lbl = QLabel("0.00")
@@ -1806,29 +2064,39 @@ class VisualizerControlUI(QWidget):
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         tg.addWidget(self.preset_combo, r, 1, 1, 3)
 
+        b_prev = QPushButton("上一个")
+        b_prev.setMinimumHeight(24)
+        b_prev.clicked.connect(lambda: self._switch_preset_by_offset(-1, update_info=True))
+        tg.addWidget(b_prev, r, 4)
+
+        b_next = QPushButton("下一个")
+        b_next.setMinimumHeight(24)
+        b_next.clicked.connect(lambda: self._switch_preset_by_offset(1, update_info=True))
+        tg.addWidget(b_next, r, 5)
+
         b_save = QPushButton("另存为")
         b_save.setMinimumHeight(24)
         b_save.clicked.connect(self._save_preset_as)
-        tg.addWidget(b_save, r, 4)
+        tg.addWidget(b_save, r, 6)
 
         b_reload = QPushButton("刷新")
         b_reload.setMinimumHeight(24)
         b_reload.clicked.connect(self._refresh_preset_list)
-        tg.addWidget(b_reload, r, 5)
+        tg.addWidget(b_reload, r, 7)
 
         b_delete_current = QPushButton("删除当前")
         b_delete_current.setMinimumHeight(24)
         b_delete_current.clicked.connect(self._delete_current_preset)
-        tg.addWidget(b_delete_current, r, 6)
+        tg.addWidget(b_delete_current, r, 8)
 
         b_rename_current = QPushButton("重命名")
         b_rename_current.setMinimumHeight(24)
         b_rename_current.clicked.connect(self._rename_current_preset)
-        tg.addWidget(b_rename_current, r, 7)
+        tg.addWidget(b_rename_current, r, 9)
         r += 1
 
         preset_row = QHBoxLayout(); preset_row.setSpacing(8)
-        self.preset_auto_check = QCheckBox("自动随机切换")
+        self.preset_auto_check = QCheckBox("自动切换")
         self.preset_auto_check.setChecked(self.config.get('preset_auto_switch', False))
         self.preset_auto_check.toggled.connect(self._on_preset_auto_toggled)
         preset_row.addWidget(self.preset_auto_check)
@@ -1976,10 +2244,12 @@ class VisualizerControlUI(QWidget):
         bottom.addWidget(left_column, 0)
 
         self.nav_tree = QTreeWidget()
+        self.nav_tree.setColumnCount(2)
         self.nav_tree.setHeaderHidden(True)
         self.nav_tree.setMinimumWidth(220)
         self.nav_tree.setMaximumWidth(320)
         self.nav_tree.setFrameShape(QFrame.StyledPanel)
+        self.nav_tree.setColumnWidth(1, 28)
         left_layout.addWidget(self.nav_tree, 1)
 
         self.preview_toggle_btn = QPushButton("▾ 图形预览")
@@ -2007,15 +2277,27 @@ class VisualizerControlUI(QWidget):
         self._nav_index = {}
 
         pages = [
-            ("控制", self._build_control_section()),
-            ("颜色方案", self._build_color_section()),
-            ("运动表现", self._build_physics_section()),
-            ("图元设置", self._build_graphics_section()),
-            ("高级控制", self._build_k1_section()),
-            ("🎲 随机", self._build_random_section()),
+            (("主题设置",), self._build_theme_root_section()),
+            (("主题设置", "经典"), self._build_classic_theme_section()),
+            (("主题设置", "经典", "填充主题"), self._build_fill_theme_section()),
+            (("主题设置", "经典", "连线主题"), self._build_line_theme_section()),
+            (("主题设置", "柔体主题"), self._build_softbody_theme_section()),
+            (("控制",), self._build_control_section()),
+            (("颜色方案",), self._build_color_section()),
+            (("运动表现",), self._build_physics_section()),
+            (("高级控制",), self._build_k1_section()),
+            (("🎲 随机",), self._build_random_section()),
         ]
 
-        for idx, (title, w) in enumerate(pages):
+        theme_toggle_sections = {
+            ("主题设置", "经典"): 'theme_classic_kaleidoscope',
+            ("主题设置", "经典", "填充主题"): 'theme_kaleidoscope_fill',
+            ("主题设置", "经典", "连线主题"): 'theme_kaleidoscope_lines',
+            ("主题设置", "柔体主题"): 'theme_softbody',
+        }
+
+        nav_nodes = {}
+        for idx, (path_parts, w) in enumerate(pages):
             if isinstance(w, _Collapsible):
                 w.as_detail_panel()
             wrap = QWidget()
@@ -2028,10 +2310,32 @@ class VisualizerControlUI(QWidget):
             self.detail_stack.addWidget(wrap)
             self._detail_pages.append(wrap)
 
-            item = QTreeWidgetItem([title])
-            item.setData(0, Qt.UserRole, idx)
-            self.nav_tree.addTopLevelItem(item)
-            self._nav_index[title] = idx
+            parent_item = None
+            current_path = []
+            for part in path_parts:
+                current_path.append(part)
+                path_key = tuple(current_path)
+                item = nav_nodes.get(path_key)
+                if item is None:
+                    item = QTreeWidgetItem([part])
+                    if parent_item is None:
+                        self.nav_tree.addTopLevelItem(item)
+                    else:
+                        parent_item.addChild(item)
+                    nav_nodes[path_key] = item
+                parent_item = item
+
+            parent_item.setData(0, Qt.UserRole, idx)
+            self._nav_index[' / '.join(path_parts)] = idx
+
+            section = theme_toggle_sections.get(path_parts)
+            if section:
+                parent_item.setText(1, ' ')
+                self.nav_tree.setItemWidget(parent_item, 1, self._create_theme_nav_check(section))
+
+        for item in nav_nodes.values():
+            if item.childCount() > 0:
+                item.setExpanded(True)
 
         self.nav_tree.currentItemChanged.connect(self._on_nav_changed)
         if self.nav_tree.topLevelItemCount() > 0:
@@ -2041,6 +2345,7 @@ class VisualizerControlUI(QWidget):
             self._schedule_next_preset_switch()
 
         self._update_color_preview_strip()
+        self._sync_theme_enable_widgets()
 
     def _on_nav_changed(self, current, _previous):
         if not current:
@@ -2437,6 +2742,13 @@ class VisualizerControlUI(QWidget):
         )
         g.addWidget(self.radius_spin, r, 1); g.addWidget(QLabel("px"), r, 2); r += 1
 
+        g.addWidget(QLabel("段数:"), r, 0)
+        self.seg_spin = self._new_int_box(
+            default_value=1, soft_min=1, soft_max=11,
+            hard_min=1, hard_max=360, step=1, cfg_key='circle_segments'
+        )
+        g.addWidget(self.seg_spin, r, 1); g.addWidget(QLabel("段"), r, 2); r += 1
+
         hr = QHBoxLayout(); hr.setSpacing(12)
         self.a1rot_check = QCheckBox("K 驱动旋转")
         self.a1rot_check.setChecked(self.config['circle_a1_rotation'])
@@ -2465,7 +2777,7 @@ class VisualizerControlUI(QWidget):
             setattr(self, f'{attr}_slider', sl); setattr(self, f'{attr}_spin', box)
             r += 1
 
-        hint = QLabel("顶部四联预览已承载 K / P / T / P2、默认阻尼、条形图独立阻尼，以及动态颜色预览快捷输入。图元独立阻尼在“图元设置”页逐项配置。")
+        hint = QLabel("顶部四联预览已承载 K / P / T / P2、默认阻尼、条形图独立阻尼，以及动态颜色预览快捷输入。图元独立阻尼已移到“主题设置”树下的对应子主题页。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#8a93a1; font-size:8.5pt; padding-top:4px;")
         g.addWidget(hint, r, 0, 1, 3)
@@ -2508,7 +2820,7 @@ class VisualizerControlUI(QWidget):
         v.addLayout(row1)
 
         row2 = QHBoxLayout(); row2.setSpacing(10)
-        self.preset_auto_check = QCheckBox("自动随机切换")
+        self.preset_auto_check = QCheckBox("自动切换")
         self.preset_auto_check.setChecked(self.config.get('preset_auto_switch', False))
         self.preset_auto_check.toggled.connect(self._on_preset_auto_toggled)
         row2.addWidget(self.preset_auto_check)
@@ -2588,9 +2900,16 @@ class VisualizerControlUI(QWidget):
         current_fp = self.preset_combo.currentData()
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        files = self._get_ordered_preset_files()
+        valid_files = []
+        invalid_files = []
+        for fp in self._get_ordered_preset_files():
+            error = self._validate_preset_file(fp)
+            if error:
+                invalid_files.append((fp, error))
+                continue
+            valid_files.append(fp)
         selected_idx = -1
-        for fp in files:
+        for fp in valid_files:
             self.preset_combo.addItem(fp.stem, str(fp))
             if current_fp and str(fp) == str(current_fp):
                 selected_idx = self.preset_combo.count() - 1
@@ -2601,14 +2920,56 @@ class VisualizerControlUI(QWidget):
             self._schedule_config_commit()
         if selected_idx >= 0:
             self.preset_combo.setCurrentIndex(selected_idx)
+        elif self.preset_combo.count() > 0:
+            self.preset_combo.setCurrentIndex(0)
         self.preset_combo.blockSignals(False)
         self._update_preset_preview()
+        if invalid_files:
+            preview_names = '、'.join(fp.stem for fp, _error in invalid_files[:3])
+            if len(invalid_files) > 3:
+                preview_names += ' 等'
+            self._set_info_bar(f"已跳过 {len(invalid_files)} 个无效预设: {preview_names}")
 
     def _sync_preset_combo_from(self, source: str):
         return
 
     def _update_preset_preview(self):
         return
+
+    def _load_preset_config(self, fp):
+        preset_path = Path(fp)
+        with open(preset_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError('预设根节点必须是 JSON 对象')
+        return _normalize_loaded_config(self._inflate_loaded_preset_data(raw))
+
+    def _validate_preset_file(self, fp):
+        try:
+            self._load_preset_config(fp)
+            return None
+        except Exception as e:
+            return str(e)
+
+    def _switch_preset_by_offset(self, step, *, update_info=False):
+        count = self.preset_combo.count()
+        if count <= 0:
+            if update_info:
+                self._set_info_bar('当前没有可切换的预设')
+            return False
+        current = self.preset_combo.currentIndex()
+        if current < 0:
+            target = 0 if step >= 0 else count - 1
+        else:
+            target = (current + int(step)) % count
+        if target == current:
+            if update_info:
+                self._set_info_bar(f"当前预设: {self.preset_combo.currentText()}")
+            return False
+        self.preset_combo.setCurrentIndex(target)
+        if update_info:
+            self._set_info_bar(f"已切换到预设: {self.preset_combo.currentText()}")
+        return True
 
     def _set_info_bar(self, text: str):
         self.info_bar_lbl.setText(text)
@@ -2798,12 +3159,7 @@ class VisualizerControlUI(QWidget):
         self.preset_timer.start(int(sec * 1000))
 
     def _auto_switch_preset(self):
-        count = self.preset_combo.count()
-        if count >= 2:
-            current = self.preset_combo.currentIndex()
-            candidates = [i for i in range(count) if i != current]
-            idx = random.choice(candidates)
-            self.preset_combo.setCurrentIndex(idx)
+        self._switch_preset_by_offset(1)
         if self.preset_auto_check.isChecked():
             self._schedule_next_preset_switch()
 
@@ -2829,7 +3185,7 @@ class VisualizerControlUI(QWidget):
                 return
 
         try:
-            save_data = {k: v for k, v in self.config.items() if k not in ('pos_x', 'pos_y')}
+            save_data = self._build_full_preset_payload()
             with open(fp, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, indent=2, ensure_ascii=False)
             self._refresh_preset_list()
@@ -2917,8 +3273,7 @@ class VisualizerControlUI(QWidget):
             return
         try:
             from_config = self.config.copy()
-            with open(fp, 'r', encoding='utf-8') as f:
-                cfg = _normalize_loaded_config(json.load(f))
+            cfg = self._load_preset_config(fp)
             # 保留运行态设置，不被预设覆盖
             runtime_keep_keys = (
                 'pos_x', 'pos_y',
@@ -2934,6 +3289,7 @@ class VisualizerControlUI(QWidget):
                 'preset_transition_enabled',
                 'preset_transition_duration',
                 'preset_transition_easing',
+                'window_layer',
             )
             for key in runtime_keep_keys:
                 cfg[key] = self.config.get(key, cfg.get(key))
@@ -2941,6 +3297,7 @@ class VisualizerControlUI(QWidget):
             # 若启用平滑过渡，替换队列为过渡指令
             if self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
                 self._send_transition_command(from_config)
+            self._set_info_bar(f"已加载预设: {Path(fp).stem}")
             if show_message:
                 QMessageBox.information(self, "成功", f"已加载预设: {Path(fp).stem}")
         except Exception as e:
@@ -3115,7 +3472,7 @@ class VisualizerControlUI(QWidget):
         hh.addWidget(QLabel("px"))
         g.addLayout(hh, r, 1, 1, 2); r += 1
 
-        note = QLabel("K 默认增减阻尼位于顶部 K 预览卡；条形图独立阻尼位于顶部频谱卡；各图元独立阻尼位于“图元设置”页。")
+        note = QLabel("K 默认增减阻尼位于顶部 K 预览卡；条形图独立阻尼位于顶部频谱卡；各图元独立阻尼位于“主题设置”树下的对应子主题页。")
         note.setWordWrap(True)
         note.setStyleSheet("color:#8a93a1; font-size:8.5pt;")
         g.addWidget(note, r, 0, 1, 3); r += 1
@@ -3135,10 +3492,94 @@ class VisualizerControlUI(QWidget):
         g.addWidget(self.trans_check)
         self.top_check = QCheckBox("窗口置顶")
         self.top_check.setChecked(self.config['always_on_top'])
-        self.top_check.toggled.connect(lambda v: self._update_cfg('always_on_top', v))
+        self.top_check.toggled.connect(lambda v: self._set_window_layer_mode('top' if v else 'normal'))
         g.addWidget(self.top_check)
         s.add_layout(g)
         return s
+
+    def _build_theme_root_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        title = QLabel("主题设置")
+        title.setStyleSheet("font-size:11pt; font-weight:bold;")
+        v.addWidget(title)
+
+        desc = QLabel(
+            "当前渲染被拆成两个可混合主题：经典与柔体。\n"
+            "经典下再细分为填充子主题和连线子主题，便于分别启用、单独调参，以及各自保存子预设。"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color:#8a93a1;")
+        v.addWidget(desc)
+
+        hint = QLabel(
+            "主题启用改为在左侧“主题设置”树形图中完成。\n"
+            "各主题行右侧的小复选框表示是否启用，右侧页面仅负责参数调节与子预设管理。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8a93a1;")
+        v.addWidget(hint)
+
+        v.addStretch()
+        return w
+
+    def _build_classic_theme_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('theme_classic_kaleidoscope'))
+        info = QLabel('经典主题由填充与连线两个子主题组成。启用请使用左侧树行右侧的小复选框，子主题细节请进入下级页面。')
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#8a93a1;')
+        v.addWidget(info)
+        v.addStretch()
+        return w
+
+    def _build_fill_theme_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('theme_kaleidoscope_fill'))
+        info = QLabel('启用请使用左侧树行右侧的小复选框。这里保留填充子主题的参数与子预设。')
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#8a93a1;')
+        v.addWidget(info)
+        v.addWidget(self._build_contour_section())
+        v.addStretch()
+        return w
+
+    def _build_line_theme_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('theme_kaleidoscope_lines'))
+        info = QLabel('启用请使用左侧树行右侧的小复选框。这里保留连线子主题的参数与子预设。')
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#8a93a1;')
+        v.addWidget(info)
+        v.addWidget(self._build_bars_section())
+        v.addStretch()
+        return w
+
+    def _build_softbody_theme_section(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addLayout(self._build_section_action_row('theme_softbody'))
+        info = QLabel('启用请使用左侧树行右侧的小复选框。这里保留柔体主题的参数与子预设。')
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#8a93a1;')
+        v.addWidget(info)
+        v.addWidget(self._build_tentacle_section())
+        v.addStretch()
+        return w
 
     def _build_graphics_section(self):
         w = QWidget()
@@ -3181,6 +3622,47 @@ class VisualizerControlUI(QWidget):
 
     @staticmethod
     def _section_keys(section: str):
+        contour_keys = []
+        for li in range(1, 6):
+            contour_keys.extend([
+                f'c{li}_on', f'c{li}_color', f'c{li}_alpha', f'c{li}_thick',
+                f'c{li}_fill', f'c{li}_fill_alpha', f'c{li}_rot_speed', f'c{li}_rot_pow'
+            ])
+            if li in (1, 2, 4, 5):
+                contour_keys.append(f'c{li}_step')
+                contour_keys.extend([
+                    f'c{li}_use_independent_damping',
+                    f'c{li}_independent_rise_damping',
+                    f'c{li}_independent_fall_damping',
+                ])
+            if li in (1, 5):
+                contour_keys.append(f'c{li}_decay')
+        contour_keys.extend(_kp_binding_config_keys(_CONTOUR_KP_KEYS))
+
+        bar_keys = []
+        for key in ('b12', 'b23', 'b34', 'b45'):
+            bar_keys.extend([
+                f'{key}_on', f'{key}_thick', f'{key}_fixed', f'{key}_fixed_len',
+                f'{key}_from_start', f'{key}_from_end', f'{key}_from_center',
+                f'{key}_use_independent_damping', f'{key}_independent_rise_damping', f'{key}_independent_fall_damping'
+            ])
+            bar_keys.extend(_kp_binding_config_keys(_BAR_KP_KEYS))
+
+        softbody_keys = [
+            'tentacles_enabled', 'tentacle_on', 'tentacle_color', 'tentacle_alpha', 'tentacle_thick',
+            'tentacle_count', 'tentacle_length', 'tentacle_length_jitter', 'tentacle_length_jitter_speed',
+            'tentacle_length_jitter_random', 'tentacle_control_points_min', 'tentacle_control_points_max',
+            'tentacle_tip_bias', 'tentacle_turbulence', 'tentacle_k_influence', 'tentacle_sway_speed',
+            'tentacle_sway_density', 'tentacle_tip_thickness', 'tentacle_water_damping',
+            'tentacle_angle_stiffness', 'tentacle_length_stiffness', 'tentacle_stretch_limit',
+            'tentacle_shader_enabled', 'tentacle_shader_tip_color', 'tentacle_shader_alpha_start',
+            'tentacle_shader_alpha_end', 'tentacle_shader_bias', 'tentacle_core_on',
+            'tentacle_core_base_speed', 'tentacle_core_k_speed', 'tentacle_core_p_speed',
+            'kp_bind_tentacle_turbulence_k', 'kp_tentacle_turbulence_k_wmin', 'kp_tentacle_turbulence_k_wmax',
+            'kp_bind_tentacle_core_base_speed_k', 'kp_tentacle_core_base_speed_k_wmin', 'kp_tentacle_core_base_speed_k_wmax',
+            'kp_bind_tentacle_core_base_speed_p', 'kp_tentacle_core_base_speed_p_wmin', 'kp_tentacle_core_base_speed_p_wmax',
+        ]
+
         if section == 'color':
             return [
                 'color_scheme', 'gradient_enabled', 'gradient_mode', 'gradient_points',
@@ -3195,44 +3677,29 @@ class VisualizerControlUI(QWidget):
                 'bar_default_height', 'bar_internal_min', 'bar_internal_max',
                 'bar_height_min', 'bar_height_max'
             ]
+        if section == 'theme_classic_kaleidoscope':
+            return ['contours_enabled', 'bars_enabled'] + contour_keys + bar_keys
+        if section == 'theme_kaleidoscope_fill':
+            return ['contours_enabled'] + contour_keys
+        if section == 'theme_kaleidoscope_lines':
+            return ['bars_enabled'] + bar_keys
+        if section == 'theme_softbody':
+            return softbody_keys
         if section == 'graphics':
-            keys = []
-            for li in range(1, 6):
-                keys.extend([
-                    f'c{li}_on', f'c{li}_color', f'c{li}_alpha', f'c{li}_thick',
-                    f'c{li}_fill', f'c{li}_fill_alpha', f'c{li}_rot_speed', f'c{li}_rot_pow'
-                ])
-                if li in (1, 2, 4, 5):
-                    keys.append(f'c{li}_step')
-                    keys.extend([
-                        f'c{li}_use_independent_damping',
-                        f'c{li}_independent_rise_damping',
-                        f'c{li}_independent_fall_damping',
-                    ])
-                if li in (1, 5):
-                    keys.append(f'c{li}_decay')
-            for key in ('b12', 'b23', 'b34', 'b45'):
-                keys.extend([
-                    f'{key}_on', f'{key}_thick', f'{key}_fixed', f'{key}_fixed_len',
-                    f'{key}_from_start', f'{key}_from_end', f'{key}_from_center',
-                    f'{key}_use_independent_damping', f'{key}_independent_rise_damping', f'{key}_independent_fall_damping'
-                ])
-            keys.extend([
-                'tentacle_on', 'tentacle_color', 'tentacle_alpha', 'tentacle_thick',
-                'tentacle_count', 'tentacle_length', 'tentacle_length_jitter',
-                'tentacle_control_points_min', 'tentacle_control_points_max',
-                'tentacle_tip_bias', 'tentacle_turbulence', 'tentacle_k_influence',
-                'tentacle_sway_speed', 'tentacle_sway_density',
-                'tentacle_tip_thickness', 'tentacle_water_damping',
-                'tentacle_angle_stiffness', 'tentacle_length_stiffness', 'tentacle_stretch_limit',
-                'tentacle_shader_enabled', 'tentacle_shader_tip_color',
-                'tentacle_shader_alpha_start', 'tentacle_shader_alpha_end', 'tentacle_shader_bias',
-                'tentacle_core_base_speed', 'tentacle_core_k_speed', 'tentacle_core_p_speed'
-            ])
-            return keys
+            return ['contours_enabled', 'bars_enabled'] + contour_keys + bar_keys + softbody_keys
         return []
 
     def _randomize_section(self, section: str):
+        if section == 'theme_classic_kaleidoscope':
+            self.config['contours_enabled'] = True
+            self.config['bars_enabled'] = True
+        elif section == 'theme_kaleidoscope_fill':
+            self.config['contours_enabled'] = True
+        elif section == 'theme_kaleidoscope_lines':
+            self.config['bars_enabled'] = True
+        elif section == 'theme_softbody':
+            self.config['tentacles_enabled'] = True
+
         if section == 'color':
             palette = self._get_designer_palette(8)
             self.config['color_scheme'] = 'custom'
@@ -3357,7 +3824,8 @@ class VisualizerControlUI(QWidget):
             return
         combo = self._section_preset_combos.get(section)
         default_name = combo.currentText().strip() if combo else ""
-        name, ok = QInputDialog.getText(self, "保存分区预设", "请输入名称:", text=default_name)
+        title = self._section_display_name(section)
+        name, ok = QInputDialog.getText(self, f"保存{title}", "请输入名称:", text=default_name)
         if not ok:
             return
         safe = self._safe_preset_name(name)
@@ -3372,9 +3840,9 @@ class VisualizerControlUI(QWidget):
             self._refresh_section_preset_combo(section)
             if combo is not None:
                 combo.setCurrentText(safe)
-            self._set_info_bar(f"已保存{section}分区预设: {safe}")
+            self._set_info_bar(f"已保存{title}: {safe}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存分区预设失败: {e}")
+            QMessageBox.critical(self, "错误", f"保存{title}失败: {e}")
 
     def _load_section_preset(self, section: str):
         keys = self._section_keys(section)
@@ -3383,21 +3851,22 @@ class VisualizerControlUI(QWidget):
         combo = self._section_preset_combos.get(section)
         if combo is None:
             return
+        title = self._section_display_name(section)
         name = combo.currentText().strip()
         if not name:
-            QMessageBox.warning(self, "提示", "请先选择分区预设")
+            QMessageBox.warning(self, "提示", f"请先选择{title}")
             return
         presets = self._read_section_presets(section)
         data = presets.get(name)
         if not isinstance(data, dict):
-            QMessageBox.warning(self, "提示", "分区预设不存在或已损坏")
+            QMessageBox.warning(self, "提示", f"{title}不存在或已损坏")
             self._refresh_section_preset_combo(section)
             return
         for key in keys:
             if key in data:
                 self.config[key] = data[key]
         self._apply_config_to_ui(self.config)
-        self._set_info_bar(f"已读取{section}分区预设: {name}")
+        self._set_info_bar(f"已读取{title}: {name}")
 
     # ── 五层轮廓 ──────────────────────────────────────────
 
@@ -3436,52 +3905,72 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'c{li}_thick_spin', sp)
             ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
+            thick_label = self._attach_kp_bindable_label(QLabel("粗:"), f'c{li}_thick', supports=('k', 'p'))
+            ht.addWidget(thick_label); ht.addWidget(sp)
             g.addLayout(ht, r, 2, 1, 2); r += 1
+            thick_bind, thick_base_lbl, thick_rows, thick_weight_spins = self._build_kp_binding_container(
+                cfg_key=f'c{li}_thick', supports=('k', 'p'),
+                wmin_default=0.0, wmax_default=0.0,
+                soft_min=-6.0, soft_max=6.0, hard_min=-100.0, hard_max=100.0,
+                decimals=2,
+            )
+            g.addWidget(thick_bind, r, 0, 1, 4); r += 1
+            self._register_kp_binding_ui(
+                cfg_key=f'c{li}_thick', label=thick_label,
+                container=thick_bind, base_label=thick_base_lbl,
+                rows=thick_rows, supports=('k', 'p'), weight_spins=thick_weight_spins,
+            )
 
-            g.addWidget(QLabel("透明:"), r, 0)
-            sl_a, alpha_box = self._new_bound_int_slider(
-                cfg_key=f'c{li}_alpha', default_value=180,
+            r, _alpha_label, sl_a, alpha_box = self._add_kp_slider_row(
+                g, r,
+                label_text='透明:', cfg_key=f'c{li}_alpha',
+                default_value=180,
                 soft_min=0, soft_max=255, hard_min=0, hard_max=255,
-                step=1, width=58
+                integer=True, step=1, width=58,
+                kp_soft_min=-80.0, kp_soft_max=80.0, kp_hard_min=-255.0, kp_hard_max=255.0, kp_decimals=1,
             )
             setattr(self, f'c{li}_alpha_slider', sl_a)
             setattr(self, f'c{li}_alpha_spin', alpha_box)
-            g.addWidget(sl_a, r, 1, 1, 2); g.addWidget(alpha_box, r, 3); r += 1
 
             fc = QCheckBox("填充")
             fc.setChecked(self.config.get(f'c{li}_fill', False))
             fc.toggled.connect(lambda v, k=f'c{li}_fill': self._update_cfg(k, v))
             setattr(self, f'c{li}_fill_check', fc)
             g.addWidget(fc, r, 0)
-            fsl, fill_box = self._new_bound_int_slider(
-                cfg_key=f'c{li}_fill_alpha', default_value=50,
+            r += 1
+            r, _fill_alpha_label, fsl, fill_box = self._add_kp_slider_row(
+                g, r,
+                label_text='填充透明:', cfg_key=f'c{li}_fill_alpha',
+                default_value=50,
                 soft_min=0, soft_max=255, hard_min=0, hard_max=255,
-                step=1, width=58
+                integer=True, step=1, width=58,
+                kp_soft_min=-80.0, kp_soft_max=80.0, kp_hard_min=-255.0, kp_hard_max=255.0, kp_decimals=1,
             )
             setattr(self, f'c{li}_fill_alpha_slider', fsl)
             setattr(self, f'c{li}_fill_alpha_spin', fill_box)
-            g.addWidget(fsl, r, 1, 1, 2); g.addWidget(fill_box, r, 3); r += 1
 
             if has_step:
-                g.addWidget(QLabel("间隔:"), r, 0)
-                ssp = self._new_int_box(
-                    default_value=2, soft_min=1, soft_max=32,
-                    hard_min=1, hard_max=4096, step=1, cfg_key=f'c{li}_step'
+                r, _step_label, ssp = self._add_kp_spin_row(
+                    g, r,
+                    label_text='间隔:', cfg_key=f'c{li}_step',
+                    default_value=2,
+                    soft_min=1, soft_max=32, hard_min=1, hard_max=4096,
+                    integer=True, step=1,
+                    kp_soft_min=-8.0, kp_soft_max=8.0, kp_hard_min=-256.0, kp_hard_max=256.0, kp_decimals=2,
                 )
                 setattr(self, f'c{li}_step_spin', ssp)
-                g.addWidget(ssp, r, 1); r += 1
 
             if has_decay:
-                g.addWidget(QLabel("衰减:"), r, 0)
-                dsl, decay_box = self._new_bound_float_slider(
-                    cfg_key=f'c{li}_decay', default_value=0.995,
+                r, _decay_label, dsl, decay_box = self._add_kp_slider_row(
+                    g, r,
+                    label_text='衰减:', cfg_key=f'c{li}_decay',
+                    default_value=0.995,
                     soft_min=0.9, soft_max=1.0, hard_min=0.0, hard_max=2.0,
-                    slider_scale=1000, step=0.001, decimals=3, width=72
+                    slider_scale=1000, step=0.001, decimals=3, width=72,
+                    kp_soft_min=-0.2, kp_soft_max=0.2, kp_hard_min=-2.0, kp_hard_max=2.0, kp_decimals=4,
                 )
                 setattr(self, f'c{li}_decay_slider', dsl)
                 setattr(self, f'c{li}_decay_spin', decay_box)
-                g.addWidget(dsl, r, 1, 1, 2); g.addWidget(decay_box, r, 3); r += 1
 
             if li in (1, 2, 4, 5):
                 damp_check, damp_widget, rise_box, fall_box = self._build_independent_damping_controls(f'c{li}')
@@ -3492,25 +3981,27 @@ class VisualizerControlUI(QWidget):
                 g.addWidget(damp_check, r, 0, 1, 4); r += 1
                 g.addWidget(damp_widget, r, 0, 1, 4); r += 1
 
-            g.addWidget(QLabel("转速:"), r, 0)
-            rsl, speed_box = self._new_bound_float_slider(
-                cfg_key=f'c{li}_rot_speed', default_value=1.0,
+            r, _speed_label, rsl, speed_box = self._add_kp_slider_row(
+                g, r,
+                label_text='转速:', cfg_key=f'c{li}_rot_speed',
+                default_value=1.0,
                 soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
-                slider_scale=100, step=0.01, decimals=2, width=72
+                slider_scale=100, step=0.01, decimals=2, width=72,
+                kp_soft_min=-5.0, kp_soft_max=5.0, kp_hard_min=-100.0, kp_hard_max=100.0, kp_decimals=3,
             )
             setattr(self, f'c{li}_rot_speed_slider', rsl)
             setattr(self, f'c{li}_rot_speed_spin', speed_box)
-            g.addWidget(rsl, r, 1, 1, 2); g.addWidget(speed_box, r, 3); r += 1
 
-            g.addWidget(QLabel("pow:"), r, 0)
-            psl, pow_box = self._new_bound_float_slider(
-                cfg_key=f'c{li}_rot_pow', default_value=0.5,
+            r, _pow_label, psl, pow_box = self._add_kp_slider_row(
+                g, r,
+                label_text='pow:', cfg_key=f'c{li}_rot_pow',
+                default_value=0.5,
                 soft_min=-3.0, soft_max=3.0, hard_min=-100.0, hard_max=100.0,
-                slider_scale=100, step=0.01, decimals=2, width=72
+                slider_scale=100, step=0.01, decimals=2, width=72,
+                kp_soft_min=-3.0, kp_soft_max=3.0, kp_hard_min=-100.0, kp_hard_max=100.0, kp_decimals=3,
             )
             setattr(self, f'c{li}_rot_pow_slider', psl)
             setattr(self, f'c{li}_rot_pow_spin', pow_box)
-            g.addWidget(psl, r, 1, 1, 2); g.addWidget(pow_box, r, 3); r += 1
 
         s.add_layout(g)
         return s
@@ -4100,21 +4591,36 @@ class VisualizerControlUI(QWidget):
             )
             setattr(self, f'{key}_thick_spin', sp)
             ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
+            thick_label = self._attach_kp_bindable_label(QLabel("粗:"), f'{key}_thick', supports=('k', 'p'))
+            ht.addWidget(thick_label); ht.addWidget(sp)
             g.addLayout(ht, r, 1, 1, 2); r += 1
+            thick_bind, thick_base_lbl, thick_rows, thick_weight_spins = self._build_kp_binding_container(
+                cfg_key=f'{key}_thick', supports=('k', 'p'),
+                wmin_default=0.0, wmax_default=0.0,
+                soft_min=-6.0, soft_max=6.0, hard_min=-100.0, hard_max=100.0,
+                decimals=2,
+            )
+            g.addWidget(thick_bind, r, 0, 1, 3); r += 1
+            self._register_kp_binding_ui(
+                cfg_key=f'{key}_thick', label=thick_label,
+                container=thick_bind, base_label=thick_base_lbl,
+                rows=thick_rows, supports=('k', 'p'), weight_spins=thick_weight_spins,
+            )
 
             fchk = QCheckBox("固定长度")
             fchk.setChecked(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_fixed_check', fchk)
             g.addWidget(fchk, r, 0)
-            fsp = self._new_int_box(
-                default_value=30, soft_min=1, soft_max=500,
-                hard_min=1, hard_max=10000, step=1, cfg_key=f'{key}_fixed_len'
+            r += 1
+            r, _fixed_len_label, fsp = self._add_kp_spin_row(
+                g, r,
+                label_text='固定长度:', cfg_key=f'{key}_fixed_len',
+                default_value=30,
+                soft_min=1, soft_max=500, hard_min=1, hard_max=10000,
+                integer=True, step=1, suffix=' px',
+                kp_soft_min=-120.0, kp_soft_max=120.0, kp_hard_min=-10000.0, kp_hard_max=10000.0, kp_decimals=2,
             )
             setattr(self, f'{key}_fixed_len_spin', fsp)
-            fh = QHBoxLayout()
-            fh.addWidget(fsp); fh.addWidget(QLabel("px"))
-            g.addLayout(fh, r, 1, 1, 2); r += 1
 
             mode_w = QWidget()
             ml = QHBoxLayout(mode_w); ml.setContentsMargins(10,0,0,0); ml.setSpacing(8)
@@ -4422,7 +4928,7 @@ class VisualizerControlUI(QWidget):
             return
         name = self._next_random_quick_preset_name(stay_seconds)
         fp = PRESETS_DIR / f"{name}.json"
-        save_data = {k: v for k, v in self.config.items() if k not in ('pos_x', 'pos_y')}
+        save_data = self._build_full_preset_payload()
         try:
             with open(fp, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, indent=2, ensure_ascii=False)
@@ -4617,12 +5123,7 @@ class VisualizerControlUI(QWidget):
 
         while len(previews) < 8:
             previews.append((60, 60, 60))
-
-        for i, cell in enumerate(self.palette_preview_cells):
-            c = previews[i]
-            cell.setStyleSheet(
-                f"background:rgb({c[0]},{c[1]},{c[2]}); border:1px solid #666; border-radius:2px;"
-            )
+        self._set_palette_preview_colors(previews[:8])
 
     def _on_palette_cell_clicked(self, idx: int):
         # 点击主色带上的小色块以快速编辑颜色
@@ -4837,6 +5338,96 @@ class VisualizerControlUI(QWidget):
                 except:
                     pass
 
+    def _set_window_layer_mode(self, mode):
+        mode = str(mode or 'normal').lower()
+        if mode not in {'top', 'normal', 'bottom'}:
+            mode = 'normal'
+        self.config['window_layer'] = mode
+        self.config['always_on_top'] = (mode == 'top')
+        self._sync_window_layer_controls(mode)
+        self._schedule_config_commit()
+        if self.config_queue and self.viz_process and self.viz_process.is_alive():
+            try:
+                self.config_queue.put_nowait({'command': 'set_window_layer', 'mode': mode})
+            except Exception:
+                pass
+        self._set_info_bar(f"窗口层级已切换为: {'顶层' if mode == 'top' else '底层' if mode == 'bottom' else '普通'}")
+
+    def _sync_window_layer_controls(self, mode=None):
+        mode = str(mode or self.config.get('window_layer', 'normal')).lower()
+        if mode not in {'top', 'normal', 'bottom'}:
+            mode = 'normal'
+        if hasattr(self, 'top_check'):
+            self._set_checkbox_silent(self.top_check, mode == 'top')
+        if hasattr(self, 'pin_top_btn'):
+            self.pin_top_btn.setEnabled(mode != 'top')
+        if hasattr(self, 'pin_bottom_btn'):
+            self.pin_bottom_btn.setEnabled(mode != 'bottom')
+
+    def _restart_visualizer_process(self):
+        self._flush_pending_config()
+        self._stop_visualizer()
+        try:
+            target = Path(__file__).resolve()
+            subprocess.Popen([sys.executable, str(target)], cwd=str(target.parent))
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'重启程序失败: {e}')
+            self._start_visualizer()
+            return
+        self.close()
+
+    def _set_palette_preview_colors(self, colors):
+        if not hasattr(self, 'palette_preview_cells'):
+            return
+        preview_colors = [tuple(int(channel) for channel in color[:3]) for color in (colors or []) if len(color) >= 3]
+        while len(preview_colors) < len(self.palette_preview_cells):
+            preview_colors.append((60, 60, 60))
+        for idx, cell in enumerate(self.palette_preview_cells):
+            color = preview_colors[idx]
+            cell.setStyleSheet(
+                f"background:rgb({color[0]},{color[1]},{color[2]}); border:1px solid #666; border-radius:2px;"
+            )
+
+    def _apply_runtime_color_snapshot(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return
+        palette_preview = snapshot.get('palette_preview')
+        if isinstance(palette_preview, list):
+            self._set_palette_preview_colors(palette_preview)
+        for layer_index in range(1, 6):
+            color = snapshot.get(f'c{layer_index}_color')
+            btn = getattr(self, f'c{layer_index}_color_btn', None)
+            if btn is not None and isinstance(color, (list, tuple)) and len(color) >= 3:
+                btn.setStyleSheet(
+                    f"background:rgb({int(color[0])},{int(color[1])},{int(color[2])}); border:1px solid #aaa; border-radius:2px;"
+                )
+        tentacle_color = snapshot.get('tentacle_color')
+        if hasattr(self, 'tentacle_color_btn') and isinstance(tentacle_color, (list, tuple)) and len(tentacle_color) >= 3:
+            self.tentacle_color_btn.setStyleSheet(
+                f"background:rgb({int(tentacle_color[0])},{int(tentacle_color[1])},{int(tentacle_color[2])}); border:1px solid #aaa; border-radius:2px;"
+            )
+        shader_tip_color = snapshot.get('tentacle_shader_tip_color')
+        if hasattr(self, 'tentacle_shader_tip_color_btn') and isinstance(shader_tip_color, (list, tuple)) and len(shader_tip_color) >= 3:
+            self.tentacle_shader_tip_color_btn.setStyleSheet(
+                f"background:rgb({int(shader_tip_color[0])},{int(shader_tip_color[1])},{int(shader_tip_color[2])}); border:1px solid #aaa; border-radius:2px;"
+            )
+        runtime_points = snapshot.get('gradient_points')
+        if isinstance(runtime_points, list):
+            for idx, row in enumerate(getattr(self, 'gp_widgets', [])):
+                if idx >= len(runtime_points):
+                    break
+                point = runtime_points[idx]
+                if not (isinstance(point, (list, tuple)) and len(point) >= 2):
+                    continue
+                color = point[1]
+                if not (isinstance(color, (list, tuple)) and len(color) >= 3):
+                    continue
+                buttons = row.findChildren(QPushButton)
+                if buttons:
+                    buttons[0].setStyleSheet(
+                        f"background:rgb({int(color[0])},{int(color[1])},{int(color[2])}); border:1px solid #aaa; border-radius:2px;"
+                    )
+
     def _sync_drag_position_to_config(self):
         if not self.drag_adjust_check.isChecked():
             return
@@ -4863,6 +5454,8 @@ class VisualizerControlUI(QWidget):
 
         try:
             self.config = d
+            self._sync_theme_enable_widgets()
+            self._sync_window_layer_controls(d.get('window_layer', 'normal'))
 
             # 基础 UI
             self.master_visible_check.setChecked(d.get('master_visible', True))
@@ -5065,6 +5658,8 @@ class VisualizerControlUI(QWidget):
                     self.preview_spectrum_values = list(st['spectrum_bars'])
                 if 'color_preview' in st:
                     self.preview_dynamic_colors = [tuple(color) for color in st['color_preview']]
+                if 'runtime_color_state' in st:
+                    self._apply_runtime_color_snapshot(st['runtime_color_state'])
                 if 'color_cycle_hue' in st:
                     self.current_color_cycle_hue = float(st['color_cycle_hue'])
                 if 'color_cycle_rate' in st:
