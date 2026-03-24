@@ -254,6 +254,7 @@ def _normalize_loaded_config(data):
 
     cfg = copy.deepcopy(_DEFAULT_CONFIG)
     loaded = dict(data or {})
+    loaded.pop("__preset_category", None)
 
     legacy_rise = float(loaded.get("bar_rise_damping", loaded.get("damping", cfg["k_rise_damping"])))
     legacy_fall = float(loaded.get("bar_fall_damping", loaded.get("damping", cfg["k_fall_damping"])))
@@ -315,7 +316,7 @@ def _normalize_loaded_config(data):
 _ON_FIELD_ORDER = [
     "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
     "b12_on", "b23_on", "b34_on", "b45_on",
-    "tentacle_on", "tentacle_core_on",
+    "tentacle_on", "tentacle_core_on"
 ]
 
 _NOINTERP_KEYS = frozenset({
