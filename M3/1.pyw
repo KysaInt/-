@@ -710,6 +710,8 @@ class CircularVisualizerWindow(QWidget):
         self.tentacle_p_peak_cooldown = 0
         self.tentacle_soft_state_signature = None
         self.tentacle_soft_states = []
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in self.config.get("tentacle_color", (130, 240, 220))[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in self.config.get("tentacle_shader_tip_color", (88, 170, 255))[:3])
         self.current_radius = float(self.config.get("circle_radius", 150))
         self.radius_velocity = 0.0
 
@@ -1032,8 +1034,8 @@ class CircularVisualizerWindow(QWidget):
                 for entry in (self.config.get('gradient_points', []) or [])
                 if isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], (list, tuple)) and len(entry[1]) >= 3
             ],
-            'tentacle_color': tuple(int(channel) for channel in self.config.get('tentacle_color', (130, 240, 220))[:3]),
-            'tentacle_shader_tip_color': tuple(int(channel) for channel in self.config.get('tentacle_shader_tip_color', (88, 170, 255))[:3]),
+            'tentacle_color': tuple(int(channel) for channel in getattr(self, 'runtime_tentacle_base_color', self.config.get('tentacle_color', (130, 240, 220)))[:3]),
+            'tentacle_shader_tip_color': tuple(int(channel) for channel in getattr(self, 'runtime_tentacle_tip_color', self.config.get('tentacle_shader_tip_color', (88, 170, 255)))[:3]),
         }
         for layer_index in range(1, 6):
             state[f'c{layer_index}_color'] = tuple(int(channel) for channel in self.config.get(f'c{layer_index}_color', (255, 255, 255))[:3])
@@ -1413,6 +1415,8 @@ class CircularVisualizerWindow(QWidget):
         return line_segments
 
     def _build_tentacle_curves(self, cx, cy, radius, scale, shared_lengths):
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in self.config.get("tentacle_color", (130, 240, 220))[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in self.config.get("tentacle_shader_tip_color", (88, 170, 255))[:3])
         if not self.config.get("tentacles_enabled", True):
             return []
         if not self.config.get("tentacle_on", True):
@@ -1544,6 +1548,8 @@ class CircularVisualizerWindow(QWidget):
 
         base_color = tuple(self.config.get("tentacle_color", (130, 240, 220)))
         base_color = _apply_kp_to_rgb('tentacle_color', base_color)
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in base_color[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in tip_color[:3])
 
         # 紊流：沿用“系数乘法”语义，并扩展为可同时绑定 K/P
         turbulence_coef = 0.0
