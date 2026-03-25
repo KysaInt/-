@@ -126,8 +126,8 @@
   ],
   "c5_alpha": 34,
   "c5_thick": 8,
-  "c5_fill": true,
-  "c5_fill_alpha": 81,
+  "c5_fill": false,
+  "c5_fill_alpha": 0,
   "c5_step": 15,
   "c5_decay": 0.952,
   "c5_rot_speed": -2.31,
@@ -338,5 +338,8 @@
   "b34_independent_fall_damping": 0.02,
   "b45_use_independent_damping": false,
   "b45_independent_rise_damping": 0.02,
-  "b45_independent_fall_damping": 0.02
+  "b45_independent_fall_damping": 0.02,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

@@ -121,8 +121,8 @@
   ],
   "c4_alpha": 18,
   "c4_thick": 7,
-  "c4_fill": true,
-  "c4_fill_alpha": 49,
+  "c4_fill": false,
+  "c4_fill_alpha": 0,
   "c4_step": 21,
   "c4_rot_speed": -1.53,
   "c4_rot_pow": 0.52,
@@ -345,5 +345,8 @@
   "b34_independent_fall_damping": 0.02,
   "b45_use_independent_damping": false,
   "b45_independent_rise_damping": 0.02,
-  "b45_independent_fall_damping": 0.02
+  "b45_independent_fall_damping": 0.02,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

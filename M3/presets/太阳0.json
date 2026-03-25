@@ -74,8 +74,8 @@
   ],
   "c1_alpha": 255,
   "c1_thick": 1,
-  "c1_fill": true,
-  "c1_fill_alpha": 255,
+  "c1_fill": false,
+  "c1_fill_alpha": 0,
   "c1_step": 5,
   "c1_decay": 0.995,
   "c1_rot_speed": 1.24,
@@ -88,8 +88,8 @@
   ],
   "c2_alpha": 92,
   "c2_thick": 1,
-  "c2_fill": true,
-  "c2_fill_alpha": 255,
+  "c2_fill": false,
+  "c2_fill_alpha": 0,
   "c2_step": 6,
   "c2_rot_speed": 0.11,
   "c2_rot_pow": 0.5,
@@ -126,8 +126,8 @@
   ],
   "c5_alpha": 119,
   "c5_thick": 1,
-  "c5_fill": true,
-  "c5_fill_alpha": 255,
+  "c5_fill": false,
+  "c5_fill_alpha": 0,
   "c5_step": 2,
   "c5_decay": 0.995,
   "c5_rot_speed": -2.31,
@@ -332,5 +332,8 @@
   "b34_independent_fall_damping": 0.02,
   "b45_use_independent_damping": false,
   "b45_independent_rise_damping": 0.02,
-  "b45_independent_fall_damping": 0.02
+  "b45_independent_fall_damping": 0.02,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

@@ -7,9 +7,30 @@
   "color_cycle_pow": 2.2,
   "color_cycle_a1": true,
   "gradient_points": [
-    [0.0, [122, 216, 255]],
-    [0.5, [162, 255, 224]],
-    [1.0, [255, 246, 190]]
+    [
+      0.0,
+      [
+        122,
+        216,
+        255
+      ]
+    ],
+    [
+      0.5,
+      [
+        162,
+        255,
+        224
+      ]
+    ],
+    [
+      1.0,
+      [
+        255,
+        246,
+        190
+      ]
+    ]
   ],
   "global_scale": 1.0,
   "num_bars": 12,
@@ -26,12 +47,20 @@
   "c1_on": false,
   "c2_on": false,
   "c3_on": true,
-  "c3_color": [222, 255, 243],
+  "c3_color": [
+    222,
+    255,
+    243
+  ],
   "c3_alpha": 44,
   "c3_thick": 12,
   "c3_fill": false,
   "c4_on": true,
-  "c4_color": [165, 255, 226],
+  "c4_color": [
+    165,
+    255,
+    226
+  ],
   "c4_alpha": 42,
   "c4_thick": 3,
   "c4_fill": true,
@@ -45,7 +74,11 @@
   "b34_on": false,
   "b45_on": false,
   "tentacle_on": true,
-  "tentacle_color": [145, 255, 223],
+  "tentacle_color": [
+    145,
+    255,
+    223
+  ],
   "tentacle_alpha": 182,
   "tentacle_thick": 4,
   "tentacle_count": 18,
@@ -64,15 +97,26 @@
   "tentacle_length_stiffness": 0.3,
   "tentacle_stretch_limit": 1.12,
   "tentacle_shader_enabled": true,
-  "tentacle_shader_tip_color": [99, 182, 255],
+  "tentacle_shader_tip_color": [
+    99,
+    182,
+    255
+  ],
   "tentacle_shader_alpha_start": 0.95,
   "tentacle_shader_alpha_end": 0.14,
   "tentacle_shader_bias": 1.24,
   "tentacle_core_on": true,
-  "tentacle_core_color": [230, 255, 244],
+  "tentacle_core_color": [
+    230,
+    255,
+    244
+  ],
   "tentacle_core_alpha": 210,
   "tentacle_core_thick": 2,
   "tentacle_core_base_speed": 0.82,
   "tentacle_core_k_speed": 1.36,
-  "tentacle_core_p_speed": 1.48
+  "tentacle_core_p_speed": 1.48,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

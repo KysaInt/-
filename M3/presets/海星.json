@@ -343,5 +343,8 @@
   "b34_independent_fall_damping": 0.02,
   "b45_use_independent_damping": false,
   "b45_independent_rise_damping": 0.02,
-  "b45_independent_fall_damping": 0.02
+  "b45_independent_fall_damping": 0.02,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

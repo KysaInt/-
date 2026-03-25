@@ -344,5 +344,8 @@
   "kp_bind_tentacle_shader_alpha_start_p": false,
   "kp_tentacle_shader_alpha_start_p_wmax": 1.0,
   "kp_bind_tentacle_shader_alpha_start_k": false,
-  "kp_tentacle_shader_alpha_start_k_wmax": 1.0
+  "kp_tentacle_shader_alpha_start_k_wmax": 1.0,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

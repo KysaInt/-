@@ -339,5 +339,8 @@
   "bar_mirror": false,
   "bar_scale": 1.0,
   "waveform_thickness": 2,
-  "waveform_fill": false
+  "waveform_fill": false,
+  "_preset_meta": {
+    "contour_fill_visibility_mode": "independent"
+  }
 }

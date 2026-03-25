@@ -631,7 +631,8 @@
       "theme_kaleidoscope_fill",
       "theme_kaleidoscope_lines",
       "theme_softbody"
-    ]
+    ],
+    "contour_fill_visibility_mode": "independent"
   },
   "_theme_mix": {
     "theme_classic_kaleidoscope": {
@@ -1015,7 +1016,6 @@
       "b45_independent_fall_damping": 0.999
     },
     "theme_kaleidoscope_fill": {
-      "contours_enabled": false,
       "c1_on": true,
       "c1_color": [
         100,
@@ -1306,7 +1306,6 @@
       "kp_c5_rot_pow_p_wmax": 0.0
     },
     "theme_kaleidoscope_lines": {
-      "bars_enabled": false,
       "b12_on": false,
       "b12_thick": 2,
       "b12_fixed": false,

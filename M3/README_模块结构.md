@@ -17,6 +17,11 @@
   - 不依赖 Qt / OpenGL / 主界面布局
   - 适合作为 Unity 或其他宿主的算法参考层
 
+- [unity_exporter.py](unity_exporter.py)
+  - 轻量 Unity 导出模块
+  - 将当前预设配置转换为单文件 C# 组件脚本
+  - 不导出主界面、预设管理器或 Unity 侧 UI
+
 ## audio_runtime.py 提供的能力
 
 - `LoopbackAudioCapture`
@@ -52,4 +57,6 @@
 
 - 继续把 `1.pyw` 中的图形状态生成逻辑拆到 `core/visual_state.py`
 - 将配置结构进一步拆成 `audio_config` / `theme_config` / `window_config`
-- 如果目标是 Unity 直接复用，下一步优先产出一份 C# 对照版 `AudioSignalProcessor`
+- 如果目标是 Unity 直接复用，当前已经提供 `unity_exporter.py` 作为固定预设导出入口
+- [0.pyw](0.pyw) 左侧新增了“导出到Unity”页面，用于选择输出类名、路径并执行导出
+- 如果后续要进一步提高 Unity 侧还原度，再考虑抽出一份更纯粹的 C# `AudioSignalProcessor`

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
-    QInputDialog, QDialog, QListWidget, QLineEdit,
+    QInputDialog, QDialog, QListWidget, QLineEdit, QFileDialog,
     QFrame, QMessageBox, QScrollArea,
     QStackedWidget,
     QTreeWidget, QTreeWidgetItem,
@@ -31,6 +31,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QRectF
 from PySide6.QtGui import QFont, QColor, QPalette, QPainter, QPen, QCursor, QLinearGradient
+
+from unity_exporter import (
+    build_unity_export_path,
+    export_unity_component,
+    list_unity_shared_prerequisite_paths,
+    normalize_unity_project_dir,
+    sanitize_csharp_identifier,
+    suggest_export_path,
+)
 
 CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 PRESETS_DIR = Path(__file__).parent / 'presets'
@@ -1466,7 +1475,10 @@ class VisualizerControlUI(QWidget):
         self._latest_runtime_color_state = {}
         self._latest_gradient_point_colors = []
         self._latest_palette_preview = []
+        self._latest_palette_preview_meta = []
         self._preview_sidebar_last_state = True
+        self._unity_export_auto_class_name = ""
+        self._unity_export_auto_path = ""
 
         self._kp_binding_meta = {}
         self._kp_accent_color = _active_palette_color(QPalette.ColorRole.Highlight).name()
@@ -1638,19 +1650,49 @@ class VisualizerControlUI(QWidget):
         save_data['_preset_meta'] = {
             'format': 'theme-mix-v2',
             'theme_sections': list(_THEME_PRESET_SECTIONS),
+            'contour_fill_visibility_mode': 'independent',
         }
         save_data['_theme_mix'] = self._build_theme_mix_payload(save_data)
         return save_data
 
+    @staticmethod
+    def _migrate_legacy_contour_fill_visibility(data):
+        if not isinstance(data, dict):
+            return data
+        migrated = dict(data)
+        changed = False
+        for layer_index in range(1, 6):
+            contour_key = f'c{layer_index}_on'
+            fill_key = f'c{layer_index}_fill'
+            fill_alpha_key = f'c{layer_index}_fill_alpha'
+            if not bool(migrated.get(contour_key, False)) and bool(migrated.get(fill_key, False)):
+                migrated[fill_key] = False
+                if fill_alpha_key in migrated:
+                    migrated[fill_alpha_key] = 0
+                changed = True
+        return migrated if changed else data
+
     def _inflate_loaded_preset_data(self, raw_data):
         if not isinstance(raw_data, dict):
             return {}
+        preset_meta = raw_data.get('_preset_meta', {})
+        use_independent_visibility = isinstance(preset_meta, dict) and preset_meta.get('contour_fill_visibility_mode') == 'independent'
         config_data = {key: value for key, value in raw_data.items() if not str(key).startswith('_')}
+        if not use_independent_visibility:
+            config_data = self._migrate_legacy_contour_fill_visibility(config_data)
         theme_mix = raw_data.get('_theme_mix', {})
         if isinstance(theme_mix, dict):
-            for section_data in theme_mix.values():
-                if isinstance(section_data, dict):
-                    config_data.update(section_data)
+            for section, section_data in theme_mix.items():
+                if not isinstance(section_data, dict):
+                    continue
+                if not use_independent_visibility:
+                    section_data = self._migrate_legacy_contour_fill_visibility(section_data)
+                if section in _THEME_PRESET_SECTIONS:
+                    normalized_section_data = self._normalize_section_preset_payload(section, section_data)
+                    if isinstance(normalized_section_data, dict):
+                        config_data.update(normalized_section_data)
+                        continue
+                config_data.update(section_data)
         return config_data
 
     def _update_cfg(self, key, value):
@@ -2145,22 +2187,27 @@ class VisualizerControlUI(QWidget):
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        tg.addWidget(self.preset_combo, r, 1, 1, 3)
+        tg.addWidget(self.preset_combo, r, 1, 1, 2)
 
         b_prev = QPushButton("上一个")
         b_prev.setMinimumHeight(24)
         b_prev.clicked.connect(lambda: self._switch_preset_by_offset(-1, update_info=True))
-        tg.addWidget(b_prev, r, 4)
+        tg.addWidget(b_prev, r, 3)
 
         b_next = QPushButton("下一个")
         b_next.setMinimumHeight(24)
         b_next.clicked.connect(lambda: self._switch_preset_by_offset(1, update_info=True))
-        tg.addWidget(b_next, r, 5)
+        tg.addWidget(b_next, r, 4)
 
         b_save = QPushButton("另存为")
         b_save.setMinimumHeight(24)
         b_save.clicked.connect(self._save_preset_as)
-        tg.addWidget(b_save, r, 6)
+        tg.addWidget(b_save, r, 5)
+
+        b_save_current = QPushButton("覆盖保存当前")
+        b_save_current.setMinimumHeight(24)
+        b_save_current.clicked.connect(self._save_current_preset)
+        tg.addWidget(b_save_current, r, 6)
 
         b_reload = QPushButton("刷新")
         b_reload.setMinimumHeight(24)
@@ -2245,20 +2292,30 @@ class VisualizerControlUI(QWidget):
 
         tg.addWidget(QLabel("颜色方案:"), r, 0)
         self.palette_preview_cells = []
+        self.palette_preview_labels = []
         palette_row = QHBoxLayout(); palette_row.setSpacing(4)
         for _ in range(8):
+            cell_wrap = QWidget()
+            cell_layout = QVBoxLayout(cell_wrap)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
             cell = QFrame()
             cell.setFixedSize(22, 22)
             cell.setFrameShape(QFrame.StyledPanel)
             cell.setStyleSheet("border:1px solid #666; border-radius:2px;")
             self.palette_preview_cells.append(cell)
             idx = len(self.palette_preview_cells) - 1
-            # allow clicking the small preview cell to edit color
             cell.setCursor(Qt.PointingHandCursor)
             def _make_handler(i):
                 return lambda ev: self._on_palette_cell_clicked(i)
             cell.mousePressEvent = _make_handler(idx)
-            palette_row.addWidget(cell)
+            cell_layout.addWidget(cell, alignment=Qt.AlignHCenter)
+            label = QLabel("")
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("color:#8a93a1; font-size:7.5pt;")
+            self.palette_preview_labels.append(label)
+            cell_layout.addWidget(label)
+            palette_row.addWidget(cell_wrap)
         palette_row.addStretch()
         tg.addLayout(palette_row, r, 1, 1, 9)
         r += 1
@@ -2369,6 +2426,7 @@ class VisualizerControlUI(QWidget):
             (("颜色方案",), self._build_color_section()),
             (("运动表现",), self._build_physics_section()),
             (("高级控制",), self._build_k1_section()),
+            (("导出到Unity",), self._build_unity_export_section()),
             (("🎲 随机",), self._build_random_section()),
         ]
 
@@ -3127,6 +3185,7 @@ class VisualizerControlUI(QWidget):
             self.preset_combo.setCurrentIndex(0)
         self.preset_combo.blockSignals(False)
         self._update_preset_preview()
+        self._refresh_unity_export_suggestion()
         if invalid_files:
             preview_names = '、'.join(fp.stem for fp, _error in invalid_files[:3])
             if len(invalid_files) > 3:
@@ -3391,14 +3450,37 @@ class VisualizerControlUI(QWidget):
                 return
 
         try:
-            save_data = self._build_full_preset_payload()
-            with open(fp, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, indent=2, ensure_ascii=False)
+            self._write_preset_file(fp)
             self._refresh_preset_list()
             self._select_preset_by_path(fp)
             QMessageBox.information(self, "成功", f"预设已保存: {safe_name}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存预设失败: {e}")
+
+    def _save_current_preset(self):
+        fp = self.preset_combo.currentData() if hasattr(self, 'preset_combo') else None
+        if not fp:
+            self._save_preset_as()
+            return
+
+        target = Path(fp)
+        stem = target.stem
+        if QMessageBox.question(
+            self,
+            "覆盖保存当前预设",
+            f"确定用当前参数覆盖保存预设 {stem} 吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
+
+        try:
+            self._write_preset_file(target)
+            self._refresh_preset_list()
+            self._select_preset_by_path(target)
+            self._set_info_bar(f"已覆盖保存当前预设: {stem}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"覆盖保存预设失败: {e}")
 
     def _rename_current_preset(self):
         fp = self.preset_combo.currentData()
@@ -3499,10 +3581,215 @@ class VisualizerControlUI(QWidget):
             if self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
                 self._send_transition_command(from_config)
             self._set_info_bar(f"已加载预设: {Path(fp).stem}")
+            self._refresh_unity_export_suggestion()
             if show_message:
                 QMessageBox.information(self, "成功", f"已加载预设: {Path(fp).stem}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载预设失败: {e}")
+
+    def _get_current_preset_name(self):
+        fp = self.preset_combo.currentData() if hasattr(self, 'preset_combo') else None
+        return Path(fp).stem if fp else 'CurrentPreset'
+
+    def _refresh_unity_export_suggestion(self):
+        if not hasattr(self, 'unity_export_class_edit'):
+            return
+        preset_name = self._get_current_preset_name()
+        last_auto_class = self._unity_export_auto_class_name
+        current_class = self.unity_export_class_edit.text().strip()
+        suggested_class = sanitize_csharp_identifier(preset_name, fallback='AyeExportedPresetEffect')
+        if not current_class or current_class == last_auto_class:
+            self.unity_export_class_edit.blockSignals(True)
+            self.unity_export_class_edit.setText(suggested_class)
+            self.unity_export_class_edit.blockSignals(False)
+            current_class = suggested_class
+        self._unity_export_auto_class_name = suggested_class
+
+        project_dir = normalize_unity_project_dir(
+            project_dir=self.config.get('unity_export_project_dir'),
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        project_dir_text = str(project_dir) if project_dir else ''
+        current_path = self.unity_export_path_edit.text().strip()
+        suggested_path = suggest_export_path(
+            preset_name,
+            current_class or suggested_class,
+            project_dir=project_dir_text,
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        if not current_path or current_path == self._unity_export_auto_path:
+            self.unity_export_path_edit.setText(project_dir_text)
+            current_path = project_dir_text
+        self._unity_export_auto_path = project_dir_text
+
+        self.unity_export_preset_value.setText(preset_name)
+        self.unity_export_tip_label.setText(
+            f"输出为单个固定参数的 Unity 组件脚本，不包含 UI、预设管理或运行时调节面板。\n目标文件: {suggested_path}"
+        )
+
+    def _on_unity_export_class_changed(self, text):
+        clean_name = sanitize_csharp_identifier(text or self._get_current_preset_name(), fallback='AyeExportedPresetEffect')
+        previous_auto_path = self._unity_export_auto_path
+        current_path = self.unity_export_path_edit.text().strip() if hasattr(self, 'unity_export_path_edit') else ''
+        project_dir = normalize_unity_project_dir(
+            project_dir=current_path or self.config.get('unity_export_project_dir'),
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        suggested_path = suggest_export_path(
+            self._get_current_preset_name(),
+            clean_name,
+            project_dir=str(project_dir) if project_dir else None,
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        self._unity_export_auto_class_name = clean_name
+        self._unity_export_auto_path = str(project_dir) if project_dir else ''
+        if current_path == previous_auto_path or not current_path:
+            self.unity_export_path_edit.setText(self._unity_export_auto_path)
+        self.unity_export_tip_label.setText(
+            f"输出为单个固定参数的 Unity 组件脚本，不包含 UI、预设管理或运行时调节面板。\n目标文件: {suggested_path}"
+        )
+
+    def _browse_unity_export_path(self):
+        initial_dir = normalize_unity_project_dir(
+            project_dir=self.unity_export_path_edit.text().strip() or self.config.get('unity_export_project_dir'),
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            '选择 Unity 项目文件夹',
+            str(initial_dir) if initial_dir else '',
+        )
+        if not selected:
+            return
+        self.unity_export_path_edit.setText(selected)
+        self.config['unity_export_project_dir'] = selected
+        self._schedule_config_commit()
+        self._refresh_unity_export_suggestion()
+
+    def _export_current_preset_to_unity(self):
+        preset_name = self._get_current_preset_name()
+        class_name = sanitize_csharp_identifier(
+            self.unity_export_class_edit.text().strip() or preset_name,
+            fallback='AyeExportedPresetEffect'
+        )
+        if self.unity_export_class_edit.text().strip() != class_name:
+            self.unity_export_class_edit.blockSignals(True)
+            self.unity_export_class_edit.setText(class_name)
+            self.unity_export_class_edit.blockSignals(False)
+        project_dir = normalize_unity_project_dir(
+            project_dir=self.unity_export_path_edit.text().strip() or self.config.get('unity_export_project_dir'),
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        if not project_dir:
+            QMessageBox.warning(self, '提示', '请先选择 Unity 项目文件夹')
+            return
+        output_path = build_unity_export_path(project_dir, class_name)
+        self.unity_export_path_edit.setText(str(project_dir))
+
+        target = Path(output_path)
+        if target.exists():
+            if QMessageBox.question(
+                self,
+                '覆盖确认',
+                f'文件已存在，是否覆盖？\n{target}',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
+
+        try:
+            exported = export_unity_component(
+                dict(self.config),
+                preset_name=preset_name,
+                output_path=target,
+                class_name=class_name,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出 Unity 组件失败: {e}')
+            return
+
+        self.config['unity_export_last_class'] = class_name
+        self.config['unity_export_project_dir'] = str(project_dir)
+        self.config['unity_export_last_path'] = str(exported)
+        self._schedule_config_commit()
+        self._refresh_unity_export_suggestion()
+        self._set_info_bar(f'Unity 组件已导出: {exported.name}')
+        prerequisite_paths = list_unity_shared_prerequisite_paths(project_dir)
+        prerequisite_names = '、'.join(path.name for path in prerequisite_paths) if prerequisite_paths else '无'
+        QMessageBox.information(
+            self,
+            '导出完成',
+            f'已导出当前预设为 Unity 组件脚本:\n{exported}\n\n'
+            f'导出前已自动检测并按需生成共享先决组件:\n{prerequisite_names}\n\n'
+            '其中会复用或生成 P01 运行时链路需要的共享脚本，例如 PyStyleVisualizer、WindowsAudioCapture、音频文件驱动和相机控制器。',
+        )
+
+    def _build_unity_export_section(self):
+        s = _Collapsible('导出到Unity', expanded=True)
+        v = QVBoxLayout(); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+
+        title = QLabel('导出当前预设为独立 Unity 组件')
+        title.setStyleSheet('font-size:11pt; font-weight:bold;')
+        v.addWidget(title)
+
+        desc = QLabel(
+            '这里导出的是当前选中预设对应的独立 Unity 单元。\n'
+            '会自动复用或生成 P01 的核心运行时脚本，只保留预设画面逻辑，不导出主程序面板和 Unity 侧 UI。'
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet('color:#8a93a1;')
+        v.addWidget(desc)
+
+        grid = QGridLayout(); grid.setContentsMargins(0, 4, 0, 4); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel('当前预设'), 0, 0)
+        self.unity_export_preset_value = QLabel('')
+        self.unity_export_preset_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        grid.addWidget(self.unity_export_preset_value, 0, 1)
+
+        grid.addWidget(QLabel('组件类名'), 1, 0)
+        self.unity_export_class_edit = QLineEdit()
+        self.unity_export_class_edit.setPlaceholderText('例如 JellyfishPulseEffect')
+        self.unity_export_class_edit.textChanged.connect(self._on_unity_export_class_changed)
+        grid.addWidget(self.unity_export_class_edit, 1, 1)
+
+        grid.addWidget(QLabel('Unity项目'), 2, 0)
+        path_row = QHBoxLayout(); path_row.setSpacing(6)
+        self.unity_export_path_edit = QLineEdit()
+        self.unity_export_path_edit.setPlaceholderText('选择 Unity 项目根目录')
+        path_row.addWidget(self.unity_export_path_edit, 1)
+        browse_btn = QPushButton('选择项目...')
+        browse_btn.clicked.connect(self._browse_unity_export_path)
+        path_row.addWidget(browse_btn)
+        grid.addLayout(path_row, 2, 1)
+        v.addLayout(grid)
+
+        self.unity_export_tip_label = QLabel('')
+        self.unity_export_tip_label.setWordWrap(True)
+        self.unity_export_tip_label.setStyleSheet('color:#8a93a1;')
+        v.addWidget(self.unity_export_tip_label)
+
+        note = QLabel(
+            '导出的脚本会把当前配置直接写死在代码里，Unity 中默认不可调。\n'
+            '如果场景里没有明显音频输入，它会自动回退到内置节奏驱动，方便直接预览效果。'
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet('color:#8a93a1;')
+        v.addWidget(note)
+
+        actions = QHBoxLayout(); actions.setSpacing(8)
+        refresh_btn = QPushButton('刷新建议')
+        refresh_btn.clicked.connect(self._refresh_unity_export_suggestion)
+        actions.addWidget(refresh_btn)
+        export_btn = QPushButton('导出当前预设')
+        export_btn.setMinimumHeight(30)
+        export_btn.clicked.connect(self._export_current_preset_to_unity)
+        actions.addWidget(export_btn)
+        actions.addStretch()
+        v.addLayout(actions)
+
+        s.add_layout(v)
+        QTimer.singleShot(0, self._refresh_unity_export_suggestion)
+        return s
 
     def _send_transition_command(self, from_config):
         if not self.config_queue:
@@ -3733,7 +4020,7 @@ class VisualizerControlUI(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
         v.addLayout(self._build_section_action_row('theme_classic_kaleidoscope'))
-        info = QLabel('经典主题由填充与连线两个子主题组成。启用请使用左侧树行右侧的小复选框，子主题细节请进入下级页面。')
+        info = QLabel('经典主题由轮廓/填充与连线两个子主题组成。轮廓与填充在图层内独立控制，子主题细节请进入下级页面。')
         info.setWordWrap(True)
         info.setStyleSheet('color:#8a93a1;')
         v.addWidget(info)
@@ -3746,7 +4033,7 @@ class VisualizerControlUI(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
         v.addLayout(self._build_section_action_row('theme_kaleidoscope_fill'))
-        info = QLabel('启用请使用左侧树行右侧的小复选框。这里保留填充子主题的参数与子预设。')
+        info = QLabel('这里保留轮廓/填充子主题的参数与子预设。每层的“轮廓”和“填充可见”互相独立，不再把“显示”当成总控。')
         info.setWordWrap(True)
         info.setStyleSheet('color:#8a93a1;')
         v.addWidget(info)
@@ -3851,9 +4138,9 @@ class VisualizerControlUI(QWidget):
         if section == 'theme_classic_kaleidoscope':
             return ['contours_enabled', 'bars_enabled'] + contour_keys + bar_keys
         if section == 'theme_kaleidoscope_fill':
-            return ['contours_enabled'] + contour_keys
+            return contour_keys
         if section == 'theme_kaleidoscope_lines':
-            return ['bars_enabled'] + bar_keys
+            return bar_keys
         if section == 'theme_softbody':
             return ['tentacles_enabled'] + softbody_keys
         if section == 'contour':
@@ -3869,10 +4156,6 @@ class VisualizerControlUI(QWidget):
     def _randomize_section(self, section: str):
         if section == 'theme_classic_kaleidoscope':
             self.config['contours_enabled'] = True
-            self.config['bars_enabled'] = True
-        elif section == 'theme_kaleidoscope_fill':
-            self.config['contours_enabled'] = True
-        elif section == 'theme_kaleidoscope_lines':
             self.config['bars_enabled'] = True
         elif section == 'theme_softbody':
             self.config['tentacles_enabled'] = True
@@ -4062,7 +4345,7 @@ class VisualizerControlUI(QWidget):
     # ── 五层轮廓 ──────────────────────────────────────────
 
     def _build_contour_section(self):
-        s = _Collapsible("五层填充 (L1~L5)", expanded=False)
+        s = _Collapsible("五层轮廓 / 填充 (L1~L5)", expanded=False)
         g = QGridLayout(); g.setSpacing(6); g.setContentsMargins(0,0,0,0); r = 0
         g.addLayout(self._build_section_action_row('contour'), r, 0, 1, 4); r += 1
         _layers = [
@@ -4073,11 +4356,11 @@ class VisualizerControlUI(QWidget):
             (5, "L5 外缓慢", True, True),
         ]
         for li, lname, has_step, has_decay in _layers:
-            hdr = QLabel(f"── 填充 {lname} ──")
+            hdr = QLabel(f"── 图层 {lname} ──")
             hdr.setStyleSheet("color:#888; font-size:8pt; padding:3px 0 1px 0;")
             g.addWidget(hdr, r, 0, 1, 4); r += 1
 
-            chk = QCheckBox("显示")
+            chk = QCheckBox("轮廓")
             chk.setChecked(self.config.get(f'c{li}_on', False))
             chk.toggled.connect(lambda v, k=f'c{li}_on': self._update_cfg(k, v))
             setattr(self, f'c{li}_on_check', chk)
@@ -4139,7 +4422,7 @@ class VisualizerControlUI(QWidget):
             setattr(self, f'c{li}_alpha_slider', sl_a)
             setattr(self, f'c{li}_alpha_spin', alpha_box)
 
-            fc = QCheckBox("填充")
+            fc = QCheckBox("填充可见")
             fc.setChecked(self.config.get(f'c{li}_fill', False))
             fc.toggled.connect(lambda v, k=f'c{li}_fill': self._update_cfg(k, v))
             setattr(self, f'c{li}_fill_check', fc)
@@ -5368,68 +5651,48 @@ class VisualizerControlUI(QWidget):
     def _update_color_preview_strip(self):
         if not hasattr(self, 'palette_preview_cells'):
             return
-        previews = []
-        if self.config.get('color_scheme', 'rainbow') == 'custom':
-            if self.config.get('gradient_enabled', True):
-                pts = self.config.get('gradient_points', []) or []
-                for p in pts[:8]:
-                    c = p[1] if isinstance(p, (list, tuple)) and len(p) >= 2 else None
-                    if isinstance(c, (list, tuple)) and len(c) >= 3:
-                        previews.append((int(c[0]), int(c[1]), int(c[2])))
-            if len(previews) < 8:
-                for i in range(1, 6):
-                    c = self.config.get(f'c{i}_color', (255, 255, 255))
-                    previews.append((int(c[0]), int(c[1]), int(c[2])))
-                    if len(previews) >= 8:
-                        break
-        else:
-            previews = self._generate_harmony_palette(8)
-
-        while len(previews) < 8:
-            previews.append((60, 60, 60))
-        self._set_palette_preview_colors(previews[:8])
+        self._set_palette_preview_colors(self._build_palette_preview_entries())
 
     def _on_palette_cell_clicked(self, idx: int):
-        # 点击主色带上的小色块以快速编辑颜色
         if idx < 0 or idx >= len(self.palette_preview_cells):
             return
-        # 读取当前 displayed color
-        style = self.palette_preview_cells[idx].styleSheet()
-        m = re.search(r'rgb\((\d+),(\d+),(\d+)\)', style)
-        if m:
-            cur = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        else:
-            cur = (255, 255, 255)
+        entry = self._latest_palette_preview_meta[idx] if idx < len(self._latest_palette_preview_meta) else None
+        if not entry:
+            return
+        cur = entry.get('color', (255, 255, 255))
+        target = entry.get('target') or {}
+        target_kind = target.get('kind')
 
-        cfg_prefix = f"palette_cell_{idx}"
-        if self.config.get('color_scheme', 'rainbow') == 'custom' and self.config.get('gradient_enabled', True):
-            pts = list(self.config.get('gradient_points', []))
-            if idx < len(pts):
-                cfg_prefix = f"gradient_points_{idx}_color"
+        if target_kind == 'scheme' and self.config.get('color_scheme', 'rainbow') != 'custom':
+            self._set_info_bar('当前为预设配色，切到“自定义”后可直接点击色块编辑控制点')
+            return
+
+        if target_kind == 'gradient':
+            cfg_prefix = f"gradient_points_{int(target.get('index', idx))}_color"
+        elif target_kind == 'cfg':
+            cfg_prefix = str(target.get('key') or f"palette_cell_{idx}")
         else:
-            li = (idx % 5) + 1
-            cfg_prefix = f"c{li}_color"
+            cfg_prefix = f"palette_cell_{idx}"
 
         picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=cfg_prefix)
 
         def _apply(new_col):
-            # 如果当前为自定义渐变并且存在对应控制点，则更新控制点
-            if self.config.get('color_scheme', 'rainbow') == 'custom' and self.config.get('gradient_enabled', True):
+            if target_kind == 'gradient':
                 pts = list(self.config.get('gradient_points', []))
-                if idx < len(pts):
-                    pts[idx] = (pts[idx][0], new_col)
+                point_index = int(target.get('index', idx))
+                if point_index < len(pts):
+                    pts[point_index] = (pts[point_index][0], new_col)
                 else:
-                    pos = min(1.0, max(0.0, idx / max(1, len(self.palette_preview_cells) - 1)))
+                    pos = min(1.0, max(0.0, point_index / max(1, len(self.palette_preview_cells) - 1)))
                     pts.append((pos, new_col))
                 self._update_cfg('gradient_points', pts)
-            else:
-                li = (idx % 5) + 1
-                key = f'c{li}_color'
+            elif target_kind == 'cfg':
+                key = str(target.get('key'))
+                self._set_registered_color_buttons(key, new_col)
                 self._update_cfg(key, new_col)
-                if hasattr(self, f'c{li}_color_btn'):
-                    getattr(self, f'c{li}_color_btn').setStyleSheet(
-                        f"background:rgb({new_col[0]},{new_col[1]},{new_col[2]}); border:1px solid #aaa; border-radius:2px;"
-                    )
+            else:
+                self._set_info_bar('该色块是当前主题效果预览，不对应单独颜色参数')
+                return
             self._update_color_preview_strip()
 
         picker.colorSelected.connect(_apply)
@@ -5678,16 +5941,128 @@ class VisualizerControlUI(QWidget):
             f"background:rgb({normalized[0]},{normalized[1]},{normalized[2]}); border:1px solid {border}; border-radius:2px;"
         )
 
+    def _write_preset_file(self, fp: Path):
+        save_data = self._build_full_preset_payload()
+        with open(fp, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _make_palette_preview_entry(color, label, *, border='#666', tooltip='', target=None):
+        return {
+            'color': color,
+            'label': label,
+            'border': border,
+            'tooltip': tooltip,
+            'target': target,
+        }
+
+    def _build_palette_preview_entries(self):
+        section_borders = {
+            '颜色': '#5e88b0',
+            '经典': '#b48d59',
+            '填充': '#7ea560',
+            '连线': '#4f9aa3',
+            '柔体': '#a36f56',
+        }
+        entries = []
+        scheme = self.config.get('color_scheme', 'rainbow')
+
+        if scheme == 'custom':
+            points = sorted(self.config.get('gradient_points', [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))]), key=lambda item: item[0])
+            for index, (pos, color) in enumerate(points[:3]):
+                entries.append(self._make_palette_preview_entry(
+                    color,
+                    '颜色',
+                    border=section_borders['颜色'],
+                    tooltip=f'颜色方案 / 渐变控制点 {index + 1} / 位置 {pos:.2f}',
+                    target={'kind': 'gradient', 'index': index},
+                ))
+        else:
+            scheme_colors = self._generate_harmony_palette(3)
+            for index, color in enumerate(scheme_colors[:3]):
+                entries.append(self._make_palette_preview_entry(
+                    color,
+                    '颜色',
+                    border=section_borders['颜色'],
+                    tooltip=f'颜色方案 / 预设颜色 {index + 1}',
+                    target={'kind': 'scheme'},
+                ))
+
+        c1 = self.config.get('c1_color', (255, 255, 255))
+        c5 = self.config.get('c5_color', c1)
+        line_preview_colors = self._build_spectrum_preview_colors([0, 0, 0, 0, 0])
+        line_preview = line_preview_colors[min(2, len(line_preview_colors) - 1)] if line_preview_colors else c1
+        tentacle_base = self.config.get('tentacle_color', (130, 240, 220))
+        tentacle_tip = self.config.get('tentacle_shader_tip_color', tentacle_base)
+
+        entries.extend([
+            self._make_palette_preview_entry(
+                c1,
+                '经典',
+                border=section_borders['经典'],
+                tooltip='经典主题 / 主轮廓颜色',
+                target={'kind': 'cfg', 'key': 'c1_color'},
+            ),
+            self._make_palette_preview_entry(
+                c5,
+                '填充',
+                border=section_borders['填充'],
+                tooltip='填充子主题 / 外层填充参考色',
+                target={'kind': 'cfg', 'key': 'c5_color'},
+            ),
+            self._make_palette_preview_entry(
+                line_preview,
+                '连线',
+                border=section_borders['连线'],
+                tooltip='连线子主题 / 颜色跟随当前颜色方案',
+                target={'kind': 'scheme'},
+            ),
+            self._make_palette_preview_entry(
+                tentacle_base,
+                '柔体',
+                border=section_borders['柔体'],
+                tooltip='柔体主题 / 触须主色',
+                target={'kind': 'cfg', 'key': 'tentacle_color'},
+            ),
+            self._make_palette_preview_entry(
+                tentacle_tip,
+                '柔体',
+                border=section_borders['柔体'],
+                tooltip='柔体主题 / 触须尖端颜色',
+                target={'kind': 'cfg', 'key': 'tentacle_shader_tip_color'},
+            ),
+        ])
+        return entries[:8]
+
     def _set_palette_preview_colors(self, colors):
         if not hasattr(self, 'palette_preview_cells'):
             return
-        preview_colors = [self._normalize_rgb(color) for color in (colors or [])]
-        preview_colors = [color for color in preview_colors if color is not None]
-        while len(preview_colors) < len(self.palette_preview_cells):
-            preview_colors.append((60, 60, 60))
-        self._latest_palette_preview = list(preview_colors)
+        entries = []
+        for item in (colors or []):
+            if isinstance(item, dict):
+                normalized = self._normalize_rgb(item.get('color'))
+                if normalized is None:
+                    continue
+                entry = dict(item)
+                entry['color'] = normalized
+                entries.append(entry)
+            else:
+                normalized = self._normalize_rgb(item)
+                if normalized is not None:
+                    entries.append(self._make_palette_preview_entry(normalized, '颜色'))
+        while len(entries) < len(self.palette_preview_cells):
+            entries.append(self._make_palette_preview_entry((60, 60, 60), ''))
+        self._latest_palette_preview = [entry['color'] for entry in entries]
+        self._latest_palette_preview_meta = list(entries)
         for idx, cell in enumerate(self.palette_preview_cells):
-            self._apply_color_widget_style(cell, preview_colors[idx], border='#666')
+            entry = entries[idx]
+            self._apply_color_widget_style(cell, entry['color'], border=entry.get('border', '#666'))
+            tooltip = entry.get('tooltip') or ''
+            cell.setToolTip(tooltip)
+            if idx < len(getattr(self, 'palette_preview_labels', [])):
+                label = self.palette_preview_labels[idx]
+                label.setText(entry.get('label', ''))
+                label.setToolTip(tooltip)
 
     @staticmethod
     def _make_color_button_style(color):
@@ -5940,6 +6315,7 @@ class VisualizerControlUI(QWidget):
             self._sync_color_quick_widgets(d.get('color_dynamic', False))
         self._update_color_preview_strip()
         self._refresh_single_bar_preview()
+        self._refresh_unity_export_suggestion()
         self._save_config()
         if self.preset_auto_check.isChecked():
             self._schedule_next_preset_switch()
