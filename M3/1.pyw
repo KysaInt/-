@@ -9,14 +9,11 @@ import json
 import colorsys
 import ctypes
 import math
-from collections import deque
 from pathlib import Path
 import queue
 import time
 
 import numpy as np
-import pyaudiowpatch as pyaudio
-from scipy.fft import fft as scipy_fft
 from scipy.interpolate import BSpline
 
 from OpenGL import GL
@@ -26,16 +23,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen,
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QWidget
 
-
-try:
-    import cupy as cp
-
-    _HAS_GPU = True
-    cp.fft.fft(cp.zeros(2048))
-    print("✓ CuPy 可用 — 启用 GPU FFT")
-except Exception:
-    _HAS_GPU = False
-    print("⚠ CuPy 不可用 — 使用 CPU FFT")
+from core.audio_runtime import AudioSignalProcessor, LoopbackAudioCapture
 
 
 CONFIG_FILE = Path(__file__).parent / "visualizer_config.json"
@@ -668,8 +656,8 @@ class CircularVisualizerWindow(QWidget):
 
         self.CHUNK = 2048
         self.RATE = 44100
-        self.audio_queue = queue.Queue()
         self.channel_count = 2
+        self.audio_capture = None
 
         self.NUM_BARS = int(self.config.get("num_bars", 64))
         self.colors = []
@@ -686,14 +674,13 @@ class CircularVisualizerWindow(QWidget):
         self.object_length_states = {
             key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
         }
-        self.spectrum_history = deque()
+        self.spectrum_history = None
         self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
         self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
 
         self.smoothing_factor = float(self.config.get("smoothing", 0.7))
 
         self.a1_time_window = _clamp_time_window(self.config.get("a1_time_window", 10), 10)
-        self.loudness_history = []
         self.raw_a1_value = 0.0
         self.a1_value = 0.0
         self.prev_a1_value = 0.0
@@ -731,10 +718,27 @@ class CircularVisualizerWindow(QWidget):
         self._transition_alpha_schedule = []     # alpha-based fade schedule
         self._transition_alpha_controlled = set()
 
+        self.audio_processor = AudioSignalProcessor(
+            self.config,
+            chunk=self.CHUNK,
+            rate=self.RATE,
+            channel_count=self.channel_count,
+        )
+        self._sync_audio_processor_state()
+
         self._init_audio()
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self._tick)
+
+    def _sync_audio_processor_state(self):
+        self.a1_time_window = self.audio_processor.a1_time_window
+        self.raw_a1_value = self.audio_processor.raw_a1_value
+        self.a1_value = self.audio_processor.a1_value
+        self.k2_value = self.audio_processor.k2_value
+        self.spectrum_history = self.audio_processor.spectrum_history
+        self.spectrum_history_sum = self.audio_processor.spectrum_history_sum
+        self.smoothed_bar_values = self.audio_processor.smoothed_bar_values
 
     def _runtime_kp_delta(self, cfg_key: str, sig: str, normalized: float) -> float:
         if not bool(self.config.get(f"kp_bind_{cfg_key}_{sig}", False)):
@@ -792,48 +796,21 @@ class CircularVisualizerWindow(QWidget):
         self._send_status()
 
     def _init_audio(self):
-        print("正在初始化音频设备...")
-        self.p = pyaudio.PyAudio()
+        self.audio_capture = LoopbackAudioCapture(chunk=self.CHUNK)
         try:
-            wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-            if not default_speakers["isLoopbackDevice"]:
-                for loopback in self.p.get_loopback_device_info_generator():
-                    if default_speakers["name"] in loopback["name"]:
-                        default_speakers = loopback
-                        break
-            self.device_info = default_speakers
-            self.RATE = int(self.device_info["defaultSampleRate"])
-            self.channel_count = max(1, int(self.device_info.get("maxInputChannels", 2) or 2))
-            print(f"使用设备: {self.device_info['name']}")
+            self.audio_capture.start()
+            self.device_info = self.audio_capture.device_info
+            self.RATE = self.audio_capture.rate
+            self.channel_count = self.audio_capture.channel_count
+            self.audio_processor.set_stream_format(rate=self.RATE, channel_count=self.channel_count)
         except Exception as exc:
             print(f"获取音频设备失败: {exc}")
             raise
 
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=self.channel_count,
-            rate=self.RATE,
-            frames_per_buffer=self.CHUNK,
-            input=True,
-            input_device_index=self.device_info["index"],
-            stream_callback=self._audio_callback,
-        )
-        self.stream.start_stream()
-        print("✓ 音频捕获已启动")
-
-    def _audio_callback(self, in_data, _frame_count, _time_info, _status):
-        if in_data:
-            self.audio_queue.put(np.frombuffer(in_data, dtype=np.int16))
-        return (in_data, pyaudio.paContinue)
-
     def _pull_latest_audio_frame(self):
-        if self.audio_queue.empty():
+        if not self.audio_capture:
             return None
-        try:
-            return self.audio_queue.get_nowait()
-        except queue.Empty:
-            return None
+        return self.audio_capture.pull_latest_frame()
 
     def _reset_length_states(self, initial_bar_height):
         self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
@@ -844,9 +821,8 @@ class CircularVisualizerWindow(QWidget):
         self.object_length_states = {
             key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
         }
-        self.spectrum_history = deque()
-        self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
-        self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
+        self.audio_processor.reset()
+        self._sync_audio_processor_state()
         self.tentacle_core_angular_velocity = 0.0
         self.tentacle_core_accel_direction = 1.0
         self.tentacle_prev_abs_p = 0.0
@@ -889,113 +865,34 @@ class CircularVisualizerWindow(QWidget):
         return _clamp_time_window(self.config.get("bar_time_window", base_time_window), base_time_window)
 
     def _prune_spectrum_history(self, now=None):
-        current_time = time.time() if now is None else now
-        cutoff = current_time - self._get_bar_time_window()
-        while self.spectrum_history and self.spectrum_history[0][0] < cutoff:
-            _, old_values = self.spectrum_history.popleft()
-            self.spectrum_history_sum -= old_values
-        if not self.spectrum_history:
-            self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
-        else:
-            self.smoothed_bar_values = self.spectrum_history_sum / len(self.spectrum_history)
-        return self.smoothed_bar_values.copy()
+        values = self.audio_processor.prune_spectrum_history(now)
+        self._sync_audio_processor_state()
+        return values
 
     def _update_spectrum_history(self, bar_values, now=None):
-        current_time = time.time() if now is None else now
-        values = np.asarray(bar_values, dtype=float).reshape(-1)
-        if values.size != self.NUM_BARS:
-            resized = np.zeros(self.NUM_BARS, dtype=float)
-            copy_count = min(self.NUM_BARS, values.size)
-            resized[:copy_count] = values[:copy_count]
-            values = resized
-        self.spectrum_history.append((current_time, values.copy()))
-        if len(self.spectrum_history_sum) != self.NUM_BARS:
-            self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
-        self.spectrum_history_sum += values
-        return self._prune_spectrum_history(current_time)
+        values = self.audio_processor.update_spectrum_history(bar_values, now)
+        self._sync_audio_processor_state()
+        return values
 
     @staticmethod
     def _apply_damping_step(current, target, rise_damping, fall_damping):
-        rise_factor = max(0.001, 1.0 - rise_damping)
-        fall_factor = max(0.001, 1.0 - fall_damping)
-        if np.isscalar(current) and np.isscalar(target):
-            blend = rise_factor if target >= current else fall_factor
-            return current + (target - current) * blend
-        current_arr = np.asarray(current, dtype=float)
-        target_arr = np.asarray(target, dtype=float)
-        blend = np.where(target_arr >= current_arr, rise_factor, fall_factor)
-        return current_arr + (target_arr - current_arr) * blend
+        return AudioSignalProcessor.apply_damping_step(current, target, rise_damping, fall_damping)
 
     def _build_band_edges(self, spectrum_length, freq_res):
-        lower_bin = max(1, int(self.config.get("freq_min", 20) / freq_res))
-        upper_bin = min(spectrum_length, int(np.ceil(self.config.get("freq_max", 20000) / freq_res)) + 1)
-        if upper_bin <= lower_bin:
-            upper_bin = min(spectrum_length, lower_bin + 1)
-
-        min_freq = max(freq_res, lower_bin * freq_res)
-        max_freq = max(min_freq + freq_res, upper_bin * freq_res)
-        edges = np.geomspace(min_freq, max_freq, self.NUM_BARS + 1) / freq_res
-
-        bins = np.clip(np.rint(edges).astype(int), lower_bin, upper_bin)
-        bins[0] = lower_bin
-        bins[-1] = upper_bin
-        bins = np.maximum.accumulate(bins)
-        return bins
+        return self.audio_processor.build_band_edges(spectrum_length, freq_res)
 
     def _process_audio(self, audio_data):
-        if self.channel_count > 1 and len(audio_data) % self.channel_count == 0:
-            audio_data = audio_data.reshape(-1, self.channel_count).mean(axis=1)
-        if len(audio_data) >= self.CHUNK:
-            audio_data = audio_data[: self.CHUNK]
-        else:
-            audio_data = np.pad(audio_data, (0, self.CHUNK - len(audio_data)))
-
-        loudness = np.sqrt(np.mean(audio_data.astype(float) ** 2))
-        self._update_a1(loudness)
-
-        windowed = audio_data * np.hamming(len(audio_data))
-        if _HAS_GPU:
-            try:
-                gpu_window = cp.asarray(windowed)
-                spectrum = cp.asnumpy(cp.abs(cp.fft.fft(gpu_window))[: self.CHUNK // 2])
-            except Exception:
-                spectrum = np.abs(scipy_fft(windowed))[: self.CHUNK // 2]
-        else:
-            spectrum = np.abs(scipy_fft(windowed))[: self.CHUNK // 2]
-
-        freq_res = self.RATE / self.CHUNK
-        bins = self._build_band_edges(len(spectrum), freq_res)
-        limit = int(bins[-1])
-
-        bar_values = np.zeros(self.NUM_BARS, dtype=float)
-        for index in range(self.NUM_BARS):
-            start = int(bins[index])
-            end = int(bins[index + 1])
-            if end <= start and start < limit:
-                end = min(limit, start + 1)
-            if end > start:
-                bar_values[index] = float(np.mean(spectrum[start:end]))
-        return bar_values
+        values = self.audio_processor.process_frame(audio_data)
+        self._sync_audio_processor_state()
+        return values
 
     def _update_a1(self, loudness):
-        now = time.time()
-        self.loudness_history.append((now, loudness))
-        cutoff = now - self.a1_time_window
-        self.loudness_history = [(stamp, value) for stamp, value in self.loudness_history if stamp >= cutoff]
-
-        previous = self.a1_value
-        self.raw_a1_value = np.mean([value for _, value in self.loudness_history]) if self.loudness_history else 0.0
-        k_rise_damping, k_fall_damping = self._get_damping_pair()
-        self.a1_value = float(self._apply_damping_step(previous, self.raw_a1_value, k_rise_damping, k_fall_damping))
-        delta = self.a1_value - previous
-        power = float(self.config.get("k2_pow", 1.0))
-        self.k2_value = np.sign(delta) * (abs(delta) ** power)
+        self.audio_processor.update_loudness(loudness)
+        self._sync_audio_processor_state()
 
     @property
     def effective_a1(self):
-        if self.config.get("k2_enabled", False):
-            return self.k2_value
-        return self.a1_value
+        return self.audio_processor.effective_a1
 
     def _send_status(self):
         if not self.status_queue:
@@ -2059,6 +1956,8 @@ class CircularVisualizerWindow(QWidget):
                     self._transition_active = False   # 手动变更打断过渡
                 self.config = normalized_config
                 new_config = normalized_config
+                self.audio_processor.update_config(new_config)
+                self._sync_audio_processor_state()
 
                 if int(new_config.get("num_bars", 64)) != self.NUM_BARS:
                     self.NUM_BARS = int(new_config.get("num_bars", 64))
@@ -2333,11 +2232,9 @@ class CircularVisualizerWindow(QWidget):
         self._update_colors()
 
     def _cleanup(self):
-        if hasattr(self, "stream"):
-            self.stream.stop_stream()
-            self.stream.close()
-        if hasattr(self, "p"):
-            self.p.terminate()
+        if self.audio_capture is not None:
+            self.audio_capture.close()
+            self.audio_capture = None
         print("PyOpenGL 圆形频谱窗口已关闭")
 
 
