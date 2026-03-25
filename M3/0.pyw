@@ -2014,7 +2014,8 @@ class VisualizerControlUI(QWidget):
         return box
 
     def _new_bound_int_slider(self, *, cfg_key, default_value, soft_min, soft_max, hard_min=None, hard_max=None,
-                              step=1, width=62, suffix=''):
+                              step=1, width=62, suffix='', integer=True,
+                              kp_soft_min=None, kp_soft_max=None, kp_hard_min=None, kp_hard_max=None, kp_decimals=None):
         slider = QSlider(Qt.Horizontal)
         box = self._new_int_box(
             default_value=default_value,
@@ -2031,7 +2032,8 @@ class VisualizerControlUI(QWidget):
         return slider, box
 
     def _new_bound_float_slider(self, *, cfg_key, default_value, soft_min, soft_max, hard_min=None, hard_max=None,
-                                slider_scale=100, step=0.01, decimals=2, width=68, suffix=''):
+                                slider_scale=100, step=0.01, decimals=2, width=68, suffix='',
+                                kp_soft_min=None, kp_soft_max=None, kp_hard_min=None, kp_hard_max=None, kp_decimals=None):
         slider = QSlider(Qt.Horizontal)
         box = self._new_float_box(
             default_value=default_value,
