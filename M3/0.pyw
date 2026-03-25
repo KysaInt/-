@@ -4,6 +4,7 @@
 通过 multiprocessing 启动子程序并实时传递配置
 """
 
+import os
 import sys
 import json
 import time
@@ -50,9 +51,9 @@ PRESET_CATEGORY_BADGES = {
 SECTION_PRESET_LABELS = {
     'color': '颜色方案',
     'physics': '运动表现',
-    'contour': '轮廓图元',
-    'tentacle': '水母图元',
-    'bars': '连线图元',
+    'contour': '填充子主题',
+    'tentacle': '柔体主题',
+    'bars': '连线子主题',
     'graphics': '图元设置',
 }
 
@@ -1460,6 +1461,8 @@ class VisualizerControlUI(QWidget):
         self._palette_refill_running = False
         self._section_preset_combos = {}
         self._theme_nav_checks = {}
+        self._color_button_registry = {}
+        self._gradient_point_buttons = []
 
         self._kp_binding_meta = {}
         self._kp_accent_color = _active_palette_color(QPalette.ColorRole.Highlight).name()
@@ -2098,13 +2101,19 @@ class VisualizerControlUI(QWidget):
 
         self.pin_top_btn = QPushButton("置于顶层")
         self.pin_top_btn.setMinimumHeight(24)
+        self.pin_top_btn.setCheckable(True)
         self.pin_top_btn.clicked.connect(lambda: self._set_window_layer_mode('top'))
         top_action_row.addWidget(self.pin_top_btn)
 
         self.pin_bottom_btn = QPushButton("置于底层")
         self.pin_bottom_btn.setMinimumHeight(24)
+        self.pin_bottom_btn.setCheckable(True)
         self.pin_bottom_btn.clicked.connect(lambda: self._set_window_layer_mode('bottom'))
         top_action_row.addWidget(self.pin_bottom_btn)
+
+        self.window_layer_state_lbl = QLabel("")
+        self.window_layer_state_lbl.setStyleSheet("color:#8a93a1;")
+        top_action_row.addWidget(self.window_layer_state_lbl)
 
         self.restart_program_btn = QPushButton("重启程序")
         self.restart_program_btn.setMinimumHeight(24)
@@ -2170,7 +2179,7 @@ class VisualizerControlUI(QWidget):
         self.preset_interval_spin.valueChanged.connect(self._on_preset_interval_changed)
         preset_row.addWidget(self.preset_interval_spin)
 
-        self.preset_interval_random_check = QCheckBox("随机间隔随机")
+        self.preset_interval_random_check = QCheckBox("随机间隔")
         self.preset_interval_random_check.setChecked(self.config.get('preset_interval_random_enabled', False))
         self.preset_interval_random_check.toggled.connect(self._on_preset_interval_random_toggled)
         preset_row.addWidget(self.preset_interval_random_check)
@@ -2339,8 +2348,8 @@ class VisualizerControlUI(QWidget):
         pages = [
             (("主题设置",), self._build_theme_root_section()),
             (("主题设置", "经典"), self._build_classic_theme_section()),
-            (("主题设置", "经典", "填充主题"), self._build_fill_theme_section()),
-            (("主题设置", "经典", "连线主题"), self._build_line_theme_section()),
+            (("主题设置", "经典", "填充子主题"), self._build_fill_theme_section()),
+            (("主题设置", "经典", "连线子主题"), self._build_line_theme_section()),
             (("主题设置", "柔体主题"), self._build_softbody_theme_section()),
             (("控制",), self._build_control_section()),
             (("颜色方案",), self._build_color_section()),
@@ -2351,8 +2360,8 @@ class VisualizerControlUI(QWidget):
 
         theme_toggle_sections = {
             ("主题设置", "经典"): 'theme_classic_kaleidoscope',
-            ("主题设置", "经典", "填充主题"): 'theme_kaleidoscope_fill',
-            ("主题设置", "经典", "连线主题"): 'theme_kaleidoscope_lines',
+            ("主题设置", "经典", "填充子主题"): 'theme_kaleidoscope_fill',
+            ("主题设置", "经典", "连线子主题"): 'theme_kaleidoscope_lines',
             ("主题设置", "柔体主题"): 'theme_softbody',
         }
 
@@ -2905,7 +2914,7 @@ class VisualizerControlUI(QWidget):
         v.addLayout(row2)
 
         row3 = QHBoxLayout(); row3.setSpacing(10)
-        self.preset_interval_random_check = QCheckBox("随机间隔随机")
+        self.preset_interval_random_check = QCheckBox("随机间隔")
         self.preset_interval_random_check.setChecked(self.config.get('preset_interval_random_enabled', False))
         self.preset_interval_random_check.toggled.connect(self._on_preset_interval_random_toggled)
         row3.addWidget(self.preset_interval_random_check)
@@ -3457,7 +3466,6 @@ class VisualizerControlUI(QWidget):
                 'preset_transition_enabled',
                 'preset_transition_duration',
                 'preset_transition_easing',
-                'window_layer',
             )
             for key in runtime_keep_keys:
                 cfg[key] = self.config.get(key, cfg.get(key))
@@ -3772,7 +3780,8 @@ class VisualizerControlUI(QWidget):
         btn_reset.clicked.connect(lambda: self._reset_section_to_default(section))
         row.addWidget(btn_reset)
         section_label = SECTION_PRESET_LABELS.get(section, self._section_display_name(section))
-        row.addWidget(QLabel(f"{section_label}子预设:"))
+        preset_suffix = '' if section in {'theme_classic_kaleidoscope', 'theme_kaleidoscope_fill', 'theme_kaleidoscope_lines', 'theme_softbody', 'contour', 'bars', 'tentacle'} else '子预设'
+        row.addWidget(QLabel(f"{section_label}{preset_suffix}:"))
         sec_combo = QComboBox()
         sec_combo.setMinimumWidth(150)
         row.addWidget(sec_combo)
@@ -3941,6 +3950,18 @@ class VisualizerControlUI(QWidget):
         except Exception:
             return {}
 
+    def _normalize_section_preset_payload(self, section: str, data):
+        if not isinstance(data, dict):
+            return None
+        defaults = _get_defaults()
+        normalized = {}
+        for key in self._section_keys(section):
+            if key in data:
+                normalized[key] = data[key]
+            elif key in defaults:
+                normalized[key] = defaults[key]
+        return normalized
+
     def _write_section_presets(self, section: str, data: dict):
         fp = self._section_preset_path(section)
         with open(fp, 'w', encoding='utf-8') as f:
@@ -3968,6 +3989,7 @@ class VisualizerControlUI(QWidget):
         combo = self._section_preset_combos.get(section)
         default_name = combo.currentText().strip() if combo else ""
         section_label = SECTION_PRESET_LABELS.get(section, self._section_display_name(section))
+        preset_suffix = '' if section in {'theme_classic_kaleidoscope', 'theme_kaleidoscope_fill', 'theme_kaleidoscope_lines', 'theme_softbody', 'contour', 'bars', 'tentacle'} else '子预设'
         name, ok = QInputDialog.getText(self, f"保存{section_label}", "请输入名称:", text=default_name)
         if not ok:
             return
@@ -3977,15 +3999,16 @@ class VisualizerControlUI(QWidget):
             return
 
         presets = self._read_section_presets(section)
-        presets[safe] = {k: self.config.get(k) for k in keys}
+        defaults = _get_defaults()
+        presets[safe] = {k: self.config.get(k, defaults.get(k)) for k in keys}
         try:
             self._write_section_presets(section, presets)
             self._refresh_section_preset_combo(section)
             if combo is not None:
                 combo.setCurrentText(safe)
-            self._set_info_bar(f"已保存{section_label}子预设: {safe}")
+            self._set_info_bar(f"已保存{section_label}{preset_suffix}: {safe}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存{section_label}子预设失败: {e}")
+            QMessageBox.critical(self, "错误", f"保存{section_label}{preset_suffix}失败: {e}")
 
     def _load_section_preset(self, section: str):
         keys = self._section_keys(section)
@@ -3995,21 +4018,21 @@ class VisualizerControlUI(QWidget):
         if combo is None:
             return
         section_label = SECTION_PRESET_LABELS.get(section, self._section_display_name(section))
+        preset_suffix = '' if section in {'theme_classic_kaleidoscope', 'theme_kaleidoscope_fill', 'theme_kaleidoscope_lines', 'theme_softbody', 'contour', 'bars', 'tentacle'} else '子预设'
         name = combo.currentText().strip()
         if not name:
-            QMessageBox.warning(self, "提示", f"请先选择{section_label}子预设")
+            QMessageBox.warning(self, "提示", f"请先选择{section_label}{preset_suffix}")
             return
         presets = self._read_section_presets(section)
-        data = presets.get(name)
+        data = self._normalize_section_preset_payload(section, presets.get(name))
         if not isinstance(data, dict):
-            QMessageBox.warning(self, "提示", f"{section_label}子预设不存在或已损坏")
+            QMessageBox.warning(self, "提示", f"{section_label}{preset_suffix}不存在或已损坏")
             self._refresh_section_preset_combo(section)
             return
         for key in keys:
-            if key in data:
-                self.config[key] = data[key]
+            self.config[key] = data[key]
         self._apply_config_to_ui(self.config)
-        self._set_info_bar(f"已读取{section_label}子预设: {name}")
+        self._set_info_bar(f"已读取{section_label}{preset_suffix}: {name}")
 
     # ── 五层轮廓 ──────────────────────────────────────────
 
@@ -4037,65 +4060,133 @@ class VisualizerControlUI(QWidget):
             cbtn = QPushButton()
             cc = self.config.get(f'c{li}_color', (255, 255, 255))
             cbtn.setFixedSize(22, 22)
-            cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
+            cbtn.setStyleSheet(self._make_color_button_style(cc))
             cbtn.clicked.connect(lambda _, i=li: self._pick_layer_color(i))
-            setattr(self, f'c{li}_color_btn', cbtn)
+            setattr(self, f'c{li}_color_btn', self._register_color_button(f'c{li}_color', cbtn))
 
-            sp = self._new_int_box(
-                default_value=2, soft_min=1, soft_max=20,
-                hard_min=1, hard_max=1000, step=1, cfg_key=f'c{li}_thick'
+            head_row = QHBoxLayout()
+            head_row.setSpacing(8)
+            head_row.addWidget(chk)
+            head_row.addWidget(cbtn)
+            head_row.addStretch()
+            g.addLayout(head_row, r, 0, 1, 4); r += 1
+
+            r, _thick_label, sp = self._add_kp_spin_row(
+                g, r,
+                label_text="厚度:",
+                cfg_key=f'c{li}_thick',
+                default_value=2,
+                soft_min=1,
+                soft_max=20,
+                hard_min=1,
+                hard_max=1000,
+                supports=('k', 'p'),
+                step=1,
+                integer=True,
+                width=72,
+                kp_soft_min=-4.0,
+                kp_soft_max=4.0,
+                kp_hard_min=-1000.0,
+                kp_hard_max=1000.0,
+                kp_decimals=3,
             )
             setattr(self, f'c{li}_thick_spin', sp)
-            ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            g.addLayout(ht, r, 2, 1, 2); r += 1
 
-            g.addWidget(QLabel("透明:"), r, 0)
-            sl_a, alpha_box = self._new_bound_int_slider(
-                cfg_key=f'c{li}_alpha', default_value=180,
-                soft_min=0, soft_max=255, hard_min=0, hard_max=255,
-                integer=True, step=1, width=58,
-                kp_soft_min=-80.0, kp_soft_max=80.0, kp_hard_min=-255.0, kp_hard_max=255.0, kp_decimals=1,
+            r, _alpha_label, sl_a, alpha_box = self._add_kp_slider_row(
+                g, r,
+                label_text="透明度:",
+                cfg_key=f'c{li}_alpha',
+                default_value=180,
+                soft_min=0,
+                soft_max=255,
+                hard_min=0,
+                hard_max=255,
+                supports=('k', 'p'),
+                integer=True,
+                step=1,
+                width=58,
+                kp_soft_min=-80.0,
+                kp_soft_max=80.0,
+                kp_hard_min=-255.0,
+                kp_hard_max=255.0,
+                kp_decimals=1,
             )
             setattr(self, f'c{li}_alpha_slider', sl_a)
             setattr(self, f'c{li}_alpha_spin', alpha_box)
-            g.addWidget(sl_a, r, 1, 1, 2); g.addWidget(alpha_box, r, 3); r += 1
 
             fc = QCheckBox("填充")
             fc.setChecked(self.config.get(f'c{li}_fill', False))
             fc.toggled.connect(lambda v, k=f'c{li}_fill': self._update_cfg(k, v))
             setattr(self, f'c{li}_fill_check', fc)
-            g.addWidget(fc, r, 0)
-            fsl, fill_box = self._new_bound_int_slider(
-                cfg_key=f'c{li}_fill_alpha', default_value=50,
-                soft_min=0, soft_max=255, hard_min=0, hard_max=255,
-                integer=True, step=1, width=58,
-                kp_soft_min=-80.0, kp_soft_max=80.0, kp_hard_min=-255.0, kp_hard_max=255.0, kp_decimals=1,
+            g.addWidget(fc, r, 0, 1, 4); r += 1
+
+            r, _fill_label, fsl, fill_box = self._add_kp_slider_row(
+                g, r,
+                label_text="填充透明度:",
+                cfg_key=f'c{li}_fill_alpha',
+                default_value=50,
+                soft_min=0,
+                soft_max=255,
+                hard_min=0,
+                hard_max=255,
+                supports=('k', 'p'),
+                integer=True,
+                step=1,
+                width=58,
+                kp_soft_min=-80.0,
+                kp_soft_max=80.0,
+                kp_hard_min=-255.0,
+                kp_hard_max=255.0,
+                kp_decimals=1,
             )
             setattr(self, f'c{li}_fill_alpha_slider', fsl)
             setattr(self, f'c{li}_fill_alpha_spin', fill_box)
-            g.addWidget(fsl, r, 1, 1, 2); g.addWidget(fill_box, r, 3); r += 1
 
             if has_step:
-                g.addWidget(QLabel("间隔:"), r, 0)
-                ssp = self._new_int_box(
-                    default_value=2, soft_min=1, soft_max=32,
-                    hard_min=1, hard_max=4096, step=1, cfg_key=f'c{li}_step'
+                r, _step_label, ssp = self._add_kp_spin_row(
+                    g, r,
+                    label_text="间隔:",
+                    cfg_key=f'c{li}_step',
+                    default_value=2,
+                    soft_min=1,
+                    soft_max=32,
+                    hard_min=1,
+                    hard_max=4096,
+                    supports=('k', 'p'),
+                    step=1,
+                    integer=True,
+                    width=72,
+                    kp_soft_min=-8.0,
+                    kp_soft_max=8.0,
+                    kp_hard_min=-4096.0,
+                    kp_hard_max=4096.0,
+                    kp_decimals=3,
                 )
                 setattr(self, f'c{li}_step_spin', ssp)
-                g.addWidget(ssp, r, 1); r += 1
 
             if has_decay:
-                g.addWidget(QLabel("衰减:"), r, 0)
-                dsl, decay_box = self._new_bound_float_slider(
-                    cfg_key=f'c{li}_decay', default_value=0.995,
-                    soft_min=0.9, soft_max=1.0, hard_min=0.0, hard_max=2.0,
-                    slider_scale=1000, step=0.001, decimals=3, width=72,
-                    kp_soft_min=-0.2, kp_soft_max=0.2, kp_hard_min=-2.0, kp_hard_max=2.0, kp_decimals=4,
+                r, _decay_label, dsl, decay_box = self._add_kp_slider_row(
+                    g, r,
+                    label_text="衰减:",
+                    cfg_key=f'c{li}_decay',
+                    default_value=0.995,
+                    soft_min=0.9,
+                    soft_max=1.0,
+                    hard_min=0.0,
+                    hard_max=2.0,
+                    supports=('k', 'p'),
+                    slider_scale=1000,
+                    step=0.001,
+                    decimals=3,
+                    width=72,
+                    kp_soft_min=-0.2,
+                    kp_soft_max=0.2,
+                    kp_hard_min=-2.0,
+                    kp_hard_max=2.0,
+                    kp_decimals=4,
                 )
                 setattr(self, f'c{li}_decay_slider', dsl)
                 setattr(self, f'c{li}_decay_spin', decay_box)
-                g.addWidget(dsl, r, 1, 1, 2); g.addWidget(decay_box, r, 3); r += 1
 
             if li in (1, 2, 4, 5):
                 damp_check, damp_widget, rise_box, fall_box = self._build_independent_damping_controls(f'c{li}')
@@ -4106,27 +4197,51 @@ class VisualizerControlUI(QWidget):
                 g.addWidget(damp_check, r, 0, 1, 4); r += 1
                 g.addWidget(damp_widget, r, 0, 1, 4); r += 1
 
-            g.addWidget(QLabel("转速:"), r, 0)
-            rsl, speed_box = self._new_bound_float_slider(
-                cfg_key=f'c{li}_rot_speed', default_value=1.0,
-                soft_min=-5.0, soft_max=5.0, hard_min=-100.0, hard_max=100.0,
-                slider_scale=100, step=0.01, decimals=2, width=72,
-                kp_soft_min=-5.0, kp_soft_max=5.0, kp_hard_min=-100.0, kp_hard_max=100.0, kp_decimals=3,
+            r, _speed_label, rsl, speed_box = self._add_kp_slider_row(
+                g, r,
+                label_text="转速:",
+                cfg_key=f'c{li}_rot_speed',
+                default_value=1.0,
+                soft_min=-5.0,
+                soft_max=5.0,
+                hard_min=-100.0,
+                hard_max=100.0,
+                supports=('k', 'p'),
+                slider_scale=100,
+                step=0.01,
+                decimals=2,
+                width=72,
+                kp_soft_min=-5.0,
+                kp_soft_max=5.0,
+                kp_hard_min=-100.0,
+                kp_hard_max=100.0,
+                kp_decimals=3,
             )
             setattr(self, f'c{li}_rot_speed_slider', rsl)
             setattr(self, f'c{li}_rot_speed_spin', speed_box)
-            g.addWidget(rsl, r, 1, 1, 2); g.addWidget(speed_box, r, 3); r += 1
 
-            g.addWidget(QLabel("pow:"), r, 0)
-            psl, pow_box = self._new_bound_float_slider(
-                cfg_key=f'c{li}_rot_pow', default_value=0.5,
-                soft_min=-3.0, soft_max=3.0, hard_min=-100.0, hard_max=100.0,
-                slider_scale=100, step=0.01, decimals=2, width=72,
-                kp_soft_min=-3.0, kp_soft_max=3.0, kp_hard_min=-100.0, kp_hard_max=100.0, kp_decimals=3,
+            r, _pow_label, psl, pow_box = self._add_kp_slider_row(
+                g, r,
+                label_text="rot_pow:",
+                cfg_key=f'c{li}_rot_pow',
+                default_value=0.5,
+                soft_min=-3.0,
+                soft_max=3.0,
+                hard_min=-100.0,
+                hard_max=100.0,
+                supports=('k', 'p'),
+                slider_scale=100,
+                step=0.01,
+                decimals=2,
+                width=72,
+                kp_soft_min=-3.0,
+                kp_soft_max=3.0,
+                kp_hard_min=-100.0,
+                kp_hard_max=100.0,
+                kp_decimals=3,
             )
             setattr(self, f'c{li}_rot_pow_slider', psl)
             setattr(self, f'c{li}_rot_pow_spin', pow_box)
-            g.addWidget(psl, r, 1, 1, 2); g.addWidget(pow_box, r, 3); r += 1
 
         s.add_layout(g)
         return s
@@ -4145,9 +4260,9 @@ class VisualizerControlUI(QWidget):
         cbtn = QPushButton()
         cc = self.config.get('tentacle_color', (130, 240, 220))
         cbtn.setFixedSize(22, 22)
-        cbtn.setStyleSheet(f"background:rgb({cc[0]},{cc[1]},{cc[2]}); border:1px solid #aaa; border-radius:2px;")
+        cbtn.setStyleSheet(self._make_color_button_style(cc))
         cbtn.clicked.connect(lambda: self._pick_special_color('tentacle_color', self.tentacle_color_btn))
-        self.tentacle_color_btn = cbtn
+        self.tentacle_color_btn = self._register_color_button('tentacle_color', cbtn)
         g.addWidget(cbtn, r, 1)
 
         sp = self._new_int_box(
@@ -4569,9 +4684,9 @@ class VisualizerControlUI(QWidget):
         shader_tip_btn = QPushButton()
         sc = self.config.get('tentacle_shader_tip_color', (88, 170, 255))
         shader_tip_btn.setFixedSize(22, 22)
-        shader_tip_btn.setStyleSheet(f"background:rgb({sc[0]},{sc[1]},{sc[2]}); border:1px solid #aaa; border-radius:2px;")
+        shader_tip_btn.setStyleSheet(self._make_color_button_style(sc))
         shader_tip_btn.clicked.connect(lambda: self._pick_special_color('tentacle_shader_tip_color', self.tentacle_shader_tip_color_btn))
-        self.tentacle_shader_tip_color_btn = shader_tip_btn
+        self.tentacle_shader_tip_color_btn = self._register_color_button('tentacle_shader_tip_color', shader_tip_btn)
         g.addWidget(shader_tip_btn, r, 1)
         g.addWidget(QLabel("尾色"), r, 2)
         r += 1
@@ -4709,27 +4824,55 @@ class VisualizerControlUI(QWidget):
             chk.setChecked(self.config.get(f'{key}_on', False))
             chk.toggled.connect(lambda v, k=f'{key}_on': self._update_cfg(k, v))
             setattr(self, f'{key}_on_check', chk)
-            sp = self._new_int_box(
-                default_value=3, soft_min=1, soft_max=20,
-                hard_min=1, hard_max=1000, step=1, cfg_key=f'{key}_thick'
+            g.addWidget(chk, r, 0, 1, 4); r += 1
+
+            r, _thick_label, sp = self._add_kp_spin_row(
+                g, r,
+                label_text="厚度:",
+                cfg_key=f'{key}_thick',
+                default_value=3,
+                soft_min=1,
+                soft_max=20,
+                hard_min=1,
+                hard_max=1000,
+                supports=('k', 'p'),
+                step=1,
+                integer=True,
+                width=72,
+                kp_soft_min=-4.0,
+                kp_soft_max=4.0,
+                kp_hard_min=-1000.0,
+                kp_hard_max=1000.0,
+                kp_decimals=3,
             )
             setattr(self, f'{key}_thick_spin', sp)
-            ht = QHBoxLayout()
-            ht.addWidget(QLabel("粗:")); ht.addWidget(sp)
-            g.addLayout(ht, r, 1, 1, 2); r += 1
 
             fchk = QCheckBox("固定长度")
             fchk.setChecked(self.config.get(f'{key}_fixed', False))
             setattr(self, f'{key}_fixed_check', fchk)
-            g.addWidget(fchk, r, 0)
-            fsp = self._new_int_box(
-                default_value=30, soft_min=1, soft_max=500,
-                hard_min=1, hard_max=10000, step=1, cfg_key=f'{key}_fixed_len'
+            g.addWidget(fchk, r, 0, 1, 4); r += 1
+
+            r, _fixed_label, fsp = self._add_kp_spin_row(
+                g, r,
+                label_text="固定长度:",
+                cfg_key=f'{key}_fixed_len',
+                default_value=30,
+                soft_min=1,
+                soft_max=500,
+                hard_min=1,
+                hard_max=10000,
+                supports=('k', 'p'),
+                step=1,
+                integer=True,
+                width=72,
+                suffix=' px',
+                kp_soft_min=-50.0,
+                kp_soft_max=50.0,
+                kp_hard_min=-10000.0,
+                kp_hard_max=10000.0,
+                kp_decimals=3,
             )
             setattr(self, f'{key}_fixed_len_spin', fsp)
-            fh = QHBoxLayout()
-            fh.addWidget(fsp); fh.addWidget(QLabel("px"))
-            g.addLayout(fh, r, 1, 1, 2); r += 1
 
             mode_w = QWidget()
             ml = QHBoxLayout(mode_w); ml.setContentsMargins(10,0,0,0); ml.setSpacing(8)
@@ -5295,8 +5438,7 @@ class VisualizerControlUI(QWidget):
         picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=key)
 
         def _apply(rgb):
-            btn = getattr(self, f'c{layer_idx}_color_btn')
-            btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
+            self._set_registered_color_buttons(key, rgb)
             self._update_cfg(key, rgb)
             self._update_color_preview_strip()
 
@@ -5309,7 +5451,8 @@ class VisualizerControlUI(QWidget):
 
         def _apply(rgb):
             if btn is not None:
-                btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
+                btn.setStyleSheet(self._make_color_button_style(rgb))
+            self._set_registered_color_buttons(cfg_key, rgb)
             self._update_cfg(cfg_key, rgb)
 
         picker.colorSelected.connect(_apply)
@@ -5322,6 +5465,7 @@ class VisualizerControlUI(QWidget):
         for w in self.gp_widgets:
             w.setParent(None); w.deleteLater()
         self.gp_widgets.clear()
+        self._gradient_point_buttons.clear()
 
         points = sorted(self.config.get('gradient_points', [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))]), key=lambda p: p[0])
         for i, (pos, color) in enumerate(points):
@@ -5340,9 +5484,10 @@ class VisualizerControlUI(QWidget):
             rl.addWidget(sl)
 
             btn = QPushButton(); btn.setFixedSize(26, 26)
-            btn.setStyleSheet(f"background:rgb({color[0]},{color[1]},{color[2]}); border:1px solid #aaa; border-radius:2px;")
+            btn.setStyleSheet(self._make_color_button_style(color))
             btn.clicked.connect(lambda _, idx=i, b=btn: self._gp_color_pick(idx, b))
             rl.addWidget(btn)
+            self._gradient_point_buttons.append(btn)
 
             if len(points) > 2:
                 db = QPushButton("❌"); db.setFixedSize(25, 25)
@@ -5367,7 +5512,8 @@ class VisualizerControlUI(QWidget):
         picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix=f"gradient_points_{idx}_color")
 
         def _apply(rgb):
-            btn.setStyleSheet(f"background:rgb({rgb[0]},{rgb[1]},{rgb[2]}); border:1px solid #aaa; border-radius:2px;")
+            btn.setStyleSheet(self._make_color_button_style(rgb))
+            self._set_gradient_point_button_color(idx, rgb)
             pts2 = list(self.config.get('gradient_points', []))
             if idx < len(pts2):
                 pts2[idx] = (pts2[idx][0], rgb)
@@ -5469,16 +5615,31 @@ class VisualizerControlUI(QWidget):
         if hasattr(self, 'top_check'):
             self._set_checkbox_silent(self.top_check, mode == 'top')
         if hasattr(self, 'pin_top_btn'):
+            self.pin_top_btn.blockSignals(True)
+            self.pin_top_btn.setChecked(mode == 'top')
             self.pin_top_btn.setEnabled(mode != 'top')
+            self.pin_top_btn.blockSignals(False)
         if hasattr(self, 'pin_bottom_btn'):
+            self.pin_bottom_btn.blockSignals(True)
+            self.pin_bottom_btn.setChecked(mode == 'bottom')
             self.pin_bottom_btn.setEnabled(mode != 'bottom')
+            self.pin_bottom_btn.blockSignals(False)
+        if hasattr(self, 'window_layer_state_lbl'):
+            mode_text = '顶层' if mode == 'top' else '底层' if mode == 'bottom' else '普通'
+            self.window_layer_state_lbl.setText(f'当前层级: {mode_text}')
 
     def _restart_visualizer_process(self):
         self._flush_pending_config()
         self._stop_visualizer()
         try:
             target = Path(__file__).resolve()
-            subprocess.Popen([sys.executable, str(target)], cwd=str(target.parent))
+            launcher = target.parent / '启动.bat'
+            if launcher.exists() and os.name == 'nt':
+                os.startfile(str(launcher))
+            elif launcher.exists():
+                subprocess.Popen([str(launcher)], cwd=str(target.parent))
+            else:
+                subprocess.Popen([sys.executable, str(target)], cwd=str(target.parent))
         except Exception as e:
             QMessageBox.critical(self, '错误', f'重启程序失败: {e}')
             self._start_visualizer()
@@ -5497,31 +5658,52 @@ class VisualizerControlUI(QWidget):
                 f"background:rgb({color[0]},{color[1]},{color[2]}); border:1px solid #666; border-radius:2px;"
             )
 
+    @staticmethod
+    def _make_color_button_style(color):
+        return f"background:rgb({int(color[0])},{int(color[1])},{int(color[2])}); border:1px solid #aaa; border-radius:2px;"
+
+    def _register_color_button(self, cfg_key: str, button: QPushButton | None):
+        if not cfg_key or button is None:
+            return button
+        bucket = self._color_button_registry.setdefault(str(cfg_key), [])
+        if button not in bucket:
+            bucket.append(button)
+        color = self.config.get(cfg_key)
+        if isinstance(color, (list, tuple)) and len(color) >= 3:
+            button.setStyleSheet(self._make_color_button_style(color))
+        return button
+
+    def _set_registered_color_buttons(self, cfg_key: str, color):
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            return
+        for button in self._color_button_registry.get(str(cfg_key), []):
+            if button is not None:
+                button.setStyleSheet(self._make_color_button_style(color))
+
+    def _set_gradient_point_button_color(self, index: int, color):
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            return
+        if 0 <= int(index) < len(self._gradient_point_buttons):
+            button = self._gradient_point_buttons[int(index)]
+            if button is not None:
+                button.setStyleSheet(self._make_color_button_style(color))
+
     def _apply_runtime_color_snapshot(self, snapshot):
         if not isinstance(snapshot, dict):
             return
         palette_preview = snapshot.get('palette_preview')
         if isinstance(palette_preview, list):
             self._set_palette_preview_colors(palette_preview)
-        for layer_index in range(1, 6):
-            color = snapshot.get(f'c{layer_index}_color')
-            btn = getattr(self, f'c{layer_index}_color_btn', None)
-            if btn is not None and isinstance(color, (list, tuple)) and len(color) >= 3:
-                btn.setStyleSheet(
-                    f"background:rgb({int(color[0])},{int(color[1])},{int(color[2])}); border:1px solid #aaa; border-radius:2px;"
-                )
-        tentacle_color = snapshot.get('tentacle_color')
-        if hasattr(self, 'tentacle_color_btn') and isinstance(tentacle_color, (list, tuple)) and len(tentacle_color) >= 3:
-            self.tentacle_color_btn.setStyleSheet(
-                f"background:rgb({int(tentacle_color[0])},{int(tentacle_color[1])},{int(tentacle_color[2])}); border:1px solid #aaa; border-radius:2px;"
-            )
-        shader_tip_color = snapshot.get('tentacle_shader_tip_color')
-        if hasattr(self, 'tentacle_shader_tip_color_btn') and isinstance(shader_tip_color, (list, tuple)) and len(shader_tip_color) >= 3:
-            self.tentacle_shader_tip_color_btn.setStyleSheet(
-                f"background:rgb({int(shader_tip_color[0])},{int(shader_tip_color[1])},{int(shader_tip_color[2])}); border:1px solid #aaa; border-radius:2px;"
-            )
+        for cfg_key, color in snapshot.items():
+            if cfg_key == 'gradient_points':
+                continue
+            self._set_registered_color_buttons(cfg_key, color)
         runtime_points = snapshot.get('gradient_points')
         if isinstance(runtime_points, list):
+            for idx, point in enumerate(runtime_points):
+                if not (isinstance(point, (list, tuple)) and len(point) >= 2):
+                    continue
+                self._set_gradient_point_button_color(idx, point[1])
             for idx, row in enumerate(getattr(self, 'gp_widgets', [])):
                 if idx >= len(runtime_points):
                     break
@@ -5533,9 +5715,7 @@ class VisualizerControlUI(QWidget):
                     continue
                 buttons = row.findChildren(QPushButton)
                 if buttons:
-                    buttons[0].setStyleSheet(
-                        f"background:rgb({int(color[0])},{int(color[1])},{int(color[2])}); border:1px solid #aaa; border-radius:2px;"
-                    )
+                    buttons[0].setStyleSheet(self._make_color_button_style(color))
 
     def _sync_drag_position_to_config(self):
         if not self.drag_adjust_check.isChecked():
