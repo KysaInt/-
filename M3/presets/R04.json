@@ -347,5 +347,6 @@
   "kp_tentacle_shader_alpha_start_k_wmax": 1.0,
   "_preset_meta": {
     "contour_fill_visibility_mode": "independent"
-  }
+  },
+  "__preset_category": "jellyfish"
 }

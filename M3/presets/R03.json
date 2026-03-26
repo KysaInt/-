@@ -1445,5 +1445,6 @@
       "kp_tentacle_core_base_speed_p_wmin": 0.0,
       "kp_tentacle_core_base_speed_p_wmax": 10.0
     }
-  }
+  },
+  "__preset_category": "jellyfish"
 }

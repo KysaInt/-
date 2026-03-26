@@ -118,5 +118,6 @@
   "tentacle_core_p_speed": 1.48,
   "_preset_meta": {
     "contour_fill_visibility_mode": "independent"
-  }
+  },
+  "__preset_category": "jellyfish"
 }

@@ -3684,6 +3684,9 @@ class VisualizerControlUI(QWidget):
         self._refresh_unity_export_suggestion()
 
     def _export_current_preset_to_unity(self):
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            self._export_all_presets_to_unity()
+            return
         preset_name = self._get_current_preset_name()
         class_name = sanitize_csharp_identifier(
             self.unity_export_class_edit.text().strip() or preset_name,
@@ -3740,6 +3743,66 @@ class VisualizerControlUI(QWidget):
             f'导出前已自动检测并按需生成共享先决组件:\n{prerequisite_names}\n\n'
             '其中会复用或生成 P01 运行时链路需要的共享脚本，例如 PyStyleVisualizer、WindowsAudioCapture、音频文件驱动和相机控制器。',
         )
+
+    def _export_all_presets_to_unity(self):
+        project_dir = normalize_unity_project_dir(
+            project_dir=self.unity_export_path_edit.text().strip() or self.config.get('unity_export_project_dir'),
+            last_path=self.config.get('unity_export_last_path'),
+        )
+        if not project_dir:
+            QMessageBox.warning(self, '提示', '请先选择 Unity 项目文件夹')
+            return
+        preset_files = sorted(PRESETS_DIR.glob('*.json'), key=lambda p: p.name.lower())
+        if not preset_files:
+            QMessageBox.information(self, '提示', '没有找到预设文件')
+            return
+        existing = []
+        for fp in preset_files:
+            class_name = sanitize_csharp_identifier(fp.stem, fallback='AyeExportedPresetEffect')
+            out = build_unity_export_path(project_dir, class_name)
+            if out and Path(out).exists():
+                existing.append(fp.stem)
+        if existing:
+            overlap_list = '\n'.join(existing[:10]) + ('\n...' if len(existing) > 10 else '')
+            confirm_msg = (
+                f'即将导出 {len(preset_files)} 个预设到:\n{project_dir}\n\n'
+                f'以下 {len(existing)} 个文件已存在将被覆盖:\n{overlap_list}\n\n是否继续？'
+            )
+        else:
+            confirm_msg = f'即将导出 {len(preset_files)} 个预设到:\n{project_dir}\n\n是否继续？'
+        if QMessageBox.question(
+            self, '批量导出确认', confirm_msg,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        succeeded = []
+        failed = []
+        base_config = dict(self.config)
+        for fp in preset_files:
+            try:
+                preset_cfg = self._load_preset_config(fp)
+                merged_cfg = {**base_config, **preset_cfg}
+                preset_name = fp.stem
+                class_name = sanitize_csharp_identifier(preset_name, fallback='AyeExportedPresetEffect')
+                out_path = build_unity_export_path(project_dir, class_name)
+                export_unity_component(
+                    merged_cfg,
+                    preset_name=preset_name,
+                    output_path=out_path,
+                    class_name=class_name,
+                )
+                succeeded.append(class_name)
+            except Exception as e:
+                failed.append(f'{fp.stem}: {e}')
+        self.config['unity_export_project_dir'] = str(project_dir)
+        self.unity_export_path_edit.setText(str(project_dir))
+        self._schedule_config_commit()
+        info = f'批量导出完成: {len(succeeded)} 成功' + (f', {len(failed)} 失败' if failed else '')
+        self._set_info_bar(info)
+        detail = f'已导出 {len(succeeded)} 个预设到:\n{project_dir}'
+        if failed:
+            detail += '\n\n以下预设导出失败:\n' + '\n'.join(failed)
+        QMessageBox.information(self, '批量导出完成', detail)
 
     def _build_unity_export_section(self):
         s = _Collapsible('导出到Unity', expanded=True)

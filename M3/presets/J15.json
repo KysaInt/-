@@ -342,5 +342,7 @@
   "waveform_fill": false,
   "_preset_meta": {
     "contour_fill_visibility_mode": "independent"
-  }
+  },
+  "tentacle_on": false,
+  "tentacles_enabled": false
 }
