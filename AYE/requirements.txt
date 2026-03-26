@@ -1,0 +1,10 @@
+numpy
+PySide6
+soundcard
+
+# aubio is required by the app, but on Windows + Python 3.11 it may need a
+# prebuilt binary instead of a local pip build.
+aubio
+
+# Optional: enable instrument classification
+# panns-inference
