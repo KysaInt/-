@@ -273,6 +273,7 @@ def _load_reference_py_style_field_metadata() -> list[tuple[str, str]]:
 def _build_effective_export_config(config: dict) -> dict:
     effective = dict(config or {})
 
+    contours_enabled = bool(effective.get("contours_enabled", True))
     bars_enabled = bool(effective.get("bars_enabled", True))
     tentacles_enabled = bool(effective.get("tentacles_enabled", True))
 
@@ -280,8 +281,13 @@ def _build_effective_export_config(config: dict) -> dict:
         ring_key = f"c{layer_index}_on"
         fill_key = f"c{layer_index}_fill"
         fill_alpha_key = f"c{layer_index}_fill_alpha"
-        effective[ring_key] = bool(effective.get(ring_key, False))
+        
+        # Contour visibility is now independent
+        effective[ring_key] = contours_enabled and bool(effective.get(ring_key, False))
+        
+        # Fill visibility is also independent
         effective[fill_key] = bool(effective.get(fill_key, False))
+        
         if not effective[fill_key]:
             effective[fill_alpha_key] = 0
 
@@ -385,6 +391,7 @@ def build_unity_runtime_host_source(config: dict, *, preset_name: str, class_nam
     return (
         "using System.Collections.Generic;\n"
         "using UnityEngine;\n\n"
+        "[DefaultExecutionOrder(-1000)]\n"
         "[DisallowMultipleComponent]\n"
         f"[AddComponentMenu(\"AYE导出/预设效果/{_escape_csharp_string(preset_name)}\")]\n"
         "[RequireComponent(typeof(PyStyleVisualizer))]\n"
@@ -423,6 +430,7 @@ def build_unity_runtime_host_source(config: dict, *, preset_name: str, class_nam
         "        {\n"
         "            visualizer.autoFrameMainCamera = false;\n"
         + visualizer_block + "\n"
+        "            NormalizeVisualizerVisibility(visualizer);\n"
         "        }\n\n"
         + windows_capture_apply
         + audio_driver_apply + "\n"
@@ -434,6 +442,30 @@ def build_unity_runtime_host_source(config: dict, *, preset_name: str, class_nam
         "                mainCamera.gameObject.AddComponent<AyeExportCameraController>();\n"
         "            }\n"
         "        }\n"
+        "    }\n"
+        "\n"
+        "    private static void NormalizeVisualizerVisibility(PyStyleVisualizer visualizer)\n"
+        "    {\n"
+        "        if (visualizer == null)\n"
+        "        {\n"
+        "            return;\n"
+        "        }\n"
+        "\n"
+        "        // Fill visibility is independent of contour visibility.\n"
+        "        // Just ensure fill alpha is zero when fill is disabled.\n"
+        "        if (!visualizer.c1Fill) visualizer.c1FillAlpha = 0;\n"
+        "        if (!visualizer.c2Fill) visualizer.c2FillAlpha = 0;\n"
+        "        if (!visualizer.c3Fill) visualizer.c3FillAlpha = 0;\n"
+        "        if (!visualizer.c4Fill) visualizer.c4FillAlpha = 0;\n"
+        "        if (!visualizer.c5Fill) visualizer.c5FillAlpha = 0;\n"
+        "\n"
+        "        visualizer.b12On = visualizer.barsEnabled && visualizer.b12On;\n"
+        "        visualizer.b23On = visualizer.barsEnabled && visualizer.b23On;\n"
+        "        visualizer.b34On = visualizer.barsEnabled && visualizer.b34On;\n"
+        "        visualizer.b45On = visualizer.barsEnabled && visualizer.b45On;\n"
+        "\n"
+        "        visualizer.tentacleOn = visualizer.tentaclesEnabled && visualizer.tentacleOn;\n"
+        "        visualizer.tentacleCoreOn = visualizer.tentacleOn && visualizer.tentacleCoreOn;\n"
         "    }\n"
         "}\n"
     )

@@ -75,7 +75,7 @@
   "contours_enabled": true,
   "bars_enabled": true,
   "tentacles_enabled": false,
-  "c1_on": true,
+  "c1_on": false,
   "c1_color": [
     151,
     253,
@@ -89,7 +89,7 @@
   "c1_decay": 0.994,
   "c1_rot_speed": 4.51,
   "c1_rot_pow": -1.78,
-  "c2_on": true,
+  "c2_on": false,
   "c2_color": [
     39,
     143,
@@ -108,13 +108,13 @@
     255,
     255
   ],
-  "c3_alpha": 209,
+  "c3_alpha": 255,
   "c3_thick": 19,
   "c3_fill": false,
   "c3_fill_alpha": 218,
   "c3_rot_speed": 0.93,
   "c3_rot_pow": 1.1,
-  "c4_on": true,
+  "c4_on": false,
   "c4_color": [
     172,
     209,
@@ -122,7 +122,7 @@
   ],
   "c4_alpha": 31,
   "c4_thick": 4,
-  "c4_fill": true,
+  "c4_fill": false,
   "c4_fill_alpha": 186,
   "c4_step": 11,
   "c4_rot_speed": 2.27,
@@ -605,7 +605,7 @@
     "theme_classic_kaleidoscope": {
       "contours_enabled": true,
       "bars_enabled": true,
-      "c1_on": true,
+      "c1_on": false,
       "c1_color": [
         151,
         253,
@@ -619,7 +619,7 @@
       "c1_decay": 0.994,
       "c1_rot_speed": 4.51,
       "c1_rot_pow": -1.78,
-      "c2_on": true,
+      "c2_on": false,
       "c2_color": [
         39,
         143,
@@ -638,13 +638,13 @@
         255,
         255
       ],
-      "c3_alpha": 209,
+      "c3_alpha": 255,
       "c3_thick": 19,
       "c3_fill": false,
       "c3_fill_alpha": 218,
       "c3_rot_speed": 0.93,
       "c3_rot_pow": 1.1,
-      "c4_on": true,
+      "c4_on": false,
       "c4_color": [
         172,
         209,
@@ -652,7 +652,7 @@
       ],
       "c4_alpha": 31,
       "c4_thick": 4,
-      "c4_fill": true,
+      "c4_fill": false,
       "c4_fill_alpha": 186,
       "c4_step": 11,
       "c4_rot_speed": 2.27,
@@ -983,7 +983,7 @@
       "kp_b45_fixed_len_p_wmax": 0.0
     },
     "theme_kaleidoscope_fill": {
-      "c1_on": true,
+      "c1_on": false,
       "c1_color": [
         151,
         253,
@@ -997,7 +997,7 @@
       "c1_decay": 0.994,
       "c1_rot_speed": 4.51,
       "c1_rot_pow": -1.78,
-      "c2_on": true,
+      "c2_on": false,
       "c2_color": [
         39,
         143,
@@ -1016,13 +1016,13 @@
         255,
         255
       ],
-      "c3_alpha": 209,
+      "c3_alpha": 255,
       "c3_thick": 19,
       "c3_fill": false,
       "c3_fill_alpha": 218,
       "c3_rot_speed": 0.93,
       "c3_rot_pow": 1.1,
-      "c4_on": true,
+      "c4_on": false,
       "c4_color": [
         172,
         209,
@@ -1030,7 +1030,7 @@
       ],
       "c4_alpha": 31,
       "c4_thick": 4,
-      "c4_fill": true,
+      "c4_fill": false,
       "c4_fill_alpha": 186,
       "c4_step": 11,
       "c4_rot_speed": 2.27,

@@ -207,6 +207,7 @@ _DEFAULT_CONFIG = {
     'preset_transition_enabled': False,
     'preset_transition_duration': 2.0,
     'preset_transition_easing': 'ease_in_out',
+    'last_preset': '',
 }
 
 for _prefix in _DAMPED_OBJECT_KEYS[1:]:
@@ -1476,7 +1477,7 @@ class VisualizerControlUI(QWidget):
         self._latest_gradient_point_colors = []
         self._latest_palette_preview = []
         self._latest_palette_preview_meta = []
-        self._preview_sidebar_last_state = True
+        self._preview_sidebar_last_state = False
         self._unity_export_auto_class_name = ""
         self._unity_export_auto_path = ""
 
@@ -1512,7 +1513,12 @@ class VisualizerControlUI(QWidget):
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    return _normalize_loaded_config(json.load(f))
+                    raw = json.load(f)
+                migrated = self._migrate_legacy_contour_fill_visibility(raw)
+                normalized = _normalize_loaded_config(migrated)
+                if migrated != raw:
+                    self._save_config_data(normalized)
+                return normalized
             except Exception as e:
                 print(f"警告: 加载配置失败: {e}")
                 return _get_defaults()
@@ -2392,9 +2398,9 @@ class VisualizerControlUI(QWidget):
         self.nav_tree.setColumnWidth(1, 28)
         left_layout.addWidget(self.nav_tree, 1)
 
-        self.preview_toggle_btn = QPushButton("▾ 图形预览")
+        self.preview_toggle_btn = QPushButton("▸ 图形预览")
         self.preview_toggle_btn.setCheckable(True)
-        self.preview_toggle_btn.setChecked(True)
+        self.preview_toggle_btn.setChecked(False)
         self.preview_toggle_btn.toggled.connect(self._toggle_preview_sidebar)
         left_layout.addWidget(self.preview_toggle_btn)
 
@@ -2404,6 +2410,7 @@ class VisualizerControlUI(QWidget):
         preview_sidebar_layout.setSpacing(0)
         preview_sidebar_layout.addWidget(self.single_bar_panel)
         left_layout.addWidget(self.preview_sidebar)
+        self._toggle_preview_sidebar(False)
 
         self.detail_stack = QStackedWidget()
         self.detail_scroll = QScrollArea()
@@ -3175,6 +3182,14 @@ class VisualizerControlUI(QWidget):
             self.preset_combo.addItem(self._get_preset_display_name(fp, category), str(fp))
             if current_fp and str(fp) == str(current_fp):
                 selected_idx = self.preset_combo.count() - 1
+        # 若当前无选中，尝试恢复上次使用的预设
+        if selected_idx < 0 and not current_fp:
+            last_stem = self.config.get('last_preset', '')
+            if last_stem:
+                for i in range(self.preset_combo.count()):
+                    if Path(self.preset_combo.itemData(i)).stem == last_stem:
+                        selected_idx = i
+                        break
         normalized_order = [fp.stem for fp in self._get_all_ordered_preset_files()]
         if normalized_order != self.config.get('preset_order', []):
             self.config['preset_order'] = normalized_order
@@ -3577,6 +3592,8 @@ class VisualizerControlUI(QWidget):
             for key in runtime_keep_keys:
                 cfg[key] = self.config.get(key, cfg.get(key))
             self._apply_config_to_ui(cfg)
+            self.config['last_preset'] = Path(fp).stem
+            self._schedule_config_commit()
             # 若启用平滑过渡，替换队列为过渡指令
             if self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
                 self._send_transition_command(from_config)

@@ -324,6 +324,8 @@ public class PyStyleVisualizer : MonoBehaviour
     private int runtimeTentacleControlPointsMax = -1;
 
     private Material lineMaterial;
+    private Material tentacleMaterial;
+    private Texture2D softLineTex;
     private readonly List<LineRenderer> layerRenderers = new List<LineRenderer>();
     private readonly List<MeshRenderer> fillRenderers = new List<MeshRenderer>();
     private readonly List<Mesh> fillMeshes = new List<Mesh>();
@@ -411,6 +413,26 @@ public class PyStyleVisualizer : MonoBehaviour
         if (autoFrameMainCamera)
         {
             UpdateCameraFrame();
+        }
+    }
+
+    public void RefreshRuntimeForExport()
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            // In edit mode only sync values; renderer rebuild happens in Start().
+            EnsureGradientPoints();
+            return;
+        }
+#endif
+        EnsureGradientPoints();
+        EnsureRuntimeState();
+        RebuildRuntimeState(false);
+        Render();
+        if (autoFrameMainCamera)
+        {
+            SetupCamera();
         }
     }
 
@@ -924,6 +946,12 @@ public class PyStyleVisualizer : MonoBehaviour
 
         lineMaterial = new Material(lineShader);
 
+        // Tentacle-specific material with soft Gaussian edge texture (replicates QPainter anti-aliased RoundCap)
+        softLineTex = CreateSoftLineTexture();
+        tentacleMaterial = new Material(lineShader);
+        if (softLineTex != null)
+            tentacleMaterial.mainTexture = softLineTex;
+
         bool[] layerEnabledStates =
         {
             contoursEnabled && c1On,
@@ -934,13 +962,12 @@ public class PyStyleVisualizer : MonoBehaviour
         };
         bool[] layerFillStates =
         {
-            contoursEnabled && c1Fill,
-            contoursEnabled && c2Fill,
-            contoursEnabled && c3Fill,
-            contoursEnabled && c4Fill,
-            contoursEnabled && c5Fill,
+            c1Fill,
+            c2Fill,
+            c3Fill,
+            c4Fill,
+            c5Fill,
         };
-
         for (int i = 1; i <= 5; i++)
         {
             if (layerEnabledStates[i - 1])
@@ -1040,18 +1067,30 @@ public class PyStyleVisualizer : MonoBehaviour
             tentacleObject.transform.SetParent(transform, false);
 
             LineRenderer line = tentacleObject.AddComponent<LineRenderer>();
-            line.material = lineMaterial;
+            line.material = tentacleMaterial != null ? tentacleMaterial : lineMaterial;
             line.loop = false;
             line.useWorldSpace = false;
             line.textureMode = LineTextureMode.Stretch;
             line.alignment = LineAlignment.TransformZ;
             line.numCapVertices = 8;
             line.numCornerVertices = 8;
-            line.sortingOrder = 24;
+            line.sortingOrder = 24 + i; // sequential: consistent visual stacking like Python draw order
             line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             line.receiveShadows = false;
             tentacleRenderers.Add(line);
         }
+    }
+
+    private static void SafeDestroy(UnityEngine.Object obj)
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            DestroyImmediate(obj);
+            return;
+        }
+#endif
+        Destroy(obj);
     }
 
     private void ClearRendererObjects()
@@ -1060,7 +1099,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (line != null)
             {
-                Destroy(line.gameObject);
+                SafeDestroy(line.gameObject);
             }
         }
         layerRenderers.Clear();
@@ -1069,7 +1108,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (renderer != null)
             {
-                Destroy(renderer.gameObject);
+                SafeDestroy(renderer.gameObject);
             }
         }
         fillRenderers.Clear();
@@ -1078,7 +1117,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (mesh != null)
             {
-                Destroy(mesh);
+                SafeDestroy(mesh);
             }
         }
         fillMeshes.Clear();
@@ -1087,7 +1126,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (material != null)
             {
-                Destroy(material);
+                SafeDestroy(material);
             }
         }
         fillMaterials.Clear();
@@ -1096,7 +1135,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (line != null)
             {
-                Destroy(line.gameObject);
+                SafeDestroy(line.gameObject);
             }
         }
         barRenderers.Clear();
@@ -1105,16 +1144,50 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             if (line != null)
             {
-                Destroy(line.gameObject);
+                SafeDestroy(line.gameObject);
             }
         }
         tentacleRenderers.Clear();
 
         if (lineMaterial != null)
         {
-            Destroy(lineMaterial);
+            SafeDestroy(lineMaterial);
             lineMaterial = null;
         }
+        if (tentacleMaterial != null)
+        {
+            SafeDestroy(tentacleMaterial);
+            tentacleMaterial = null;
+        }
+        if (softLineTex != null)
+        {
+            SafeDestroy(softLineTex);
+            softLineTex = null;
+        }
+    }
+
+    /// <summary>
+    /// Creates a 1×64 Texture2D with a Gaussian alpha falloff in the V direction.
+    /// When used on a LineRenderer (Stretch mode), V maps across the line width,
+    /// producing smooth feathered edges that match QPainter's anti-aliased RoundCap draw.
+    /// </summary>
+    private static Texture2D CreateSoftLineTexture()
+    {
+        const int height = 64;
+        var tex = new Texture2D(1, height, TextureFormat.RGBA32, false, false);
+        var pixels = new Color[height];
+        for (int i = 0; i < height; i++)
+        {
+            float v = (i + 0.5f) / height;   // 0..1 from bottom to top
+            float t = v * 2f - 1f;           // -1..1, center = 0
+            float a = Mathf.Exp(-t * t * 4.5f); // Gaussian, full-opaque at center
+            pixels[i] = new Color(1f, 1f, 1f, a);
+        }
+        tex.SetPixels(pixels);
+        tex.Apply();
+        tex.wrapMode = TextureWrapMode.Clamp;
+        tex.filterMode = FilterMode.Bilinear;
+        return tex;
     }
 
     private void ProcessAudio()
@@ -2123,8 +2196,14 @@ public class PyStyleVisualizer : MonoBehaviour
             renderer.SetPositions(points);
             renderer.widthCurve = AnimationCurve.Linear(0f, width, 1f, tipWidth);
 
-            Color rootColor = tentacleColor;
-            rootColor.a = Mathf.Clamp01(tentacleAlpha / 255f);
+            // Mix base tentacle color with spectrum bar color (matching Python: root_color = lerp(base, spectrum, 0.35))
+            int colorIdx = tentacleIndex % Mathf.Max(1, barColors != null ? barColors.Length : 1);
+            Color spectrumColor = (barColors != null && barColors.Length > 0) ? barColors[colorIdx] : tentacleColor;
+            Color rootColor = new Color(
+                Mathf.Lerp(tentacleColor.r, spectrumColor.r, 0.35f),
+                Mathf.Lerp(tentacleColor.g, spectrumColor.g, 0.35f),
+                Mathf.Lerp(tentacleColor.b, spectrumColor.b, 0.35f),
+                Mathf.Clamp01(tentacleAlpha / 255f));
             if (!tentacleShaderEnabled)
             {
                 renderer.startColor = rootColor;
