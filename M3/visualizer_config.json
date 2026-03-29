@@ -8,8 +8,8 @@
   "pos_y": -1,
   "drag_adjust_mode": false,
   "bg_transparent": true,
-  "always_on_top": true,
-  "window_layer": "top",
+  "always_on_top": false,
+  "window_layer": "normal",
   "num_bars": 4,
   "smoothing": 0.7,
   "k_rise_damping": 0.1,
@@ -181,8 +181,8 @@
   "tentacle_thick": 1,
   "tentacle_count": 4,
   "tentacle_length": 40.0,
-  "tentacle_length_jitter": 80.0,
-  "tentacle_length_jitter_speed": 0.12,
+  "tentacle_length_jitter": 240.0,
+  "tentacle_length_jitter_speed": 0.0,
   "tentacle_length_jitter_random": true,
   "tentacle_control_points_min": 6,
   "tentacle_control_points_max": 6,
@@ -625,5 +625,8 @@
   "kp_bind_tentacle_length_jitter_speed_k": true,
   "kp_tentacle_length_jitter_speed_k_wmin": 0.0,
   "kp_tentacle_length_jitter_k_wmin": -8000.0,
-  "kp_tentacle_length_jitter_speed_k_wmax": 0.2
+  "kp_tentacle_length_jitter_speed_k_wmax": 0.2,
+  "unity_export_project_dir": "C:\\Users\\KYSAINT\\Git\\UNITY-PROJECT\\AYE_P00",
+  "unity_export_last_class": "R03",
+  "unity_export_last_path": "C:\\Users\\KYSAINT\\Git\\UNITY-PROJECT\\AYE_P00\\Assets\\Scripts\\R03.cs"
 }

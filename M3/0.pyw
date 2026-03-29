@@ -2164,13 +2164,13 @@ class VisualizerControlUI(QWidget):
         self.pin_top_btn = QPushButton("置于顶层")
         self.pin_top_btn.setMinimumHeight(24)
         self.pin_top_btn.setCheckable(True)
-        self.pin_top_btn.clicked.connect(lambda: self._set_window_layer_mode('top'))
+        self.pin_top_btn.toggled.connect(lambda checked: self._handle_window_layer_toggle('top', checked))
         top_action_row.addWidget(self.pin_top_btn)
 
         self.pin_bottom_btn = QPushButton("置于底层")
         self.pin_bottom_btn.setMinimumHeight(24)
         self.pin_bottom_btn.setCheckable(True)
-        self.pin_bottom_btn.clicked.connect(lambda: self._set_window_layer_mode('bottom'))
+        self.pin_bottom_btn.toggled.connect(lambda checked: self._handle_window_layer_toggle('bottom', checked))
         top_action_row.addWidget(self.pin_bottom_btn)
 
         self.window_layer_state_lbl = QLabel("")
@@ -5964,6 +5964,14 @@ class VisualizerControlUI(QWidget):
                 pass
         self._set_info_bar(f"窗口层级已切换为: {'顶层' if mode == 'top' else '底层' if mode == 'bottom' else '普通'}")
 
+    def _handle_window_layer_toggle(self, mode, checked):
+        mode = str(mode or 'normal').lower()
+        current = str(self.config.get('window_layer', 'normal')).lower()
+        if checked:
+            self._set_window_layer_mode(mode)
+        elif current == mode:
+            self._set_window_layer_mode('normal')
+
     def _sync_window_layer_controls(self, mode=None):
         mode = str(mode or self.config.get('window_layer', 'normal')).lower()
         if mode not in {'top', 'normal', 'bottom'}:
@@ -5973,12 +5981,10 @@ class VisualizerControlUI(QWidget):
         if hasattr(self, 'pin_top_btn'):
             self.pin_top_btn.blockSignals(True)
             self.pin_top_btn.setChecked(mode == 'top')
-            self.pin_top_btn.setEnabled(mode != 'top')
             self.pin_top_btn.blockSignals(False)
         if hasattr(self, 'pin_bottom_btn'):
             self.pin_bottom_btn.blockSignals(True)
             self.pin_bottom_btn.setChecked(mode == 'bottom')
-            self.pin_bottom_btn.setEnabled(mode != 'bottom')
             self.pin_bottom_btn.blockSignals(False)
         if hasattr(self, 'window_layer_state_lbl'):
             mode_text = '顶层' if mode == 'top' else '底层' if mode == 'bottom' else '普通'
