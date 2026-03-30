@@ -201,6 +201,7 @@ _DEFAULT_CONFIG = {
     'preset_order': [],
     'preset_auto_switch': False,
     'preset_switch_random_enabled': False,
+    'preset_switch_infinite_random_enabled': False,
     'preset_switch_interval': 10.0,
     'preset_interval_random_enabled': False,
     'preset_switch_interval_min': 1.0,
@@ -2243,6 +2244,11 @@ class VisualizerControlUI(QWidget):
         self.preset_switch_random_check.toggled.connect(self._on_preset_switch_random_toggled)
         preset_row.addWidget(self.preset_switch_random_check)
 
+        self.preset_switch_infinite_random_check = QCheckBox("无限随机")
+        self.preset_switch_infinite_random_check.setChecked(self.config.get('preset_switch_infinite_random_enabled', False))
+        self.preset_switch_infinite_random_check.toggled.connect(self._on_preset_switch_infinite_random_toggled)
+        preset_row.addWidget(self.preset_switch_infinite_random_check)
+
         preset_row.addWidget(QLabel("间隔"))
         self.preset_interval_spin = self._new_float_box(
             default_value=10.0, soft_min=0.01, soft_max=3600.0,
@@ -3417,6 +3423,19 @@ class VisualizerControlUI(QWidget):
 
     def _on_preset_switch_random_toggled(self, v):
         self._update_cfg('preset_switch_random_enabled', v)
+        if v and getattr(self, 'preset_switch_infinite_random_check', None) and self.preset_switch_infinite_random_check.isChecked():
+            self.preset_switch_infinite_random_check.blockSignals(True)
+            self.preset_switch_infinite_random_check.setChecked(False)
+            self.preset_switch_infinite_random_check.blockSignals(False)
+            self._update_cfg('preset_switch_infinite_random_enabled', False)
+
+    def _on_preset_switch_infinite_random_toggled(self, v):
+        self._update_cfg('preset_switch_infinite_random_enabled', v)
+        if v and getattr(self, 'preset_switch_random_check', None) and self.preset_switch_random_check.isChecked():
+            self.preset_switch_random_check.blockSignals(True)
+            self.preset_switch_random_check.setChecked(False)
+            self.preset_switch_random_check.blockSignals(False)
+            self._update_cfg('preset_switch_random_enabled', False)
 
     def _on_preset_interval_changed(self, v):
         self._update_cfg('preset_switch_interval', v)
@@ -3470,8 +3489,30 @@ class VisualizerControlUI(QWidget):
         sec = max(0.01, float(self._next_preset_interval_seconds()))
         self.preset_timer.start(int(sec * 1000))
 
+    def _auto_switch_infinite_random(self):
+        if not hasattr(self, 'random_tree'):
+            return False
+
+        checked_count = 0
+        for i in range(self.random_tree.topLevelItemCount()):
+            cat_item = self.random_tree.topLevelItem(i)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                if child.checkState(0) == Qt.Checked:
+                    checked_count += 1
+
+        if checked_count <= 0:
+            self._set_info_bar('无限随机未执行：请先在随机页勾选要参与随机的项目')
+            return False
+
+        self._randomize_selected(use_transition=True)
+        self._set_info_bar('已按当前随机设置生成新的随机预设状态')
+        return True
+
     def _auto_switch_preset(self):
-        if self.config.get('preset_switch_random_enabled', False):
+        if self.config.get('preset_switch_infinite_random_enabled', False):
+            self._auto_switch_infinite_random()
+        elif self.config.get('preset_switch_random_enabled', False):
             self._switch_preset_random()
         else:
             self._switch_preset_by_offset(1)
@@ -3617,6 +3658,7 @@ class VisualizerControlUI(QWidget):
                 'preset_order',
                 'preset_auto_switch',
                 'preset_switch_random_enabled',
+                'preset_switch_infinite_random_enabled',
                 'preset_switch_interval',
                 'preset_interval_random_enabled',
                 'preset_switch_interval_min',
@@ -5705,22 +5747,25 @@ class VisualizerControlUI(QWidget):
 
         return out
 
-    def _enforce_random_object_count(self):
+    def _enforce_random_object_count(self, target_config=None):
+        cfg = self.config if target_config is None else target_config
         object_keys = ['c1_on', 'c2_on', 'c3_on', 'c4_on', 'c5_on', 'b12_on', 'b23_on', 'b34_on', 'b45_on', 'tentacle_on']
         total = len(object_keys)
-        min_v = int(self.config.get('random_object_count_min', 1))
-        max_v = int(self.config.get('random_object_count_max', total))
+        min_v = int(cfg.get('random_object_count_min', 1))
+        max_v = int(cfg.get('random_object_count_max', total))
         low = max(1, min(total, min(min_v, max_v)))
         high = max(1, min(total, max(min_v, max_v)))
         target = random.randint(low, high)
 
         chosen = set(random.sample(object_keys, k=target))
         for key in object_keys:
-            self.config[key] = key in chosen
+            cfg[key] = key in chosen
 
-    def _randomize_selected(self):
+    def _randomize_selected(self, *, use_transition=False):
         """随机化所有被选中的属性"""
         now = time.time()
+        working_config = dict(self.config)
+        from_config = self.config.copy() if use_transition else None
 
         changed = False
         color_count = 0
@@ -5747,24 +5792,27 @@ class VisualizerControlUI(QWidget):
                     continue
                 cfg_key, ptype = prop_def[1], prop_def[2]
                 if ptype == "bool":
-                    self.config[cfg_key] = random.choice([True, False])
+                    working_config[cfg_key] = random.choice([True, False])
                 elif ptype == "int":
-                    self.config[cfg_key] = random.randint(prop_def[3], prop_def[4])
+                    working_config[cfg_key] = random.randint(prop_def[3], prop_def[4])
                 elif ptype == "float":
-                    self.config[cfg_key] = round(random.uniform(prop_def[3], prop_def[4]), 3)
+                    working_config[cfg_key] = round(random.uniform(prop_def[3], prop_def[4]), 3)
                 elif ptype == "color":
                     if color_pool:
-                        self.config[cfg_key] = color_pool.pop(0)
+                        working_config[cfg_key] = color_pool.pop(0)
                     else:
-                        self.config[cfg_key] = tuple(self._generate_harmony_palette(1)[0])
+                        working_config[cfg_key] = tuple(self._generate_harmony_palette(1)[0])
                 elif ptype == "choice":
-                    self.config[cfg_key] = random.choice(prop_def[3])
+                    working_config[cfg_key] = random.choice(prop_def[3])
                 changed = True
         if changed:
-            self.config['color_scheme'] = 'custom'
-            self._enforce_random_object_count()
-            self._apply_config_to_ui(self.config)
+            working_config['color_scheme'] = 'custom'
+            self._enforce_random_object_count(working_config)
+            self._apply_config_to_ui(working_config)
             self._last_random_apply_ts = now
+            if use_transition and self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
+                self._send_transition_command(from_config)
+                self.cfg_send_timer.stop()
 
     def _update_color_preview_strip(self):
         if not hasattr(self, 'palette_preview_cells'):
@@ -6317,6 +6365,7 @@ class VisualizerControlUI(QWidget):
             # 预设自动切换
             self.preset_auto_check.setChecked(d.get('preset_auto_switch', False))
             self.preset_switch_random_check.setChecked(d.get('preset_switch_random_enabled', False))
+            self.preset_switch_infinite_random_check.setChecked(d.get('preset_switch_infinite_random_enabled', False))
             _ssv(self.preset_interval_spin, float(d.get('preset_switch_interval', 10.0)))
             self.preset_interval_random_check.setChecked(d.get('preset_interval_random_enabled', False))
             _ssv(self.preset_interval_min_spin, float(d.get('preset_switch_interval_min', 1.0)))
