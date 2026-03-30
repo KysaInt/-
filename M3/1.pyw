@@ -1451,8 +1451,12 @@ class CircularVisualizerWindow(QWidget):
         sway_speed = max(0.0, _kp_add('tentacle_sway_speed', float(self.config.get("tentacle_sway_speed", 1.1))))
         sway_density = max(0.1, _kp_add('tentacle_sway_density', float(self.config.get("tentacle_sway_density", 2.4))))
 
-        alpha_base = float(self.config.get("_tr_tentacle_alpha", self.config.get("tentacle_alpha", 170)))
-        alpha = int(round(_kp_add('tentacle_alpha', alpha_base)))
+        transition_tentacle_alpha = self.config.get("_tr_tentacle_alpha")
+        if transition_tentacle_alpha is None:
+            alpha_base = float(self.config.get("tentacle_alpha", 170))
+            alpha = int(round(_kp_add('tentacle_alpha', alpha_base)))
+        else:
+            alpha = int(round(float(transition_tentacle_alpha)))
         alpha = max(0, min(255, alpha))
 
         length_fraction = max(0.0, float(self.config.get("_tr_tentacle_len_frac", 1.0)))
@@ -1757,7 +1761,11 @@ class CircularVisualizerWindow(QWidget):
                 points = circle_points if layer_index == 3 else contour_points.get(layer_index)
                 if points and len(points) >= 3:
                     color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
-                    alpha = int(round(self._runtime_kp_add(f"c{layer_index}_fill_alpha", float(self.config.get(f"c{layer_index}_fill_alpha", 50)), normalized_k, normalized_p)))
+                    transition_alpha = self.config.get(f"_tr_c{layer_index}_fill_alpha")
+                    if transition_alpha is None:
+                        alpha = int(round(self._runtime_kp_add(f"c{layer_index}_fill_alpha", float(self.config.get(f"c{layer_index}_fill_alpha", 50)), normalized_k, normalized_p)))
+                    else:
+                        alpha = int(round(float(transition_alpha)))
                     alpha = max(0, min(255, alpha))
                     fills.append({"points": points, "color": (*color, alpha)})
 
@@ -1831,7 +1839,11 @@ class CircularVisualizerWindow(QWidget):
                 points = circle_points if layer_index == 3 else contour_points.get(layer_index)
                 if points and len(points) >= 3:
                     color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
-                    alpha = int(round(self._runtime_kp_add(f"c{layer_index}_alpha", float(self.config.get(f"c{layer_index}_alpha", 180)), normalized_k, normalized_p)))
+                    transition_alpha = self.config.get(f"_tr_c{layer_index}_alpha")
+                    if transition_alpha is None:
+                        alpha = int(round(self._runtime_kp_add(f"c{layer_index}_alpha", float(self.config.get(f"c{layer_index}_alpha", 180)), normalized_k, normalized_p)))
+                    else:
+                        alpha = int(round(float(transition_alpha)))
                     alpha = max(0, min(255, alpha))
                     thickness = int(round(self._runtime_kp_add(f"c{layer_index}_thick", float(self.config.get(f"c{layer_index}_thick", 2)), normalized_k, normalized_p)))
                     thickness = max(1, thickness)
@@ -2090,10 +2102,12 @@ class CircularVisualizerWindow(QWidget):
     # ── 预设平滑过渡（透明度淡入淡出版） ─────────────────────────
 
     def _start_transition(self, from_config, to_config, duration, easing):
-        self._transition_from = _normalize_loaded_config(from_config)
+        # 清除 from_config 中的运行时 _tr_* 键，避免中途切换带来的脏状态
+        clean_from = {k: v for k, v in (from_config or {}).items() if not k.startswith('_tr_')}
+        self._transition_from = _normalize_loaded_config(clean_from)
         self._transition_target = _normalize_loaded_config(to_config)
         self._transition_duration = max(0.05, float(duration))
-        self._transition_easing = 'cubic'
+        self._transition_easing = easing if easing else 'ease_in_out'
         self._transition_start = time.time()
         self._transition_active = True
         self._transition_toggle_schedule = []
@@ -2130,22 +2144,37 @@ class CircularVisualizerWindow(QWidget):
             slot_t_end = (i + 1) / n if n > 0 else 1.0
 
             is_circle = prefix.startswith('c') and len(prefix) == 2 and prefix[1:].isdigit()
+            is_tentacle_core = (prefix == 'tentacle_core')
             alpha_entries = []
-            if is_circle:
+
+            if is_tentacle_core:
+                # tentacle_core 没有独立的透明度渲染，仅在时间槽端点切换开关（快照式）
+                pass
+            elif is_circle:
                 if direction == 'out':
                     from_a = int(self._transition_from.get(f'{prefix}_alpha', 180))
-                    alpha_entries.append((f'{prefix}_alpha', from_a, 0))
+                    alpha_entries.append((f'_tr_{prefix}_alpha', from_a, 0))
                     if self._transition_from.get(f'{prefix}_fill', False):
                         fa = int(self._transition_from.get(f'{prefix}_fill_alpha', 50))
-                        alpha_entries.append((f'{prefix}_fill_alpha', fa, 0))
+                        alpha_entries.append((f'_tr_{prefix}_fill_alpha', fa, 0))
                 else:
                     to_a = int(self._transition_target.get(f'{prefix}_alpha', 180))
-                    alpha_entries.append((f'{prefix}_alpha', 0, to_a))
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 0, to_a))
                     if self._transition_target.get(f'{prefix}_fill', False):
                         ta = int(self._transition_target.get(f'{prefix}_fill_alpha', 50))
-                        alpha_entries.append((f'{prefix}_fill_alpha', 0, ta))
+                        alpha_entries.append((f'_tr_{prefix}_fill_alpha', 0, ta))
+            elif prefix == 'tentacle':
+                # 触须：使用 _tr_ 运行时键，起始/结束透明度从配置读取
+                if direction == 'out':
+                    from_a = float(self._transition_from.get('tentacle_alpha', 170))
+                    alpha_entries.append(('_tr_tentacle_alpha', from_a, 0.0))
+                    alpha_entries.append(('_tr_tentacle_len_frac', 1.0, 0.0))
+                else:
+                    to_a = float(self._transition_target.get('tentacle_alpha', 170))
+                    alpha_entries.append(('_tr_tentacle_alpha', 0.0, to_a))
+                    alpha_entries.append(('_tr_tentacle_len_frac', 0.0, 1.0))
             else:
-                # b-层：用 _tr_ 运行时键控制 alpha 和长度缩放，不落盘
+                # b-层（条形图）：用 _tr_ 运行时键控制 alpha 和长度缩放，不落盘
                 if direction == 'out':
                     alpha_entries.append((f'_tr_{prefix}_alpha', 255, 0))
                     alpha_entries.append((f'_tr_{prefix}_len_frac', 1.0, 0.0))

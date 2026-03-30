@@ -200,6 +200,7 @@ _DEFAULT_CONFIG = {
     'random_object_count_max': 10,
     'preset_order': [],
     'preset_auto_switch': False,
+    'preset_switch_random_enabled': False,
     'preset_switch_interval': 10.0,
     'preset_interval_random_enabled': False,
     'preset_switch_interval_min': 1.0,
@@ -2237,6 +2238,11 @@ class VisualizerControlUI(QWidget):
         self.preset_auto_check.toggled.connect(self._on_preset_auto_toggled)
         preset_row.addWidget(self.preset_auto_check)
 
+        self.preset_switch_random_check = QCheckBox("随机切换")
+        self.preset_switch_random_check.setChecked(self.config.get('preset_switch_random_enabled', False))
+        self.preset_switch_random_check.toggled.connect(self._on_preset_switch_random_toggled)
+        preset_row.addWidget(self.preset_switch_random_check)
+
         preset_row.addWidget(QLabel("间隔"))
         self.preset_interval_spin = self._new_float_box(
             default_value=10.0, soft_min=0.01, soft_max=3600.0,
@@ -3248,6 +3254,29 @@ class VisualizerControlUI(QWidget):
             self._set_info_bar(f"已切换到预设: {self.preset_combo.currentText()}")
         return True
 
+    def _switch_preset_random(self, *, update_info=False):
+        count = self.preset_combo.count()
+        if count <= 0:
+            if update_info:
+                self._set_info_bar('当前没有可切换的预设')
+            return False
+        current = self.preset_combo.currentIndex()
+        if count == 1:
+            if current < 0:
+                self.preset_combo.setCurrentIndex(0)
+                return True
+            if update_info:
+                self._set_info_bar(f"当前预设: {self.preset_combo.currentText()}")
+            return False
+        choices = [index for index in range(count) if index != current]
+        if not choices:
+            return False
+        target = random.choice(choices)
+        self.preset_combo.setCurrentIndex(target)
+        if update_info:
+            self._set_info_bar(f"已随机切换到预设: {self.preset_combo.currentText()}")
+        return True
+
     def _set_info_bar(self, text: str):
         self.info_bar_lbl.setText(text)
 
@@ -3386,6 +3415,9 @@ class VisualizerControlUI(QWidget):
         else:
             self.preset_timer.stop()
 
+    def _on_preset_switch_random_toggled(self, v):
+        self._update_cfg('preset_switch_random_enabled', v)
+
     def _on_preset_interval_changed(self, v):
         self._update_cfg('preset_switch_interval', v)
         if not self.preset_interval_random_check.isChecked() and self.preset_auto_check.isChecked():
@@ -3439,7 +3471,10 @@ class VisualizerControlUI(QWidget):
         self.preset_timer.start(int(sec * 1000))
 
     def _auto_switch_preset(self):
-        self._switch_preset_by_offset(1)
+        if self.config.get('preset_switch_random_enabled', False):
+            self._switch_preset_random()
+        else:
+            self._switch_preset_by_offset(1)
         if self.preset_auto_check.isChecked():
             self._schedule_next_preset_switch()
 
@@ -3581,6 +3616,7 @@ class VisualizerControlUI(QWidget):
                 'random_object_count_max',
                 'preset_order',
                 'preset_auto_switch',
+                'preset_switch_random_enabled',
                 'preset_switch_interval',
                 'preset_interval_random_enabled',
                 'preset_switch_interval_min',
@@ -3597,6 +3633,8 @@ class VisualizerControlUI(QWidget):
             # 若启用平滑过渡，替换队列为过渡指令
             if self.config.get('preset_transition_enabled', False) and self.viz_process and self.viz_process.is_alive():
                 self._send_transition_command(from_config)
+                # 取消即将触发的 _send_config，否则它会覆盖过渡指令并中断过渡
+                self.cfg_send_timer.stop()
             self._set_info_bar(f"已加载预设: {Path(fp).stem}")
             self._refresh_unity_export_suggestion()
             if show_message:
@@ -3876,10 +3914,10 @@ class VisualizerControlUI(QWidget):
             return
         cmd = {
             'command': 'preset_transition',
-            'from_config': {k: v for k, v in from_config.items()},
-            'to_config': {k: v for k, v in self.config.items()},
+            'from_config': {k: v for k, v in from_config.items() if not k.startswith('_tr_')},
+            'to_config': {k: v for k, v in self.config.items() if not k.startswith('_tr_')},
             'duration': float(self.config.get('preset_transition_duration', 2.0)),
-            'easing': 'cubic',
+            'easing': self.config.get('preset_transition_easing', 'ease_in_out'),
         }
         try:
             while True:
@@ -6278,6 +6316,7 @@ class VisualizerControlUI(QWidget):
 
             # 预设自动切换
             self.preset_auto_check.setChecked(d.get('preset_auto_switch', False))
+            self.preset_switch_random_check.setChecked(d.get('preset_switch_random_enabled', False))
             _ssv(self.preset_interval_spin, float(d.get('preset_switch_interval', 10.0)))
             self.preset_interval_random_check.setChecked(d.get('preset_interval_random_enabled', False))
             _ssv(self.preset_interval_min_spin, float(d.get('preset_switch_interval_min', 1.0)))

@@ -44,19 +44,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/4] 安装/更新依赖...
-call "%PYTHON_EXE%" -m pip install --upgrade pip setuptools wheel
+echo [3/4] 检查运行依赖...
+call :check_runtime_deps
 if errorlevel 1 (
-    echo [错误] pip 基础工具升级失败。
-    pause
-    exit /b 1
-)
-
-call "%PYTHON_EXE%" -m pip install -r "%REQ_FILE%"
-if errorlevel 1 (
-    echo [错误] 项目依赖安装失败。
-    pause
-    exit /b 1
+    echo [信息] 检测到缺少依赖，尝试安装...
+    call "%PYTHON_EXE%" -m pip install --disable-pip-version-check -r "%REQ_FILE%"
+    if errorlevel 1 (
+        echo [错误] 项目依赖安装失败。
+        pause
+        exit /b 1
+    )
+) else (
+    echo [信息] 运行依赖已满足，跳过联网安装。
 )
 
 echo [4/4] 启动程序...
@@ -175,4 +174,11 @@ if errorlevel 1 (
 )
 
 echo [信息] 虚拟环境已准备完成。
+exit /b 0
+
+:check_runtime_deps
+call "%PYTHON_EXE%" -c "import importlib.util, sys; modules = ('PySide6', 'pyaudiowpatch', 'numpy', 'scipy', 'OpenGL', 'OpenGL_accelerate'); missing = [name for name in modules if importlib.util.find_spec(name) is None]; raise SystemExit(1 if missing else 0)" >nul 2>nul
+if errorlevel 1 (
+    exit /b 1
+)
 exit /b 0
