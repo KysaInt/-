@@ -8,8 +8,8 @@
   "pos_y": -1,
   "drag_adjust_mode": false,
   "bg_transparent": true,
-  "always_on_top": true,
-  "window_layer": "top",
+  "always_on_top": false,
+  "window_layer": "normal",
   "num_bars": 4,
   "smoothing": 0.7,
   "k_rise_damping": 0.1,
@@ -626,7 +626,7 @@
   "kp_tentacle_length_jitter_speed_k_wmin": 0.0,
   "kp_tentacle_length_jitter_k_wmin": -8000.0,
   "kp_tentacle_length_jitter_speed_k_wmax": 0.2,
-  "unity_export_project_dir": "C:\\Users\\94230\\Desktop\\UNITY PROJECT\\AYE_P00",
+  "unity_export_project_dir": "C:\\Users\\KYSAINT\\Git\\UNITY-PROJECT\\AYE_P00",
   "unity_export_last_class": "R03",
-  "unity_export_last_path": "C:\\Users\\94230\\Desktop\\UNITY PROJECT\\AYE_P00\\Assets\\Scripts\\R03.cs"
+  "unity_export_last_path": "C:\\Users\\KYSAINT\\Git\\UNITY-PROJECT\\AYE_P00\\Assets\\Scripts\\R03.cs"
 }

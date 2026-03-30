@@ -5,10 +5,14 @@ import re
 from pathlib import Path
 
 
-REFERENCE_UNITY_SCRIPTS_DIR = Path(r"C:\Users\94230\Desktop\UNITY PROJECT\AYE_P01\Assets\Scripts")
 FALLBACK_EXPORT_DIR = Path(__file__).parent / "exports" / "unity"
-REFERENCE_PY_STYLE_VISUALIZER = REFERENCE_UNITY_SCRIPTS_DIR / "PyStyleVisualizer.cs"
-REFERENCE_WINDOWS_AUDIO_CAPTURE = REFERENCE_UNITY_SCRIPTS_DIR / "WindowsAudioCapture.cs"
+BUNDLED_UNITY_ASSETS_DIR = Path(__file__).parent / "exports" / "unity_validation_project" / "Assets"
+BUNDLED_UNITY_SCRIPTS_DIR = BUNDLED_UNITY_ASSETS_DIR / "Scripts"
+BUNDLED_UNITY_SHADERS_DIR = BUNDLED_UNITY_ASSETS_DIR / "Shaders"
+REFERENCE_UNITY_SCRIPTS_DIR = BUNDLED_UNITY_SCRIPTS_DIR
+REFERENCE_PY_STYLE_VISUALIZER = BUNDLED_UNITY_SCRIPTS_DIR / "PyStyleVisualizer.cs"
+REFERENCE_WINDOWS_AUDIO_CAPTURE = BUNDLED_UNITY_SCRIPTS_DIR / "WindowsAudioCapture.cs"
+REFERENCE_TENTACLE_SHADER = BUNDLED_UNITY_SHADERS_DIR / "AyeTentacleSoftLine.shader"
 
 _REFERENCE_RUNTIME_FILES = {
     "PyStyleVisualizer.cs": REFERENCE_PY_STYLE_VISUALIZER,
@@ -123,12 +127,20 @@ def build_unity_audio_file_driver_path(project_dir: str | Path | None) -> Path |
     return normalized_project_dir / "Assets" / "Scripts" / "AyeExportAudioFileDriver.cs"
 
 
+def build_unity_tentacle_shader_path(project_dir: str | Path | None) -> Path | None:
+    normalized_project_dir = normalize_unity_project_dir(project_dir=project_dir)
+    if not normalized_project_dir:
+        return None
+    return normalized_project_dir / "Assets" / "Shaders" / "AyeTentacleSoftLine.shader"
+
+
 def list_unity_shared_prerequisite_paths(project_dir: str | Path | None) -> list[Path]:
     paths: list[Path] = []
     py_style_visualizer_path = build_unity_py_style_visualizer_path(project_dir)
     windows_audio_capture_path = build_unity_windows_audio_capture_path(project_dir)
     audio_file_driver_path = build_unity_audio_file_driver_path(project_dir)
     camera_controller_path = build_unity_camera_controller_path(project_dir)
+    tentacle_shader_path = build_unity_tentacle_shader_path(project_dir)
     if py_style_visualizer_path is not None:
         paths.append(py_style_visualizer_path)
     if windows_audio_capture_path is not None:
@@ -137,6 +149,8 @@ def list_unity_shared_prerequisite_paths(project_dir: str | Path | None) -> list
         paths.append(audio_file_driver_path)
     if camera_controller_path is not None:
         paths.append(camera_controller_path)
+    if tentacle_shader_path is not None:
+        paths.append(tentacle_shader_path)
     return paths
 
 
@@ -246,6 +260,13 @@ def ensure_unity_shared_prerequisites(project_dir: str | Path | None, *, has_aud
             build_unity_camera_controller_source(),
         )
 
+    tentacle_shader_path = build_unity_tentacle_shader_path(project_dir)
+    if tentacle_shader_path and REFERENCE_TENTACLE_SHADER.exists():
+        _write_text_if_changed(
+            tentacle_shader_path,
+            REFERENCE_TENTACLE_SHADER.read_text(encoding="utf-8"),
+        )
+
 
 def _camel_to_snake(name: str) -> str:
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name or ""))
@@ -268,89 +289,6 @@ def _load_reference_py_style_field_metadata() -> list[tuple[str, str]]:
         field_name = match.group("name")
         fields.append((field_name, field_type))
     return fields
-
-
-def _is_tentacle_dominant_preset(config: dict) -> bool:
-    """检测预设是否主要是柔体主题（触手）。
-    
-    如果触手开启，则认为是柔体主题。
-    """
-    return config.get("tentacle_on", False) or config.get("__preset_category") == "jellyfish"
-
-
-def _is_classical_detail_parameter(field_name: str) -> bool:
-    """检测字段是否属于经典主题或连线的详细参数（不包括开关）。
-    
-    经典主题的详细参数包括：
-    - c1-c5层的颜色、透明度、粗细、填充、步长、衰减、旋转等
-    - b12-b45连线的粗细、固定长度等详细参数
-    
-    但保留：
-    - 开关参数（*On, *Enabled, *Fill等布尔开关）
-    - 通用参数
-    """
-    field_lower = field_name.lower()
-    
-    # 经典图元（c1-c5）的详细参数
-    classical_contour_prefixes = [f"c{i}" for i in range(1, 6)]
-    for prefix in classical_contour_prefixes:
-        if field_lower.startswith(prefix.lower()):
-            # 保留开关参数
-            if field_lower.endswith("on") or field_lower.endswith("fill"):
-                return False
-            # 其他详细参数需要过滤
-            return True
-    
-    # 连线（bars）的详细参数
-    bar_prefixes = ["b12", "b23", "b34", "b45"]
-    for prefix in bar_prefixes:
-        if field_lower.startswith(prefix.lower()):
-            # 保留开关参数
-            if field_lower.endswith("on"):
-                return False
-            # 其他详细参数需要过滤
-            return True
-    
-    return False
-
-
-def _is_classical_or_bar_parameter(field_name: str) -> bool:
-    """检测字段是否属于经典主题或连线的任何参数（包括开关）。"""
-    field_lower = field_name.lower()
-    
-    # c1-c5 的所有参数
-    for i in range(1, 6):
-        if field_lower.startswith(f"c{i}"):
-            return True
-    
-    # b12-b45 的所有参数
-    bar_prefixes = ["b12", "b23", "b34", "b45"]
-    for prefix in bar_prefixes:
-        if field_lower.startswith(prefix.lower()):
-            return True
-    
-    return False
-
-
-def _is_hsl_rgb_channel_kp_parameter(config_key: str) -> bool:
-    """检测配置键是否为HSL/RGB颜色通道的kp绑定参数。
-    
-    M3 中支持对颜色的单独通道（H/S/L/R/G/B）进行 K/P 绑定，
-    例如：kp_bind_tentacle_color__h_k、kp_tentacle_color__s_k_wmin
-    
-    但 Unity 中只有完整的 Color 字段，不支持单独通道绑定，
-    需要过滤掉这些参数。
-    """
-    if not config_key:
-        return False
-    
-    # 检查是否包含颜色通道标识符
-    channel_markers = ["__h_", "__s_", "__l_", "__r_", "__g_", "__b_"]
-    for marker in channel_markers:
-        if marker in config_key.lower():
-            return True
-    
-    return False
 
 
 def _build_effective_export_config(config: dict) -> dict:
@@ -386,30 +324,11 @@ def _build_effective_export_config(config: dict) -> dict:
 
 def _build_py_style_visualizer_assignments(config: dict) -> list[str]:
     effective_config = _build_effective_export_config(config)
-    original_config = config  # 保留原始配置用于检查参数是否真实存在
-    
-    # 检测预设的主题类型
-    is_tentacle_dominant = _is_tentacle_dominant_preset(original_config)
-    
     assignments: list[str] = []
     for field_name, field_type in _load_reference_py_style_field_metadata():
         config_key = _FIELD_KEY_OVERRIDES.get(field_name, _camel_to_snake(field_name))
-        
-        # 跳过HSL/RGB通道的kp绑定参数（Unity不支持单独的颜色通道绑定）
-        if _is_hsl_rgb_channel_kp_parameter(config_key):
-            continue
-        
         if config_key not in effective_config:
             continue
-        
-        # 如果是柔体主题预设，跳过经典主题和连线的详细参数
-        if is_tentacle_dominant and _is_classical_detail_parameter(field_name):
-            continue
-        
-        # 跳过原始配置中不存在的经典参数（避免导出多余参数）
-        if _is_classical_or_bar_parameter(field_name) and config_key not in original_config:
-            continue
-        
         value_expr = _build_visualizer_value_expression(field_type, effective_config.get(config_key))
         if value_expr is None:
             continue
