@@ -625,5 +625,8 @@
   "kp_bind_tentacle_length_jitter_speed_k": true,
   "kp_tentacle_length_jitter_speed_k_wmin": 0.0,
   "kp_tentacle_length_jitter_k_wmin": -8000.0,
-  "kp_tentacle_length_jitter_speed_k_wmax": 0.2
+  "kp_tentacle_length_jitter_speed_k_wmax": 0.2,
+  "unity_export_project_dir": "C:\\Users\\94230\\Desktop\\UNITY PROJECT\\AYE_P00",
+  "unity_export_last_class": "R03",
+  "unity_export_last_path": "C:\\Users\\94230\\Desktop\\UNITY PROJECT\\AYE_P00\\Assets\\Scripts\\R03.cs"
 }
