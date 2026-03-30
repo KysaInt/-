@@ -7,7 +7,14 @@ from typing import Any, Mapping
 
 import numpy as np
 import pyaudiowpatch as pyaudio
-from scipy.fft import fft as scipy_fft
+
+try:
+    from scipy.fft import fft as scipy_fft
+    _HAS_SCIPY_FFT = True
+except Exception:
+    scipy_fft = np.fft.fft
+    _HAS_SCIPY_FFT = False
+    print("⚠ SciPy FFT 不可用 — 使用 NumPy FFT")
 
 
 def clamp_time_window(value: Any, fallback: float) -> float:

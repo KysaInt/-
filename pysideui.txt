@@ -6,6 +6,7 @@ AYE PySide6 UI 风格规范（精简版）
 - 框架：PySide6（Qt Widgets）。
 - 主题：遵循系统/Qt 主题，不硬编码主色。主色统一取 QPalette.Highlight，背景取 QPalette.Base，文本取 QPalette.Text，灰度取 QPalette.Mid。
 - 对比度：按需对高亮色做轻微调整，保证在深/浅主题下都有可读性（常用空条颜色 #555555 作为对比基线）。
+- 设置持久化：默认支持自动记录设置；除非是临时调试项，否则用户改过的参数、开关、路径、预设选择、窗口状态，下次打开应自动恢复，避免每次重调。
 
 二、页面骨架（通用布局）
 - 根布局：QVBoxLayout(self)
@@ -101,13 +102,248 @@ QWidget:hover { background-color: rgba(100,100,100,100); }
 - 刷新 QTextEdit 时保持用户滚动位置；若启用自动滚动则滚至底部。
 - 可按 30s 定时写入日志文件，启动时回放旧日志到视图中。
 
-九、尺寸与间距约定
+九、设置自动记录与恢复（默认能力，需强调）
+- 原则：整个程序默认具备“自动记住上次设置”的能力，不把“每次打开重新调整”当成正常流程。
+- 推荐持久化内容：
+	1) 各类数值参数、滑块值、勾选框、下拉框；
+	2) 路径、最近使用目录、最近文件、当前预设名；
+	3) 折叠面板展开状态、分页/标签页索引、预览开关；
+	4) 窗口尺寸、位置、分栏比例、可调预览区高度；
+	5) 右键设置过的 soft range、默认值、颜色选择结果。
+- 推荐时机：
+	- 控件值变更时直接写入配置，或用 `QTimer(singleShot)` 做 200~500ms 防抖后写入；
+	- 页面初始化完成后统一从配置回放一次；
+	- 关闭窗口前再做一次兜底保存，但不能只依赖 closeEvent。
+- 推荐实现：
+	- 统一提供 `config` 字典或配置管理器；
+	- 所有控件创建时都绑定到配置键；
+	- 更新配置统一走 `_update_cfg(key, value)`，由它负责写内存、触发延迟保存、必要时广播 UI 刷新；
+	- 不要把“保存设置”做成必须手动点击的动作，手动保存只应用于“保存为预设”。
+
+（推荐骨架）
+class ConfigBackedWidgetMixin:
+		def _cfg_get(self, key, default=None):
+				return self.config.get(key, default)
+
+		def _update_cfg(self, key, value):
+				self.config[key] = value
+				self._schedule_save_config()
+
+		def _schedule_save_config(self):
+				if not hasattr(self, '_save_timer'):
+						self._save_timer = QTimer(self)
+						self._save_timer.setSingleShot(True)
+						self._save_timer.timeout.connect(self._save_config_now)
+				self._save_timer.start(300)
+
+		def _save_config_now(self):
+				# 统一写入 json / yaml / ini
+				pass
+
+- 绑定建议：
+	- `QCheckBox.toggled -> _update_cfg`
+	- `QComboBox.currentIndexChanged/currentTextChanged -> _update_cfg`
+	- `QSpinBox/QDoubleSpinBox.valueChanged -> _update_cfg`
+	- `QLineEdit.editingFinished -> _update_cfg`
+	- `QSlider.valueChanged` 若频率高，可只在绑定 spinbox 后由 spinbox 负责落盘，或单独做防抖写入。
+- 必须强调：新写 UI 时，“能调不能记”视为未完成；自动记录设置应和布局、主题、交互一起成为默认基础设施。
+
+十、数值滑块与右键软范围（强烈建议复用）
+- 适用场景：参数既要能拖动调节，又要能临时缩小“常用操作区间”。
+- 推荐结构：`QSlider + QSpinBox/QDoubleSpinBox` 绑定；slider 负责快调，spinbox 负责精确输入。
+- 范围分层：
+	1) `hard_min/hard_max` 是真实边界，禁止越界；
+	2) `soft_min/soft_max` 是滑块当前工作区间，允许右键随时改；
+	3) 手动在 spinbox 输入时可超出 soft range，但仍必须落在 hard range 内。
+- 交互约定：
+	1) 右键 spinbox，弹出无边框 `Qt.Popup` 小窗；
+	2) 小窗提供“恢复默认值”“滑块下限”“滑块上限”；
+	3) 修改上下限后，立即同步到绑定的 slider；
+	4) 滚轮/步进/拖拽微调都限制在 soft range 内；
+	5) 默认值单独保存，恢复时只改当前值，不改 soft range。
+- 实现细节：
+	- `setKeyboardTracking(False)`，避免键入中间态频繁触发联动；
+	- slider 与 spinbox 双向同步时，用 `_syncing_slider` 防递归；
+	- slider 范围应跟随 soft range 更新，不直接固定死在 hard range；
+	- 浮点参数通过 `slider_scale` 做整数映射，例如 0.01 精度可用 `slider_scale=100.0`；
+	- 左键横向拖拽 spinbox 可做快速微调，整数可用 `round(delta_x / 6.0) * step`，浮点可用 `delta_x * step`。
+
+（推荐骨架）
+class _SoftRangeNumberMixin:
+		def _init_soft_range(self, soft_min, soft_max, hard_min, hard_max, default_value=None):
+				self._hard_min = self._coerce_value(hard_min)
+				self._hard_max = self._coerce_value(hard_max)
+				if self._hard_min > self._hard_max:
+						self._hard_min, self._hard_max = self._hard_max, self._hard_min
+				self.setRange(self._hard_min, self._hard_max)
+				self._default_value = self._coerce_value(default_value if default_value is not None else self.value())
+				self._soft_min = self._hard_min; self._soft_max = self._hard_max
+				self._bound_slider = None; self._slider_scale = 1.0; self._syncing_slider = False
+				self.setKeyboardTracking(False)
+				self.set_soft_range(soft_min, soft_max, sync_slider=False)
+
+		def set_soft_range(self, soft_min, soft_max, sync_slider=True):
+				lo = min(self._hard_max, max(self._hard_min, self._coerce_value(soft_min)))
+				hi = min(self._hard_max, max(self._hard_min, self._coerce_value(soft_max)))
+				if lo > hi:
+						lo, hi = hi, lo
+				self._soft_min = lo; self._soft_max = hi
+				if sync_slider:
+						self._apply_soft_range_to_slider()
+						self._sync_slider_from_value(self.value())
+
+		def bind_slider(self, slider, slider_scale=1.0):
+				self._bound_slider = slider
+				self._slider_scale = float(slider_scale) if slider_scale else 1.0
+				self._apply_soft_range_to_slider()
+				slider.valueChanged.connect(self._on_slider_changed)
+				self.valueChanged.connect(self._sync_slider_from_value)
+				self._sync_slider_from_value(self.value())
+
+		def _apply_soft_range_to_slider(self):
+				if not self._bound_slider:
+						return
+				slider_min = int(round(float(self._soft_min) * self._slider_scale))
+				slider_max = int(round(float(self._soft_max) * self._slider_scale))
+				if slider_min > slider_max:
+						slider_min, slider_max = slider_max, slider_min
+				self._bound_slider.setRange(slider_min, slider_max)
+
+		def _sync_slider_from_value(self, value):
+				if not self._bound_slider or self._syncing_slider:
+						return
+				self._syncing_slider = True
+				try:
+						slider_value = int(round(float(value) * self._slider_scale))
+						slider_value = max(self._bound_slider.minimum(), min(self._bound_slider.maximum(), slider_value))
+						self._bound_slider.setValue(slider_value)
+				finally:
+						self._syncing_slider = False
+
+		def _on_slider_changed(self, slider_value):
+				if self._syncing_slider:
+						return
+				self._syncing_slider = True
+				try:
+						self.setValue(self._coerce_value(float(slider_value) / self._slider_scale))
+				finally:
+						self._syncing_slider = False
+
+		def contextMenuEvent(self, event):
+				popup = _NumericAdjustPopup(self)
+				popup.show_at(event.globalPos())
+				event.accept()
+
+class _NumericAdjustPopup(QDialog):
+		def __init__(self, target):
+				super().__init__(target, Qt.Popup | Qt.FramelessWindowHint)
+				self._target = target
+				self.setAttribute(Qt.WA_DeleteOnClose, True)
+				root = QVBoxLayout(self)
+				btn_reset = QPushButton("恢复默认值")
+				btn_reset.clicked.connect(self._target.reset_to_default_value)
+				root.addWidget(btn_reset)
+				grid = QGridLayout()
+				self.min_spin = self._target._create_limit_editor(self._target.soft_min())
+				self.max_spin = self._target._create_limit_editor(self._target.soft_max())
+				grid.addWidget(QLabel("滑块下限"), 0, 0); grid.addWidget(self.min_spin, 0, 1)
+				grid.addWidget(QLabel("滑块上限"), 1, 0); grid.addWidget(self.max_spin, 1, 1)
+				root.addLayout(grid)
+				self.min_spin.valueChanged.connect(self._on_soft_range_changed)
+				self.max_spin.valueChanged.connect(self._on_soft_range_changed)
+
+		def _on_soft_range_changed(self, _value):
+				self._target.set_soft_range(self.min_spin.value(), self.max_spin.value())
+
+- 整型控件可封装 `_SoftRangeSpinBox(_SoftRangeNumberMixin, QSpinBox)`；浮点控件可封装 `_SoftRangeDoubleSpinBox(_SoftRangeNumberMixin, QDoubleSpinBox)`。
+- 页面里优先右键 spinbox 而不是右键 slider，本质上是“数值控件改 soft range，slider 只是显示和快调”。
+
+十一、HSL 颜色滑块（推荐标准做法）
+- 适用场景：颜色选择、动态配色、渐变端点、标签高亮等需要“可视化调色”的区域。
+- 推荐结构：顶部标题 + 颜色预览块 + 3 条 H/S/L 滑块；如果要兼容精确通道输入，可额外提供 RGB 组三滑块并允许切换。
+- 数值范围：
+	- H：`0~359`
+	- S：`0~100`
+	- L：`0~100`
+- 转换约定：
+	- Python `colorsys` 使用的是 `HLS` 顺序，因此 HSL 控件应调用 `colorsys.hls_to_rgb(h, l, s)` 与 `colorsys.rgb_to_hls(...)`；
+	- 对外仍然把 UI 文案和状态命名成 H/S/L，不改用户语义。
+- 核心交互：
+	1) 任一滑块变化后，立即刷新预览色块；
+	2) 任一滑块变化后，立即重算三条滑块的 groove 渐变；
+	3) 若同时存在 RGB 模式，模式切换时两组值必须双向同步，并在同步期间 `blockSignals(True)` 防止递归触发；
+	4) 黑/白/灰处于无稳定色相状态，RGB→HSL 时要保留当前 H/S，上下拖 L 到极值时不能突然跳回 0° 红色。
+
+- 三条滑块的渐变逻辑：
+	- H 滑块：固定当前 `S/L`，沿整条滑块覆盖一圈色相；建议 13 个 stop，包含首尾回到红色。
+	- S 滑块：固定当前 `H/L`，从灰阶到半饱和再到全饱和；建议 stop 为 `0.0 / 0.5 / 1.0`。
+	- L 滑块：固定当前 `H/S`，从黑到当前色相中亮度再到白；必须显式经过 `L=50` 的中点颜色，否则极值附近视觉会发飘。
+
+（推荐骨架）
+def _set_slider_gradient(slider, stops):
+		parts = []
+		for pos, (r, g, b) in stops:
+				parts.append(f"stop:{pos:.4f} rgb({int(r)},{int(g)},{int(b)})")
+		grad = "qlineargradient(x1:0, y1:0, x2:1, y2:0, " + ", ".join(parts) + ")"
+		slider.setStyleSheet(
+				"QSlider::groove:horizontal{height:7px;border-radius:4px;background:" + grad + ";}"
+				"QSlider::handle:horizontal{width:12px;margin:-4px 0;border-radius:6px;"
+				"background:rgba(255,255,255,210);border:1px solid rgba(0,0,0,120);}"
+		)
+
+def _hsl_to_rgb(h_deg, s_pct, l_pct):
+		h = (float(h_deg) % 360.0) / 360.0
+		s = max(0.0, min(1.0, float(s_pct) / 100.0))
+		l = max(0.0, min(1.0, float(l_pct) / 100.0))
+		r, g, b = colorsys.hls_to_rgb(h, l, s)
+		return (int(round(r * 255.0)), int(round(g * 255.0)), int(round(b * 255.0)))
+
+def _update_hsl_slider_gradients(self):
+		h = self._hue_slider.value()
+		s = self._sat_slider.value()
+		l = self._light_slider.value()
+
+		hue_stops = []
+		for i in range(13):
+				phase = i / 12.0
+				hue_stops.append((phase, _hsl_to_rgb(phase * 359.0, s, l)))
+		_set_slider_gradient(self._hue_slider, hue_stops)
+
+		_set_slider_gradient(self._sat_slider, [
+				(0.0, _hsl_to_rgb(h, 0.0, l)),
+				(0.5, _hsl_to_rgb(h, 50.0, l)),
+				(1.0, _hsl_to_rgb(h, 100.0, l)),
+		])
+
+		_set_slider_gradient(self._light_slider, [
+				(0.0, _hsl_to_rgb(h, s, 0.0)),
+				(0.5, _hsl_to_rgb(h, s, 50.0)),
+				(1.0, _hsl_to_rgb(h, s, 100.0)),
+		])
+
+def _rgb_to_hsl_preserving_context(self, rgb):
+		r, g, b = rgb
+		h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+		h = int(round(h * 359.0)); s = int(round(s * 100.0)); l = int(round(l * 100.0))
+		fallback_h = self._hue_slider.value()
+		fallback_s = self._sat_slider.value()
+		if s <= 0 or l <= 0 or l >= 100:
+				h = fallback_h
+		if l <= 0 or l >= 100:
+				s = fallback_s
+		return h, s, l
+
+- 预览块建议 `QFrame`，固定小尺寸如 `18x18`，`valueChanged` 后直接 `setStyleSheet("background:rgb(...)")`。
+- 若是小弹窗调色器，建议使用 `Qt.Popup | Qt.FramelessWindowHint`，并在 `exec()` 前移动到鼠标旁边，且限制在屏幕可视区域内。
+- 如需“拖一次就实时生效”，可在 `_on_any_changed()` 里直接向外 `emit(colorSelected)`，不强制用户点击“应用”。
+
+十二、尺寸与间距约定
 - 顶部信息行按钮：Fixed 尺寸；重要按钮可设置 setMinimumHeight(35)。
 - 预览 QLabel：setMinimumHeight(100) 保证可视；
 - 设置面板网格：grid.setContentsMargins(6,6,6,6)，行间距 4~8。
 - 主区 SizePolicy.Expanding，确保“内容优先填充”。
 
-十、页面模板（直接复用的最小骨架）
+十三、页面模板（直接复用的最小骨架）
 class BasePage(QWidget):
 		def __init__(self, parent=None, title="设置"):
 				super().__init__(parent)
@@ -129,14 +365,17 @@ class BasePage(QWidget):
 				self.mainView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 				root.addWidget(self.mainView, 1)
 
-十一、与现有代码一致的细节习惯
+十四、与现有代码一致的细节习惯
 - 箭头文案：“► 设置 / ▼ 设置”，或“► 预览 / ▼ 预览”。
 - 动画时长统一 250ms（设置类面板）/ 300ms（较大内容面板），缓动 InOutCubic/Quart。
 - 颜色获取优先 palette；仅在条形图“空条”使用 #555555。
 - HTML 输出中对每行进行转义（& < >），并用 <div style=white-space:pre> 包装；
 - Ctrl+滚轮 调整 QTextEdit 字号；用户滚动时临时关闭自动滚动，定时器再恢复。
+- 设置修改后默认自动写入配置；窗口重开后自动回放，不要求用户手动点“保存设置”。
+- 数值参数优先使用“hard range + soft range”双层范围；右键从 spinbox 改 soft range，不直接改 slider 类本身。
+- HSL 颜色滑块统一使用动态渐变 groove；RGB/HSL 双模式切换时保持双向同步，并保留灰阶/极值下的 H/S 上下文。
 
-十二、可选项（按需）
+十五、可选项（按需）
 - Windows 任务栏图标：在创建 QApplication 前调用 SetCurrentProcessExplicitAppUserModelID；
 - 应用图标：若脚本目录下存在 icon.ico，则 app.setWindowIcon(QIcon(path))，并对主窗口也 setWindowIcon。
 - Qt Designer 生成 UI：在入口检查 .ui 与 ui_*.py 时间戳，必要时用 pyside6-uic 重新生成。
@@ -144,9 +383,12 @@ class BasePage(QWidget):
 使用方式（建议）：
 1) 新页面按“页面模板”起步，保证顶部信息行 + 折叠设置 + 主内容三段式结构；
 2) 颜色/字体均走 palette + FixedFont；
-3) 复杂设置/预览使用 CollapsibleBox（必要时 Resizable 版本），统一箭头/动画；
-4) 列表使用 QScrollArea 容器 + 卡片（QFrame.StyledPanel）风格，选中高亮采用 Highlight 的半透明叠加；
-5) 日志/富文本统一通过 HTML 渲染（white-space: pre），并实现 Ctrl+滚轮缩放与自动滚动。
+3) 先接好配置自动保存与启动恢复，再继续补具体业务控件；
+4) 复杂设置/预览使用 CollapsibleBox（必要时 Resizable 版本），统一箭头/动画；
+5) 数值参数优先用“spinbox + slider”的软范围组合，默认带右键设置滑块上下限；
+6) 颜色参数优先用 HSL 三滑块，并为 H/S/L 分别生成对应渐变槽轨；
+7) 列表使用 QScrollArea 容器 + 卡片（QFrame.StyledPanel）风格，选中高亮采用 Highlight 的半透明叠加；
+8) 日志/富文本统一通过 HTML 渲染（white-space: pre），并实现 Ctrl+滚轮缩放与自动滚动。
 
 以上规范覆盖当前 QT/AYE 下 main、mf_pyside6、module1~4 的共同 UI 特征；按此约定组织新模块，可与现有界面保持同风格与交互手感。
 

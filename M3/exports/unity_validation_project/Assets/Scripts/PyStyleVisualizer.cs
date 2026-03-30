@@ -331,7 +331,7 @@ public class PyStyleVisualizer : MonoBehaviour
     private readonly List<Mesh> fillMeshes = new List<Mesh>();
     private readonly List<Material> fillMaterials = new List<Material>();
     private readonly List<LineRenderer> barRenderers = new List<LineRenderer>();
-    private readonly List<LineRenderer> tentacleRenderers = new List<LineRenderer>();
+    private readonly List<LineRenderer> tentacleSegmentRenderers = new List<LineRenderer>();
     private readonly Queue<LoudnessFrame> loudnessHistory = new Queue<LoudnessFrame>();
     private readonly Queue<SpectrumFrame> spectrumHistory = new Queue<SpectrumFrame>();
     private readonly Dictionary<string, float[]> objectLengthStates = new Dictionary<string, float[]>();
@@ -390,6 +390,22 @@ public class PyStyleVisualizer : MonoBehaviour
             this.start = start;
             this.end = end;
             this.color = color;
+        }
+    }
+
+    private struct TentacleWeightedSegment
+    {
+        public Vector3 start;
+        public Vector3 end;
+        public Color color;
+        public float thickness;
+
+        public TentacleWeightedSegment(Vector3 start, Vector3 end, Color color, float thickness)
+        {
+            this.start = start;
+            this.end = end;
+            this.color = color;
+            this.thickness = thickness;
         }
     }
 
@@ -945,12 +961,13 @@ public class PyStyleVisualizer : MonoBehaviour
         }
 
         lineMaterial = new Material(lineShader);
+        lineMaterial.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
 
-        // Tentacle-specific material with soft Gaussian edge texture (replicates QPainter anti-aliased RoundCap)
+        // Tentacle-specific material with soft edge texture and dedicated shader fallback chain.
         softLineTex = CreateSoftLineTexture();
-        tentacleMaterial = new Material(lineShader);
-        if (softLineTex != null)
-            tentacleMaterial.mainTexture = softLineTex;
+        Shader tentacleShader = FindTentacleShader(lineShader);
+        tentacleMaterial = new Material(tentacleShader != null ? tentacleShader : lineShader);
+        ConfigureTentacleMaterial(tentacleMaterial, softLineTex);
 
         bool[] layerEnabledStates =
         {
@@ -1060,24 +1077,26 @@ public class PyStyleVisualizer : MonoBehaviour
             barRenderers.Add(line);
         }
 
-        int tentacleCapacity = tentaclesEnabled && tentacleOn ? runtimeTentacleCount : 0;
+        int tentacleCapacity = tentaclesEnabled && tentacleOn ? EstimateTentacleSegmentRendererCapacity() : 0;
         for (int i = 0; i < tentacleCapacity; i++)
         {
-            GameObject tentacleObject = new GameObject($"Tentacle_{i}");
+            GameObject tentacleObject = new GameObject($"TentacleSegment_{i}");
             tentacleObject.transform.SetParent(transform, false);
 
             LineRenderer line = tentacleObject.AddComponent<LineRenderer>();
             line.material = tentacleMaterial != null ? tentacleMaterial : lineMaterial;
             line.loop = false;
+            line.positionCount = 2;
             line.useWorldSpace = false;
             line.textureMode = LineTextureMode.Stretch;
             line.alignment = LineAlignment.TransformZ;
             line.numCapVertices = 8;
             line.numCornerVertices = 8;
-            line.sortingOrder = 24 + i; // sequential: consistent visual stacking like Python draw order
+            line.sortingOrder = 24 + i;
             line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             line.receiveShadows = false;
-            tentacleRenderers.Add(line);
+            line.enabled = false;
+            tentacleSegmentRenderers.Add(line);
         }
     }
 
@@ -1140,14 +1159,14 @@ public class PyStyleVisualizer : MonoBehaviour
         }
         barRenderers.Clear();
 
-        foreach (LineRenderer line in tentacleRenderers)
+        foreach (LineRenderer line in tentacleSegmentRenderers)
         {
             if (line != null)
             {
                 SafeDestroy(line.gameObject);
             }
         }
-        tentacleRenderers.Clear();
+        tentacleSegmentRenderers.Clear();
 
         if (lineMaterial != null)
         {
@@ -1188,6 +1207,150 @@ public class PyStyleVisualizer : MonoBehaviour
         tex.wrapMode = TextureWrapMode.Clamp;
         tex.filterMode = FilterMode.Bilinear;
         return tex;
+    }
+
+    private static Shader FindTentacleShader(Shader fallback)
+    {
+        Shader shader = Shader.Find("AYE/TentacleSoftLine");
+        if (shader == null)
+        {
+            shader = Shader.Find("Particles/Standard Unlit");
+        }
+        if (shader == null)
+        {
+            shader = Shader.Find("Legacy Shaders/Particles/Additive");
+        }
+        if (shader == null)
+        {
+            shader = Shader.Find("Unlit/Transparent");
+        }
+        return shader != null ? shader : fallback;
+    }
+
+    private static void ConfigureTentacleMaterial(Material material, Texture2D softTexture)
+    {
+        if (material == null)
+        {
+            return;
+        }
+
+        TryAssignMainTexture(material, softTexture);
+        material.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+
+        SetFloatIfPresent(material, "_EdgeSoftness", 1.85f);
+        SetFloatIfPresent(material, "_CoreBoost", 0.72f);
+        SetFloatIfPresent(material, "_Emission", 0.28f);
+        SetFloatIfPresent(material, "_RimBoost", 0.12f);
+        SetColorIfPresent(material, "_Tint", Color.white);
+        SetColorIfPresent(material, "_BaseColor", Color.white);
+        SetColorIfPresent(material, "_Color", Color.white);
+    }
+
+    private static void TryAssignMainTexture(Material material, Texture2D softTexture)
+    {
+        if (material == null || softTexture == null)
+        {
+            return;
+        }
+
+        if (material.HasProperty("_MainTex"))
+        {
+            material.SetTexture("_MainTex", softTexture);
+        }
+        if (material.HasProperty("_BaseMap"))
+        {
+            material.SetTexture("_BaseMap", softTexture);
+        }
+    }
+
+    private static void SetFloatIfPresent(Material material, string propertyName, float value)
+    {
+        if (material != null && material.HasProperty(propertyName))
+        {
+            material.SetFloat(propertyName, value);
+        }
+    }
+
+    private static void SetColorIfPresent(Material material, string propertyName, Color value)
+    {
+        if (material != null && material.HasProperty(propertyName))
+        {
+            material.SetColor(propertyName, value);
+        }
+    }
+
+    private int EstimateTentacleSegmentRendererCapacity()
+    {
+        int cpMin = Mathf.Max(3, runtimeTentacleControlPointsMin);
+        int cpMax = Mathf.Max(cpMin, runtimeTentacleControlPointsMax);
+        int maxSplinePoints = Mathf.Max(cpMax * 12, 64);
+        int segmentsPerTentacle = Mathf.Max(2, maxSplinePoints - 1);
+        return Mathf.Max(0, runtimeTentacleCount) * segmentsPerTentacle;
+    }
+
+    private static List<TentacleWeightedSegment> BuildTentacleSegments(Vector3[] points, Color rootColor, Color tipColor, float alphaScale255, float rootThickness, float tipThickness, float alphaStart, float alphaEnd, float bias)
+    {
+        List<TentacleWeightedSegment> segments = new List<TentacleWeightedSegment>();
+        if (points == null || points.Length < 2)
+        {
+            return segments;
+        }
+
+        int segmentCount = points.Length - 1;
+        float clampedBias = Mathf.Max(0.01f, bias);
+        float alphaScale = Mathf.Clamp01(alphaScale255 / 255f);
+        for (int index = 0; index < segmentCount; index++)
+        {
+            float ratio = (index + 0.5f) / Mathf.Max(1f, segmentCount);
+            float gradientT = Mathf.Pow(ratio, clampedBias);
+            Color color = Color.Lerp(rootColor, tipColor, gradientT);
+            color.a = alphaScale * Mathf.Clamp01(Mathf.Lerp(alphaStart, alphaEnd, gradientT));
+            float thickness = Mathf.Max(0f, Mathf.Lerp(rootThickness, tipThickness, gradientT));
+            if (color.a <= 0.001f || thickness <= 0.0005f)
+            {
+                continue;
+            }
+            segments.Add(new TentacleWeightedSegment(points[index], points[index + 1], color, thickness));
+        }
+        return segments;
+    }
+
+    private void ApplyTentacleSegments(List<TentacleWeightedSegment> segments, ref int rendererIndex)
+    {
+        if (segments == null)
+        {
+            return;
+        }
+
+        for (int segmentIndex = 0; segmentIndex < segments.Count; segmentIndex++)
+        {
+            if (rendererIndex >= tentacleSegmentRenderers.Count)
+            {
+                return;
+            }
+
+            LineRenderer renderer = tentacleSegmentRenderers[rendererIndex++];
+            TentacleWeightedSegment segment = segments[segmentIndex];
+            renderer.enabled = true;
+            renderer.startWidth = segment.thickness;
+            renderer.endWidth = segment.thickness;
+            renderer.positionCount = 2;
+            renderer.SetPosition(0, segment.start);
+            renderer.SetPosition(1, segment.end);
+            renderer.startColor = segment.color;
+            renderer.endColor = segment.color;
+        }
+    }
+
+    private void DisableUnusedTentacleSegments(int rendererIndex)
+    {
+        for (int index = rendererIndex; index < tentacleSegmentRenderers.Count; index++)
+        {
+            if (tentacleSegmentRenderers[index] != null)
+            {
+                tentacleSegmentRenderers[index].enabled = false;
+            }
+        }
     }
 
     private void ProcessAudio()
@@ -1930,19 +2093,19 @@ public class PyStyleVisualizer : MonoBehaviour
 
     private void RenderTentacles(float[] outerRadii, float rotationRad, float segmentAngle)
     {
-        bool active = tentaclesEnabled && tentacleOn && tentacleRenderers.Count > 0;
+        bool active = tentaclesEnabled && tentacleOn && tentacleSegmentRenderers.Count > 0;
         if (!active)
         {
-            for (int index = 0; index < tentacleRenderers.Count; index++)
+            for (int index = 0; index < tentacleSegmentRenderers.Count; index++)
             {
-                if (tentacleRenderers[index] != null)
-                    tentacleRenderers[index].enabled = false;
+                if (tentacleSegmentRenderers[index] != null)
+                    tentacleSegmentRenderers[index].enabled = false;
             }
 
             return;
         }
 
-        int count = tentacleRenderers.Count;
+        int count = runtimeTentacleCount;
         float scale = Mathf.Max(0.01f, globalScale);
         float effectiveK = Mathf.Min(1f, Mathf.Log(1f + Mathf.Abs(EffectiveA1)) / 6f);
         float effectiveP = Mathf.Min(1f, Mathf.Log(1f + Mathf.Abs(CurrentP)) / 6f);
@@ -2052,12 +2215,9 @@ public class PyStyleVisualizer : MonoBehaviour
             }
         }
 
+        int rendererIndex = 0;
         for (int tentacleIndex = 0; tentacleIndex < count; tentacleIndex++)
         {
-            LineRenderer renderer = tentacleRenderers[tentacleIndex];
-            if (renderer == null)
-                continue;
-
             // Angle: evenly distributed + spinning core + K-driven wobble (M3 Python formula)
             float angle = tentacleCoreCurrentRotation + (tentacleIndex / (float)count) * Mathf.PI * 2f - Mathf.PI * 0.5f;
             angle += 0.08f * Mathf.Sin(timeNow * (0.35f + tentacleSwaySpeed * 0.25f) + tentacleIndex * 0.91f) * (0.2f + effectiveK * 0.8f);
@@ -2191,11 +2351,6 @@ public class PyStyleVisualizer : MonoBehaviour
             int splineCount = Mathf.Max(totalCtrl * 12, 64);
             Vector3[] points = BuildOpenSpline(ctrlPoints, splineCount);
 
-            renderer.enabled = true;
-            renderer.positionCount = points.Length;
-            renderer.SetPositions(points);
-            renderer.widthCurve = AnimationCurve.Linear(0f, width, 1f, tipWidth);
-
             // Mix base tentacle color with spectrum bar color (matching Python: root_color = lerp(base, spectrum, 0.35))
             int colorIdx = tentacleIndex % Mathf.Max(1, barColors != null ? barColors.Length : 1);
             Color spectrumColor = (barColors != null && barColors.Length > 0) ? barColors[colorIdx] : tentacleColor;
@@ -2204,33 +2359,23 @@ public class PyStyleVisualizer : MonoBehaviour
                 Mathf.Lerp(tentacleColor.g, spectrumColor.g, 0.35f),
                 Mathf.Lerp(tentacleColor.b, spectrumColor.b, 0.35f),
                 Mathf.Clamp01(tentacleAlpha / 255f));
-            if (!tentacleShaderEnabled)
-            {
-                renderer.startColor = rootColor;
-                renderer.endColor = rootColor;
-                continue;
-            }
-
             Color tipColor = tentacleShaderTipColor;
-            tipColor.a = Mathf.Clamp01((tentacleAlpha / 255f) * Mathf.Clamp01(tentacleShaderAlphaEnd));
             rootColor.a = Mathf.Clamp01((tentacleAlpha / 255f) * Mathf.Clamp01(shaderAlphaStart));
-            Gradient gradient = new Gradient();
-            float midPoint = Mathf.Clamp01(1f / Mathf.Max(1f, tentacleShaderBias + 1f));
-            gradient.SetKeys(
-                new GradientColorKey[]
-                {
-                    new GradientColorKey(rootColor, 0f),
-                    new GradientColorKey(Color.Lerp(rootColor, tipColor, 0.35f), midPoint),
-                    new GradientColorKey(tipColor, 1f),
-                },
-                new GradientAlphaKey[]
-                {
-                    new GradientAlphaKey(rootColor.a, 0f),
-                    new GradientAlphaKey(Mathf.Lerp(rootColor.a, tipColor.a, 0.5f), midPoint),
-                    new GradientAlphaKey(tipColor.a, 1f),
-                });
-            renderer.colorGradient = gradient;
+            tipColor.a = Mathf.Clamp01((tentacleAlpha / 255f) * Mathf.Clamp01(tentacleShaderEnabled ? tentacleShaderAlphaEnd : 1f));
+            List<TentacleWeightedSegment> segments = BuildTentacleSegments(
+                points,
+                rootColor,
+                tentacleShaderEnabled ? tipColor : rootColor,
+                tentacleAlpha,
+                width,
+                tipWidth,
+                tentacleShaderEnabled ? shaderAlphaStart : 1f,
+                tentacleShaderEnabled ? tentacleShaderAlphaEnd : 1f,
+                tentacleShaderBias);
+            ApplyTentacleSegments(segments, ref rendererIndex);
         }
+
+        DisableUnusedTentacleSegments(rendererIndex);
     }
 
     private void RenderTentacleCore()

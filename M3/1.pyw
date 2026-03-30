@@ -14,7 +14,14 @@ import queue
 import time
 
 import numpy as np
-from scipy.interpolate import BSpline
+
+try:
+    from scipy.interpolate import BSpline
+    _HAS_SCIPY_BSPLINE = True
+except Exception:
+    BSpline = None
+    _HAS_SCIPY_BSPLINE = False
+    print("⚠ SciPy BSpline 不可用 — 使用线性插值降级渲染")
 
 from OpenGL import GL
 
@@ -1100,13 +1107,14 @@ class CircularVisualizerWindow(QWidget):
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
         layer = self.config.get("window_layer", "top" if self.config.get("always_on_top", True) else "normal")
+        flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
         if layer == "bottom":
-            z_order = HWND_BOTTOM
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+            user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags)
         elif layer == "top":
-            z_order = HWND_TOPMOST
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
         else:
-            z_order = HWND_NOTOPMOST
-        user32.SetWindowPos(hwnd, z_order, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
 
         opacity = max(0.05, min(1.0, self.window_alpha / 255.0))
         self.setWindowOpacity(opacity)
@@ -1116,6 +1124,9 @@ class CircularVisualizerWindow(QWidget):
         count = len(ctrl_points)
         if count < 4:
             return None
+
+        if not _HAS_SCIPY_BSPLINE:
+            return self._densify_polyline(ctrl_points, subdivisions=8, closed=True)
 
         degree = 3
         ctrl = np.asarray(ctrl_points, dtype=float)
@@ -1134,6 +1145,9 @@ class CircularVisualizerWindow(QWidget):
         count = len(ctrl_points)
         if count < 2:
             return None
+
+        if not _HAS_SCIPY_BSPLINE:
+            return self._densify_polyline(ctrl_points, subdivisions=12, closed=False)
 
         degree = min(3, count - 1)
         ctrl = np.asarray(ctrl_points, dtype=float)
@@ -1201,6 +1215,28 @@ class CircularVisualizerWindow(QWidget):
             radius = outer_radius if index % 2 == 0 else inner_radius
             points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
         return points
+
+    @staticmethod
+    def _densify_polyline(points, subdivisions=12, closed=False):
+        if not points:
+            return []
+        if len(points) == 1:
+            return [points[0]]
+
+        subdivisions = max(1, int(subdivisions))
+        dense_points = []
+        limit = len(points) if closed else len(points) - 1
+        for index in range(limit):
+            start = points[index]
+            end = points[(index + 1) % len(points)]
+            for step in range(subdivisions):
+                ratio = step / subdivisions
+                dense_points.append((
+                    float(start[0]) + (float(end[0]) - float(start[0])) * ratio,
+                    float(start[1]) + (float(end[1]) - float(start[1])) * ratio,
+                ))
+        dense_points.append(points[0] if closed else points[-1])
+        return dense_points
 
     def _build_tentacle_segments(self, points, root_color, tip_color, alpha_scale, root_thickness, tip_thickness, alpha_start, alpha_end, bias):
         if not points or len(points) < 2:

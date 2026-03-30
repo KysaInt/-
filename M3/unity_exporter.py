@@ -5,10 +5,14 @@ import re
 from pathlib import Path
 
 
-REFERENCE_UNITY_SCRIPTS_DIR = Path(r"C:\Users\94230\Desktop\UNITY PROJECT\AYE_P01\Assets\Scripts")
 FALLBACK_EXPORT_DIR = Path(__file__).parent / "exports" / "unity"
-REFERENCE_PY_STYLE_VISUALIZER = REFERENCE_UNITY_SCRIPTS_DIR / "PyStyleVisualizer.cs"
-REFERENCE_WINDOWS_AUDIO_CAPTURE = REFERENCE_UNITY_SCRIPTS_DIR / "WindowsAudioCapture.cs"
+BUNDLED_UNITY_ASSETS_DIR = Path(__file__).parent / "exports" / "unity_validation_project" / "Assets"
+BUNDLED_UNITY_SCRIPTS_DIR = BUNDLED_UNITY_ASSETS_DIR / "Scripts"
+BUNDLED_UNITY_SHADERS_DIR = BUNDLED_UNITY_ASSETS_DIR / "Shaders"
+REFERENCE_UNITY_SCRIPTS_DIR = BUNDLED_UNITY_SCRIPTS_DIR
+REFERENCE_PY_STYLE_VISUALIZER = BUNDLED_UNITY_SCRIPTS_DIR / "PyStyleVisualizer.cs"
+REFERENCE_WINDOWS_AUDIO_CAPTURE = BUNDLED_UNITY_SCRIPTS_DIR / "WindowsAudioCapture.cs"
+REFERENCE_TENTACLE_SHADER = BUNDLED_UNITY_SHADERS_DIR / "AyeTentacleSoftLine.shader"
 
 _REFERENCE_RUNTIME_FILES = {
     "PyStyleVisualizer.cs": REFERENCE_PY_STYLE_VISUALIZER,
@@ -123,12 +127,20 @@ def build_unity_audio_file_driver_path(project_dir: str | Path | None) -> Path |
     return normalized_project_dir / "Assets" / "Scripts" / "AyeExportAudioFileDriver.cs"
 
 
+def build_unity_tentacle_shader_path(project_dir: str | Path | None) -> Path | None:
+    normalized_project_dir = normalize_unity_project_dir(project_dir=project_dir)
+    if not normalized_project_dir:
+        return None
+    return normalized_project_dir / "Assets" / "Shaders" / "AyeTentacleSoftLine.shader"
+
+
 def list_unity_shared_prerequisite_paths(project_dir: str | Path | None) -> list[Path]:
     paths: list[Path] = []
     py_style_visualizer_path = build_unity_py_style_visualizer_path(project_dir)
     windows_audio_capture_path = build_unity_windows_audio_capture_path(project_dir)
     audio_file_driver_path = build_unity_audio_file_driver_path(project_dir)
     camera_controller_path = build_unity_camera_controller_path(project_dir)
+    tentacle_shader_path = build_unity_tentacle_shader_path(project_dir)
     if py_style_visualizer_path is not None:
         paths.append(py_style_visualizer_path)
     if windows_audio_capture_path is not None:
@@ -137,6 +149,8 @@ def list_unity_shared_prerequisite_paths(project_dir: str | Path | None) -> list
         paths.append(audio_file_driver_path)
     if camera_controller_path is not None:
         paths.append(camera_controller_path)
+    if tentacle_shader_path is not None:
+        paths.append(tentacle_shader_path)
     return paths
 
 
@@ -244,6 +258,13 @@ def ensure_unity_shared_prerequisites(project_dir: str | Path | None, *, has_aud
         _write_text_if_changed(
             camera_controller_path,
             build_unity_camera_controller_source(),
+        )
+
+    tentacle_shader_path = build_unity_tentacle_shader_path(project_dir)
+    if tentacle_shader_path and REFERENCE_TENTACLE_SHADER.exists():
+        _write_text_if_changed(
+            tentacle_shader_path,
+            REFERENCE_TENTACLE_SHADER.read_text(encoding="utf-8"),
         )
 
 
