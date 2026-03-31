@@ -134,6 +134,16 @@ def build_unity_tentacle_shader_path(project_dir: str | Path | None) -> Path | N
     return normalized_project_dir / "Assets" / "Shaders" / "AyeTentacleSoftLine.shader"
 
 
+def list_unity_legacy_conflicting_paths(project_dir: str | Path | None) -> list[Path]:
+    normalized_project_dir = normalize_unity_project_dir(project_dir=project_dir)
+    if not normalized_project_dir:
+        return []
+    scripts_dir = normalized_project_dir / "Assets" / "Scripts"
+    return [
+        scripts_dir / "PyStyleVisualizer-K.cs",
+    ]
+
+
 def list_unity_shared_prerequisite_paths(project_dir: str | Path | None) -> list[Path]:
     paths: list[Path] = []
     py_style_visualizer_path = build_unity_py_style_visualizer_path(project_dir)
@@ -218,6 +228,19 @@ def export_unity_component(config: dict, preset_name: str, output_path: str | Pa
             wrapper_meta_target.unlink()
         except Exception:
             pass
+
+    for legacy_target in list_unity_legacy_conflicting_paths(project_dir):
+        if legacy_target.exists():
+            try:
+                legacy_target.unlink()
+            except Exception:
+                pass
+        legacy_meta_target = Path(f"{legacy_target}.meta")
+        if legacy_meta_target.exists():
+            try:
+                legacy_meta_target.unlink()
+            except Exception:
+                pass
     return target
 
 
