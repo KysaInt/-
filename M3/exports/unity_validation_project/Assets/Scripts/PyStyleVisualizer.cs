@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 [Serializable]
 public class PyStyleGradientPoint
@@ -25,6 +28,7 @@ public class PyStyleGradientPoint
 /// Mirrors the original Python behavior with log bins, K1/K2,
 /// closed B-spline contours, peak decay layers, and fixed bar links.
 /// </summary>
+[ExecuteAlways]
 public class PyStyleVisualizer : MonoBehaviour
 {
     [Header("Core")]
@@ -341,6 +345,11 @@ public class PyStyleVisualizer : MonoBehaviour
     private Vector2[][] tentacleVelocities;
     private bool[] tentacleInitialized;
     private int[] tentacleControlPointCounts;
+    private float runtimeTimeNow;
+    private float runtimeDeltaTime = 1f / 60f;
+#if UNITY_EDITOR
+    private double editorLastUpdateTime = double.NaN;
+#endif
     private int tentaclePhysicsSegments;
     private float tentacleCoreCurrentRotation;
     private float tentacleCoreAngularVelocity;
@@ -411,6 +420,7 @@ public class PyStyleVisualizer : MonoBehaviour
 
     private void Start()
     {
+        UpdateRuntimeClock();
         EnsureGradientPoints();
         RebuildRuntimeState(true);
         if (autoFrameMainCamera)
@@ -421,6 +431,7 @@ public class PyStyleVisualizer : MonoBehaviour
 
     private void Update()
     {
+        UpdateRuntimeClock();
         EnsureGradientPoints();
         EnsureRuntimeState();
         ProcessAudio();
@@ -430,6 +441,37 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             UpdateCameraFrame();
         }
+    }
+
+    private void OnEnable()
+    {
+#if UNITY_EDITOR
+        editorLastUpdateTime = double.NaN;
+#endif
+        runtimeDeltaTime = 1f / 60f;
+    }
+
+    private void UpdateRuntimeClock()
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            double editorNow = EditorApplication.timeSinceStartup;
+            runtimeTimeNow = (float)editorNow;
+            if (double.IsNaN(editorLastUpdateTime))
+            {
+                runtimeDeltaTime = 1f / 60f;
+            }
+            else
+            {
+                runtimeDeltaTime = Mathf.Clamp((float)(editorNow - editorLastUpdateTime), 1f / 240f, 0.1f);
+            }
+            editorLastUpdateTime = editorNow;
+            return;
+        }
+#endif
+        runtimeTimeNow = Time.unscaledTime;
+        runtimeDeltaTime = Mathf.Max(1f / 240f, Time.unscaledDeltaTime > 0f ? Time.unscaledDeltaTime : Time.deltaTime);
     }
 
     public void RefreshRuntimeForExport()
@@ -838,7 +880,7 @@ public class PyStyleVisualizer : MonoBehaviour
             spectrumHistory.Clear();
         }
 
-        float now = Time.unscaledTime;
+        float now = runtimeTimeNow;
         float[] snapshot = new float[values.Length];
         Array.Copy(values, snapshot, values.Length);
         spectrumHistory.Enqueue(new SpectrumFrame(now, snapshot));
@@ -1357,7 +1399,7 @@ public class PyStyleVisualizer : MonoBehaviour
     {
         if (useExternalData)
         {
-            externalDataTimeout -= Time.deltaTime;
+            externalDataTimeout -= runtimeDeltaTime;
             if (externalDataTimeout <= 0f)
             {
                 useExternalData = false;
@@ -1369,7 +1411,7 @@ public class PyStyleVisualizer : MonoBehaviour
             Array.Clear(spectrumData, 0, spectrumData.Length);
         }
 
-        externalLoudnessTimeout -= Time.deltaTime;
+        externalLoudnessTimeout -= runtimeDeltaTime;
         float loudness = externalLoudnessTimeout > 0f ? lastExternalLoudness : EstimateSpectrumLoudness();
         UpdateA1(loudness);
     }
@@ -1413,7 +1455,7 @@ public class PyStyleVisualizer : MonoBehaviour
 
     private void UpdateA1(float loudness)
     {
-        float now = Time.unscaledTime;
+        float now = runtimeTimeNow;
         loudnessHistory.Enqueue(new LoudnessFrame(now, loudness));
 
         float cutoff = now - Mathf.Max(0.01f, a1TimeWindow);
@@ -1489,8 +1531,8 @@ public class PyStyleVisualizer : MonoBehaviour
             float riseResponse = Mathf.Lerp(18f, 48f, 1f - hold);
             float fallResponse = Mathf.Lerp(2.5f, 16f, 1f - hold);
             float response = mappedHeight >= previous
-                ? 1f - Mathf.Exp(-riseResponse * Time.unscaledDeltaTime)
-                : 1f - Mathf.Exp(-fallResponse * Time.unscaledDeltaTime);
+                ? 1f - Mathf.Exp(-riseResponse * runtimeDeltaTime)
+                : 1f - Mathf.Exp(-fallResponse * runtimeDeltaTime);
 
             // Fast attack for sharp gear-like bursts, slower release for a calmer return to circle.
             smoothedBarValues[barIndex] = Mathf.Lerp(previous, mappedHeight, response);
@@ -1559,7 +1601,7 @@ public class PyStyleVisualizer : MonoBehaviour
         currentRadius = Mathf.Max(10f, currentRadius + radiusVelocity);
 
         float[] barValues = GetBarValues();
-        float frameScale = Mathf.Clamp(Time.deltaTime * 60f, 0.25f, 3f);
+        float frameScale = Mathf.Clamp(runtimeDeltaTime * 60f, 0.25f, 3f);
         float minInternal = Mathf.Min(barInternalMin, barInternalMax);
         float maxInternal = Mathf.Max(barInternalMin, barInternalMax);
         float defaultHeight = GetDefaultBarHeight();
@@ -1653,7 +1695,7 @@ public class PyStyleVisualizer : MonoBehaviour
         {
             float speed = Mathf.Pow(Mathf.Max(0.01f, colorCycleSpeed), Mathf.Max(0.01f, colorCyclePow));
             float follow = colorCycleFollowsAudio ? 1f + Mathf.Clamp(Mathf.Abs(EffectiveA1) / 1000f, 0f, 4f) : 1f;
-            colorCycleHue = Mathf.Repeat(colorCycleHue + Time.deltaTime * 0.05f * speed * follow, 1f);
+            colorCycleHue = Mathf.Repeat(colorCycleHue + runtimeDeltaTime * 0.05f * speed * follow, 1f);
         }
 
         for (int index = 0; index < runtimeNumBars; index++)
@@ -1856,13 +1898,18 @@ public class PyStyleVisualizer : MonoBehaviour
             }
         }
 
-        foreach (LineRenderer line in tentacleRenderers)
+            foreach (LineRenderer line in tentacleSegmentRenderers)
         {
             if (line != null)
             {
                 line.enabled = false;
             }
         }
+
+            if (tentacleCoreRenderer != null)
+            {
+                tentacleCoreRenderer.enabled = false;
+            }
     }
 
     private void RenderLayer(int layerIndex, List<Vector3> points, bool enabled, Color baseColor, int alpha, int thickness, bool fillEnabled, int fillAlpha)
@@ -2161,7 +2208,7 @@ public class PyStyleVisualizer : MonoBehaviour
         float stretchResponse = 0.04f + tentacleLengthStiffness * 0.16f;
         float followResponse = 0.06f + (tentacleAngleStiffness + tentacleLengthStiffness) * 0.08f;
         float swayDensity = Mathf.Max(0.1f, tentacleSwayDensity);
-        float timeNow = Time.unscaledTime;
+        float timeNow = runtimeTimeNow;
         float flowTime = timeNow * (0.18f + tentacleSwaySpeed * 0.18f);
 
         // K-driven turbulence coefficient (matching M3 Python logic)

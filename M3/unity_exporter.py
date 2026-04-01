@@ -475,6 +475,7 @@ def build_unity_runtime_host_source(config: dict, *, preset_name: str, class_nam
         "            visualizer.autoFrameMainCamera = false;\n"
         + visualizer_block + "\n"
         "            NormalizeVisualizerVisibility(visualizer);\n"
+        "            visualizer.RefreshRuntimeForExport();\n"
         "        }\n\n"
         + windows_capture_apply
         + audio_driver_apply + "\n"
