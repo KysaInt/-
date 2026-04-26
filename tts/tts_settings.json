@@ -6,8 +6,7 @@
   "subtitle_lines": 1,
   "subtitle_rule": "rule_2",
   "selected_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural",
-    "zh-CN-YunyiMultilingualNeural"
+    "zh-CN-XiaoxiaoMultilingualNeural"
   ],
   "voice_rate": "+0%",
   "voice_pitch": "+0Hz",
@@ -18,19 +17,24 @@
   "voice_role": "",
   "panel_states": {
     "settings": true,
-    "text": false,
-    "voice": true,
-    "log": false
+    "text": true,
+    "output": true,
+    "voice": false
   },
   "window_geometry": [
     9,
     9,
-    709,
+    574,
     960
   ],
   "tts_mode": "azure",
-  "azure_tts_endpoint": "",
+  "azure_tts_endpoint": "https://eastasia.api.cognitive.microsoft.com/",
+  "azure_speech_keys": [
+    "BBjGkfyLnMMmgmuUF4Tz7pAzLF1rEto1W7vJGHqNuGTH4TbcBvTXJQQJ99BLAC3pKaRXJ3w3AAAYACOGwrGt",
+    "GAwRfSs0jcb3WuAoIhLxsYLCB5qbTsSqwJXciVx5qINPGd9nuzu1JQQJ99BLAC3pKaRXJ3w3AAAYACOGFs1O"
+  ],
   "ssml_line_break_ms": 0,
   "ssml_emphasis_level": "",
-  "azure_sentence_silence_ms": 0
+  "azure_sentence_silence_ms": 0,
+  "punctuation_enabled": false
 }

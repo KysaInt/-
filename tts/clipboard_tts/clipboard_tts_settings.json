@@ -1,7 +1,7 @@
 {
   "hotkey": "ctrl+alt+t",
   "checked_voices": [
-    "zh-CN-XiaoxiaoNeural"
+    "zh-CN-XiaoxiaoMultilingualNeural"
   ],
   "output_device_id": 3,
   "monitor_device_id": 3,
@@ -34,9 +34,9 @@
     "亚洲||zh-TW (中文)"
   ],
   "window_geometry": [
-    835,
-    121,
-    520,
+    1237,
+    100,
+    688,
     1086
   ],
   "voice_rate": "+25%",

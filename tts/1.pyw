@@ -549,6 +549,16 @@ _EDGE_REFRESH_LOCK = threading.Lock()
 # 避免网络卡死导致“没有任何结果发回”
 _EDGE_TTS_SAVE_TIMEOUT: float = 120.0  # 秒
 
+
+def _has_azure_tts_config(endpoint: str = "", region: str = "", keys: list[str] | None = None) -> bool:
+    if keys is None:
+        keys = []
+
+    resolved_endpoint = _normalize_azure_speech_endpoint(endpoint_or_base=endpoint, region=region)
+    has_endpoint = bool((resolved_endpoint or "").strip())
+    has_keys = any(str(key).strip() for key in keys)
+    return has_endpoint and has_keys
+
 async def refresh_edge_tts_key_async(force: bool = True) -> bool:
     """刷新 edge-tts 内部鉴权/配置。
 
@@ -1617,11 +1627,11 @@ class TTSApp(QWidget):
         self.azure_tts_endpoint: str = _DEFAULT_AZURE_ENDPOINT_BASE
         self.azure_speech_keys: list[str] = []
 
-        # 模式选择（满行下拉栏，默认 Azure）
+        # 模式选择（满行下拉栏，默认 Edge；仅在 Azure 配置可用时保留 Azure）
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Azure 模式", "azure")
         self.mode_combo.addItem("Edge 模式", "edge")
-        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData("edge"))
         self.mode_combo.setToolTip("选择 TTS 接口模式：Azure Speech（官方）或 Edge（免 Key）。")
         self.mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -3002,8 +3012,38 @@ class TTSApp(QWidget):
             else:
                 self.azure_speech_keys = []
 
-            # 恢复模式选择（默认 Azure）
-            mode_value = str(data.get("tts_mode", "azure") or "azure")
+            # 若 Azure 配置不完整，则回退到 Edge，避免因旧 Key/空 Key 导致启动即不可用。
+            saved_mode = str(data.get("tts_mode", "edge") or "edge").strip().lower()
+            azure_available = _has_azure_tts_config(
+                endpoint=self.azure_tts_endpoint,
+                region=self.azure_speech_region,
+                keys=self.azure_speech_keys,
+            ) or _has_azure_tts_config(
+                endpoint=_get_env_var("AZURE_TTS_ENDPOINT") or _get_env_var("AZURE_SPEECH_ENDPOINT") or "",
+                region=(
+                    _get_env_var("AZURE_SPEECH_REGION")
+                    or _get_env_var("AZURE_TTS_REGION")
+                    or _get_env_var("AZURE_REGION")
+                    or ""
+                ),
+                keys=(
+                    [k.strip() for k in ((_get_env_var("AZURE_SPEECH_KEYS") or _get_env_var("AZURE_TTS_KEYS") or "").split(",")) if k.strip()]
+                    or [
+                        k.strip()
+                        for k in [
+                            _get_env_var("AZURE_SPEECH_KEY") or _get_env_var("AZURE_TTS_KEY") or "",
+                            _get_env_var("AZURE_SPEECH_KEY2") or _get_env_var("AZURE_TTS_KEY2") or "",
+                        ]
+                        if k.strip()
+                    ]
+                ),
+            )
+
+            mode_value = saved_mode
+            if saved_mode == "azure" and not azure_available:
+                mode_value = "edge"
+                self.log_view.append("提示：未检测到可用的 Azure Endpoint/Key，已自动切换到 Edge 模式。")
+
             mode_index = self.mode_combo.findData(mode_value)
             if mode_index != -1:
                 self.mode_combo.setCurrentIndex(mode_index)
@@ -3183,7 +3223,7 @@ class TTSApp(QWidget):
             "subtitle_lines": max(1, min(10, subtitle_lines)),
             "subtitle_rule": self.subtitle_rule_combo.currentData(),
             "selected_voices": self.get_selected_voices(),
-            "tts_mode": self.mode_combo.currentData() or "azure",
+            "tts_mode": self.mode_combo.currentData() or "edge",
             "voice_rate": self._get_rate_text(),
             "voice_pitch": self.pitch_combo.currentText(),
             "voice_volume": self.volume_combo.currentText(),
@@ -3296,7 +3336,7 @@ class TTSApp(QWidget):
             worker = TTSWorker(
                 voice=voice,
                 parent=self,
-                tts_mode=str(self.mode_combo.currentData() or "azure"),
+                tts_mode=str(self.mode_combo.currentData() or "edge"),
                 srt_enabled=srt_enabled,
                 line_length=line_length_value,
                 convert_punctuation=convert_punctuation,
