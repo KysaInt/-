@@ -246,18 +246,36 @@ class Widget(QWidget):
             self.ui.navigationList.setCurrentRow(0)
             self.ui.stackedWidget.setCurrentIndex(0)
 
-        # 使用 QTimer 在后台逐个加载模块，不阻塞 UI
-        self._load_index = 0
-        print("Starting background plugin preloading...")
+        # 启动时仅加载当前页，避免隐藏模块在预加载阶段启动后台线程
         if self.plugins:
-            QTimer.singleShot(100, self._preload_next_module)
+            QTimer.singleShot(0, lambda: self._ensure_module_loaded(0))
+
+    def _ensure_module_loaded(self, module_index):
+        if module_index in self.module_widgets:
+            return True
+
+        if module_index < 0 or module_index >= len(self.plugins):
+            return False
+
+        plugin = self.plugins[module_index]
+        module_name = plugin["name"]
+        display_name = plugin["title"]
+
+        print(f"[LOAD] Loading module {module_index+1}: {module_name}...")
+        try:
+            self._load_module_blocking(module_index, module_name, display_name)
+            print(f"  [OK] Module {module_index+1} loaded")
+            return True
+        except Exception as e:
+            print(f"  [ERR] Failed to load module {module_index+1}: {e}")
+            return False
     
     def _preload_next_module(self):
         """在后台逐个预加载模块"""
         from PySide6.QtCore import QTimer
         
         if self._load_index >= len(self.plugins):
-            print("✓ All modules preloaded!")
+            print("[OK] All modules preloaded!")
             return
         
         plugin = self.plugins[self._load_index]
@@ -265,12 +283,12 @@ class Widget(QWidget):
         display_name = plugin["title"]
         module_index = self._load_index
         
-        print(f"⏳ Preloading module {module_index+1}: {module_name}...")
+        print(f"[LOAD] Preloading module {module_index+1}: {module_name}...")
         try:
             self._load_module_blocking(module_index, module_name, display_name)
-            print(f"  ✓ Module {module_index+1} preloaded")
+            print(f"  [OK] Module {module_index+1} preloaded")
         except Exception as e:
-            print(f"  ✗ Failed to preload module {module_index+1}: {e}")
+            print(f"  [ERR] Failed to preload module {module_index+1}: {e}")
         
         self._load_index += 1
         
@@ -289,19 +307,19 @@ class Widget(QWidget):
         try:
             module = importlib.import_module(module_name)
         except Exception as e:
-            print(f"  ✗ Import failed for {module_name}: {e}")
+            print(f"  [ERR] Import failed for {module_name}: {e}")
             return
 
         if hasattr(module, "create_widget") and callable(getattr(module, "create_widget")):
             try:
                 widget_instance = module.create_widget(self)
             except Exception as e:
-                print(f"  ✗ create_widget() failed in {module_name}: {e}")
+                print(f"  [ERR] create_widget() failed in {module_name}: {e}")
                 return
         else:
             widget_class = load_module_widget(module_name)
             if widget_class is None:
-                print(f"  ⚠️  Warning: Could not find widget class in module {module_name}")
+                print(f"  [WARN] Could not find widget class in module {module_name}")
                 return
             widget_instance = widget_class(self)
 
@@ -326,10 +344,13 @@ class Widget(QWidget):
     def _on_navigation_clicked(self, item):
         """导航项被点击时的回调 - 现在只需要切换，不需要加载"""
         index = self.ui.navigationList.row(item)
+
+        if not self._ensure_module_loaded(index):
+            return
         
         # 直接切换（因为所有模块都已预加载）
         self.ui.stackedWidget.setCurrentIndex(index)
-        print(f"✓ Switched to module {index + 1} (instant)")
+        print(f"[OK] Switched to module {index + 1} (instant)")
 
 
 if __name__ == "__main__":
