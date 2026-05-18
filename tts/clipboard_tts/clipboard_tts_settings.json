@@ -1,8 +1,6 @@
 {
   "hotkey": "ctrl+alt+t",
-  "checked_voices": [
-    "zh-CN-XiaoxiaoMultilingualNeural"
-  ],
+  "checked_voices": [],
   "output_device_id": 3,
   "monitor_device_id": 3,
   "output_dir_enabled": false,
@@ -19,9 +17,7 @@
     267
   ],
   "saved_panel_sizes": {},
-  "expanded_regions": [
-    "亚洲"
-  ],
+  "expanded_regions": [],
   "expanded_languages": [
     "亚洲||ja-JP (日语)",
     "亚洲||zh-CN (中文)",
@@ -34,8 +30,8 @@
     "亚洲||zh-TW (中文)"
   ],
   "window_geometry": [
-    1237,
-    100,
+    1339,
+    298,
     688,
     1086
   ],
