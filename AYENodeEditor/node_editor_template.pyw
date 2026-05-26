@@ -102,6 +102,7 @@ class CollapsibleBox(QWidget):
         self.anim.setEasingCurve(QEasingCurve.InOutCubic)
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
         lay.addWidget(self.toggle_button); lay.addWidget(self.content_area)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.toggle_button.clicked.connect(self._on_toggled)
         self._update_arrow(False)
 

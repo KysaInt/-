@@ -84,6 +84,7 @@ class CollapsibleBox(QWidget):
         main_layout.addWidget(self.toggle_button)
         main_layout.addWidget(self.content_area)
 
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.toggle_button.clicked.connect(self.toggle)
         self.update_arrow(False)
         

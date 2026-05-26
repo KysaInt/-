@@ -23,8 +23,7 @@ AYE PySide6 UI 风格规范（精简版）
 - 常用实现要点：
 	1) toggle_button.setCheckable(True)，checked 决定展开。
 	2) content_area 初始 maximumHeight=0（收起）；展开时设为 sizeHint 高度或“可扩展上限”。
-	3) setContentLayout(newLayout) 前先清空旧 layout 的子控件，避免泄漏与叠加。
-
+	3) setContentLayout(newLayout) 前先清空旧 layout 的子控件，避免泄漏与叠加。	4) ★ 必须给 CollapsibleBox 自身设置 setSizePolicy(Preferred, Maximum)，否则折叠后父 layout 会把多余空间均分给各 Box，造成 y 向平铺撑开、弹簧失效。若需要某个 Box 展开时填满剩余空间（expand_flex），则在展开时切换为 setSizePolicy(Expanding, Expanding)，折叠时再切回 Fixed。
 （精简参考实现）
 class CollapsibleBox(QWidget):
 		def __init__(self, title="", parent=None, duration=250):
@@ -39,6 +38,8 @@ class CollapsibleBox(QWidget):
 				self.anim.setDuration(duration); self.anim.setEasingCurve(QEasingCurve.InOutCubic)
 				lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
 				lay.addWidget(self.toggle_button); lay.addWidget(self.content_area)
+				# ★ 关键：防止折叠后被父 layout 拉伸撑开——高度最多等于 sizeHint（即 button 高）
+				self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 				self.toggle_button.clicked.connect(self._on_toggled)
 				self._update_arrow(False)
 

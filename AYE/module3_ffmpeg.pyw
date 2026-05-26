@@ -109,6 +109,8 @@ class CollapsibleBox(QWidget):
 
     def _apply_expand_flex_constraints(self, expanded):
         if not self.expand_flex:
+            # 非弹性面板：使用 Maximum 策略，折叠后不被 layout 拉伸
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             return
         if expanded:
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)

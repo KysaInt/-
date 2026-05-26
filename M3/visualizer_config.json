@@ -8,8 +8,8 @@
   "pos_y": -1,
   "drag_adjust_mode": false,
   "bg_transparent": true,
-  "always_on_top": false,
-  "window_layer": "normal",
+  "always_on_top": true,
+  "window_layer": "top",
   "num_bars": 4,
   "smoothing": 0.7,
   "k_rise_damping": 0.1,
@@ -31,46 +31,54 @@
     [
       0.0,
       [
-        172,
-        161,
-        255
+        108,
+        21,
+        52
+      ]
+    ],
+    [
+      0.33,
+      [
+        98,
+        112,
+        21
+      ]
+    ],
+    [
+      0.67,
+      [
+        102,
+        116,
+        21
       ]
     ],
     [
       1.0,
       [
-        176,
-        255,
-        218
-      ]
-    ],
-    [
-      0.5,
-      [
-        246,
-        255,
-        142
+        105,
+        120,
+        21
       ]
     ]
   ],
-  "gradient_enabled": false,
-  "gradient_mode": "frequency",
-  "color_dynamic": true,
-  "color_cycle_speed": 1.7,
-  "color_cycle_pow": 2.68,
-  "color_cycle_a1": true,
+  "gradient_enabled": true,
+  "gradient_mode": "height",
+  "color_dynamic": false,
+  "color_cycle_speed": 1.27,
+  "color_cycle_pow": 2.259,
+  "color_cycle_a1": false,
   "circle_radius": 300,
   "circle_segments": 2,
   "circle_a1_rotation": true,
   "circle_a1_radius": true,
-  "radius_damping": 0.94,
-  "radius_spring": 0.24,
-  "radius_gravity": 0.72,
+  "radius_damping": 0.7,
+  "radius_spring": 0.12,
+  "radius_gravity": 0.12,
   "bar_length_min": 38,
   "bar_length_max": 1000,
   "freq_min": 20,
   "freq_max": 20400,
-  "a1_time_window": 0.1,
+  "a1_time_window": 0.02,
   "k2_enabled": false,
   "k2_pow": 1.8,
   "master_visible": true,
@@ -79,9 +87,9 @@
   "tentacles_enabled": true,
   "c1_on": true,
   "c1_color": [
-    100,
-    180,
-    255
+    108,
+    21,
+    52
   ],
   "c1_alpha": 100,
   "c1_thick": 1,
@@ -93,9 +101,9 @@
   "c1_rot_pow": 0.5,
   "c2_on": false,
   "c2_color": [
-    150,
-    220,
-    255
+    98,
+    112,
+    21
   ],
   "c2_alpha": 150,
   "c2_thick": 2,
@@ -106,9 +114,9 @@
   "c2_rot_pow": 0.5,
   "c3_on": false,
   "c3_color": [
-    255,
-    255,
-    255
+    102,
+    116,
+    21
   ],
   "c3_alpha": 60,
   "c3_thick": 1,
@@ -118,9 +126,9 @@
   "c3_rot_pow": 0.5,
   "c4_on": true,
   "c4_color": [
-    255,
-    255,
-    255
+    105,
+    120,
+    21
   ],
   "c4_alpha": 180,
   "c4_thick": 2,
@@ -131,9 +139,9 @@
   "c4_rot_pow": 0.5,
   "c5_on": true,
   "c5_color": [
-    255,
-    200,
-    100
+    108,
+    124,
+    21
   ],
   "c5_alpha": 100,
   "c5_thick": 1,
@@ -173,16 +181,16 @@
   "b45_from_center": false,
   "tentacle_on": true,
   "tentacle_color": [
-    55,
-    113,
-    204
+    255,
+    31,
+    31
   ],
   "tentacle_alpha": 255,
   "tentacle_thick": 1,
-  "tentacle_count": 6,
+  "tentacle_count": 4,
   "tentacle_length": 40.0,
-  "tentacle_length_jitter": 0.3,
-  "tentacle_length_jitter_speed": 0.2,
+  "tentacle_length_jitter": 238.8,
+  "tentacle_length_jitter_speed": 0.0,
   "tentacle_length_jitter_random": true,
   "tentacle_control_points_min": 6,
   "tentacle_control_points_max": 6,
@@ -190,17 +198,17 @@
   "tentacle_turbulence": 0.0,
   "tentacle_k_influence": 0.46,
   "tentacle_sway_speed": 0.0,
-  "tentacle_sway_density": 0.0,
-  "tentacle_tip_thickness": 0.09,
+  "tentacle_sway_density": 0.2,
+  "tentacle_tip_thickness": 0.15,
   "tentacle_water_damping": 0.0,
-  "tentacle_angle_stiffness": 5.0,
-  "tentacle_length_stiffness": 30.0,
-  "tentacle_stretch_limit": 100.0,
+  "tentacle_angle_stiffness": 0.2,
+  "tentacle_length_stiffness": 1.0,
+  "tentacle_stretch_limit": 2.0,
   "tentacle_shader_enabled": true,
   "tentacle_shader_tip_color": [
-    255,
-    191,
-    191
+    0,
+    0,
+    0
   ],
   "tentacle_shader_alpha_start": 0.0,
   "tentacle_shader_alpha_end": 1.0,
@@ -221,13 +229,13 @@
   "tentacle_core_p_speed": 1.35,
   "kp_bind_tentacle_turbulence_k": false,
   "kp_tentacle_turbulence_k_wmin": 0.22,
-  "kp_tentacle_turbulence_k_wmax": 0.5228,
+  "kp_tentacle_turbulence_k_wmax": 0.523,
   "kp_bind_tentacle_core_base_speed_k": true,
   "kp_tentacle_core_base_speed_k_wmin": 0.0,
   "kp_tentacle_core_base_speed_k_wmax": 3.0,
-  "kp_bind_tentacle_core_base_speed_p": false,
+  "kp_bind_tentacle_core_base_speed_p": true,
   "kp_tentacle_core_base_speed_p_wmin": 0.0,
-  "kp_tentacle_core_base_speed_p_wmax": 0.0,
+  "kp_tentacle_core_base_speed_p_wmax": 10.0,
   "random_checked": [
     "circle_radius",
     "circle_a1_rotation",
@@ -398,14 +406,14 @@
   "preset_auto_switch": false,
   "preset_switch_random_enabled": false,
   "preset_switch_infinite_random_enabled": false,
-  "preset_switch_interval": 2.0,
+  "preset_switch_interval": 1.0,
   "preset_interval_random_enabled": false,
   "preset_switch_interval_min": 1.0,
   "preset_switch_interval_max": 10.0,
   "preset_transition_enabled": true,
   "preset_transition_duration": 2.0,
   "preset_transition_easing": "ease_in_out",
-  "last_preset": "R07",
+  "last_preset": "R03",
   "c1_use_independent_damping": false,
   "c1_independent_rise_damping": 0.1,
   "c1_independent_fall_damping": 0.999,
@@ -731,23 +739,35 @@
   "kp_bind_tentacle_tip_thickness_p": false,
   "kp_tentacle_tip_thickness_p_wmin": 0.0,
   "kp_tentacle_tip_thickness_p_wmax": 1.0,
-  "kp_bind_tentacle_thick_p": true,
-  "kp_tentacle_thick_p_wmax": 300.0,
-  "kp_tentacle_thick_p_wmin": 0.0,
+  "kp_bind_tentacle_thick_p": false,
+  "kp_tentacle_thick_p_wmax": 0.0,
+  "kp_tentacle_thick_p_wmin": 150.0,
   "kp_bind_tentacle_thick_k": true,
-  "kp_tentacle_thick_k_wmax": 20.0,
+  "kp_tentacle_thick_k_wmax": 200.0,
   "kp_tentacle_thick_k_wmin": 0.0,
   "kp_bind_tentacle_length_k": true,
-  "kp_tentacle_length_k_wmax": 300.0,
+  "kp_tentacle_length_k_wmax": 600.0,
   "kp_bind_tentacle_length_jitter_speed_p": false,
   "kp_tentacle_length_jitter_speed_p_wmax": 1.0,
   "kp_bind_tentacle_shader_alpha_start_p": false,
   "kp_tentacle_shader_alpha_start_p_wmax": 1.0,
-  "kp_bind_tentacle_shader_alpha_start_k": false,
-  "kp_tentacle_shader_alpha_start_k_wmax": 1.0,
+  "kp_bind_tentacle_shader_alpha_start_k": true,
+  "kp_tentacle_shader_alpha_start_k_wmax": -1.0,
   "kp_bind_tentacle_length_jitter_k": true,
-  "kp_tentacle_length_jitter_k_wmin": 0.0,
-  "kp_tentacle_length_jitter_k_wmax": 8000.0,
-  "kp_bind_tentacle_length_jitter_speed_k": false,
-  "kp_tentacle_length_jitter_speed_k_wmax": 0.01
+  "kp_tentacle_length_jitter_k_wmax": 0.0,
+  "kp_bind_tentacle_shader_bias_p": false,
+  "kp_tentacle_shader_bias_p_wmin": 3.0,
+  "kp_tentacle_shader_bias_p_wmax": 1.0,
+  "kp_bind_tentacle_shader_tip_color__l_p": false,
+  "kp_tentacle_shader_tip_color__l_p_wmax": -100.0,
+  "kp_tentacle_shader_tip_color__l_p_wmin": -50.0,
+  "kp_bind_tentacle_shader_tip_color__l_k": true,
+  "kp_tentacle_shader_tip_color__l_k_wmax": 100.0,
+  "kp_bind_tentacle_color__h_k": true,
+  "kp_tentacle_color__h_k_wmax": 255.0,
+  "kp_tentacle_shader_alpha_start_k_wmin": 1.0,
+  "kp_bind_tentacle_length_jitter_speed_k": true,
+  "kp_tentacle_length_jitter_speed_k_wmin": 0.0,
+  "kp_tentacle_length_jitter_k_wmin": -8000.0,
+  "kp_tentacle_length_jitter_speed_k_wmax": 0.2
 }
