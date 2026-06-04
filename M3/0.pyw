@@ -41,6 +41,31 @@ from unity_exporter import (
     suggest_export_path,
 )
 
+
+# -- 合并自 1.pyw 的依赖 import ------------------------------------------
+import ctypes
+import math
+import queue as _std_queue
+import queue  # 兼容 CircularVisualizerWindow._update_config_from_queue 里的 queue.Empty
+
+import numpy as np
+
+try:
+    from scipy.interpolate import BSpline
+    _HAS_SCIPY_BSPLINE = True
+except Exception:
+    BSpline = None
+    _HAS_SCIPY_BSPLINE = False
+
+from OpenGL import GL
+
+from PySide6.QtCore import QPointF, QRect
+from PySide6.QtGui import QGuiApplication, QImage, QPainterPath, QPolygon, QSurfaceFormat
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+from core.audio_runtime import AudioSignalProcessor, LoopbackAudioCapture
+from core.lens_scratch_gl import LensScratchGL, _gen_procedural_scratch_mask
+# -- 合并 import 结束 -------------------------------------------------------
 CONFIG_FILE = Path(__file__).parent / 'visualizer_config.json'
 PRESETS_DIR = Path(__file__).parent / 'presets'
 SECTION_PRESETS_DIR = Path(__file__).parent / 'section_presets'
@@ -195,6 +220,49 @@ _DEFAULT_CONFIG = {
     'kp_bind_tentacle_core_base_speed_p': True,
     'kp_tentacle_core_base_speed_p_wmin': 0.0,
     'kp_tentacle_core_base_speed_p_wmax': 1.35,
+    # ── 镜头划痕眩光后处理 ──────────────────────────────────────────────────
+    'lens_scratch_enabled': False,
+    'lens_scratch_mask_path': '',
+    'lens_scratch_normal_path': '',
+    'lens_scratch_tiling_x': 1.0,
+    'lens_scratch_tiling_y': 1.0,
+    'lens_scratch_offset_x': 0.0,
+    'lens_scratch_offset_y': 0.0,
+    'lens_scratch_rotation_deg': 0.0,
+    'lens_scratch_mask_power': 1.35,
+    'lens_scratch_normal_influence': 1.2,
+    'lens_scratch_threshold': 1.1,
+    'lens_scratch_soft_knee': 0.45,
+    'lens_scratch_glare_intensity': 1.15,
+    'lens_scratch_count_a': 20,
+    'lens_scratch_streak_count': 3,
+    'lens_scratch_scratch_count': 3,
+    'lens_scratch_streak_length': 3.6,
+    'lens_scratch_streak_spread': 1.1,
+    'lens_scratch_falloff_a': 3.8,
+    'lens_scratch_falloff_b': 0.35,
+    'lens_scratch_rotation_jitter_deg': 6.0,
+    'lens_scratch_refraction_strength': 0.18,
+    'lens_scratch_chromatic_aberration': 0.0025,
+    'lens_scratch_micro_distortion': 0.55,
+    'lens_scratch_tint_r': 255,
+    'lens_scratch_tint_g': 255,
+    'lens_scratch_tint_b': 255,
+    'kp_bind_lens_scratch_glare_intensity_k': False,
+    'kp_lens_scratch_glare_intensity_k_wmin': 0.0,
+    'kp_lens_scratch_glare_intensity_k_wmax': 0.0,
+    'kp_bind_lens_scratch_threshold_k': False,
+    'kp_lens_scratch_threshold_k_wmin': 0.0,
+    'kp_lens_scratch_threshold_k_wmax': 0.0,
+    'kp_bind_lens_scratch_streak_length_k': False,
+    'kp_lens_scratch_streak_length_k_wmin': 0.0,
+    'kp_lens_scratch_streak_length_k_wmax': 0.0,
+    'kp_bind_lens_scratch_refraction_strength_k': False,
+    'kp_lens_scratch_refraction_strength_k_wmin': 0.0,
+    'kp_lens_scratch_refraction_strength_k_wmax': 0.0,
+    'kp_bind_lens_scratch_chromatic_aberration_k': False,
+    'kp_lens_scratch_chromatic_aberration_k_wmin': 0.0,
+    'kp_lens_scratch_chromatic_aberration_k_wmax': 0.0,
     'random_checked': [],
     'random_object_count_min': 1,
     'random_object_count_max': 10,
@@ -2445,6 +2513,7 @@ class VisualizerControlUI(QWidget):
             (("颜色方案",), self._build_color_section()),
             (("运动表现",), self._build_physics_section()),
             (("高级控制",), self._build_k1_section()),
+            (("镜头划痕眩光",), self._build_lens_scratch_section()),
             (("导出到Unity",), self._build_unity_export_section()),
             (("🎲 随机",), self._build_random_section()),
         ]
@@ -3883,6 +3952,181 @@ class VisualizerControlUI(QWidget):
         if failed:
             detail += '\n\n以下预设导出失败:\n' + '\n'.join(failed)
         QMessageBox.information(self, '批量导出完成', detail)
+
+    # ── 镜头划痕眩光 ──────────────────────────────────────────────────────────
+
+    def _build_lens_scratch_section(self):
+        s = _Collapsible('镜头划痕眩光', expanded=True)
+        g = QGridLayout(); g.setSpacing(3); g.setContentsMargins(0, 0, 0, 0); r = 0
+
+        # 启用开关
+        en_check = QCheckBox('启用镜头划痕眩光效果')
+        en_check.setChecked(bool(self.config.get('lens_scratch_enabled', False)))
+        en_check.toggled.connect(lambda v: self._update_cfg('lens_scratch_enabled', bool(v)))
+        self.lens_scratch_enabled_check = en_check
+        g.addWidget(en_check, r, 0, 1, 4); r += 1
+
+        note = QLabel('Windows 上使用 QPainter 模式渲染划痕叠加，非 Windows 使用 OpenGL 后处理。\n'
+                      '不加载贴图时使用内置程序化划痕。')
+        note.setStyleSheet('color:#888; font-size:8pt;')
+        note.setWordWrap(True)
+        g.addWidget(note, r, 0, 1, 4); r += 1
+
+        # ── 划痕贴图 ──────────────────────────────────────────────────────────
+        g.addWidget(self._make_section_label('划痕贴图'), r, 0, 1, 4); r += 1
+
+        def _path_row(label_text, cfg_key, attr_name):
+            nonlocal r
+            row = QWidget(); hl = QHBoxLayout(row); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
+            hl.addWidget(QLabel(label_text))
+            edit = QLineEdit(str(self.config.get(cfg_key, '')))
+            edit.setPlaceholderText('留空使用内置贴图…')
+            edit.setReadOnly(True)
+            edit.textChanged.connect(lambda v: self._update_cfg(cfg_key, v))
+            setattr(self, attr_name, edit)
+            hl.addWidget(edit, 1)
+            btn = QPushButton('…')
+            btn.setFixedWidth(28)
+            def _pick(_=None, _cfg_key=cfg_key, _edit=edit):
+                p, _ = QFileDialog.getOpenFileName(self, '选择贴图', '', '图像文件 (*.png *.jpg *.bmp *.tga *.exr *.hdr);;全部(*)')
+                if p:
+                    _edit.setText(p)
+                    self._update_cfg(_cfg_key, p)
+            btn.clicked.connect(_pick)
+            clr_btn = QPushButton('✕')
+            clr_btn.setFixedWidth(24)
+            def _clear(_=None, _cfg_key=cfg_key, _edit=edit):
+                _edit.setText('')
+                self._update_cfg(_cfg_key, '')
+            clr_btn.clicked.connect(_clear)
+            hl.addWidget(btn); hl.addWidget(clr_btn)
+            g.addWidget(row, r, 0, 1, 4); r += 1
+
+        _path_row('遮罩贴图:', 'lens_scratch_mask_path', 'lens_scratch_mask_edit')
+        _path_row('法线贴图:', 'lens_scratch_normal_path', 'lens_scratch_normal_edit')
+
+        # 平铺 / 偏移
+        def _float_row(label_text, cfg_key, default_v, s_min, s_max, h_min, h_max, dec=2):
+            nonlocal r
+            slider, box = self._new_bound_float_slider(
+                cfg_key=cfg_key, default_value=default_v,
+                soft_min=s_min, soft_max=s_max, hard_min=h_min, hard_max=h_max,
+                slider_scale=100, step=0.01, decimals=dec, width=72,
+            )
+            g.addWidget(self._make_graphics_form_row(label_text=label_text, widgets=[slider, box], label_width=96), r, 0, 1, 4); r += 1
+            return slider, box
+
+        _float_row('平铺 X:', 'lens_scratch_tiling_x', 1.0, 0.1, 4.0, 0.01, 20.0)
+        _float_row('平铺 Y:', 'lens_scratch_tiling_y', 1.0, 0.1, 4.0, 0.01, 20.0)
+        _float_row('偏移 X:', 'lens_scratch_offset_x', 0.0, -1.0, 1.0, -10.0, 10.0)
+        _float_row('偏移 Y:', 'lens_scratch_offset_y', 0.0, -1.0, 1.0, -10.0, 10.0)
+        _float_row('旋转角度(°):', 'lens_scratch_rotation_deg', 0.0, -180.0, 180.0, -360.0, 360.0, dec=1)
+        _float_row('遮罩幂次:', 'lens_scratch_mask_power', 1.35, 0.0, 4.0, 0.0, 20.0)
+        _float_row('法线影响:', 'lens_scratch_normal_influence', 1.2, 0.0, 4.0, 0.0, 20.0)
+
+        # ── 溢光 ──────────────────────────────────────────────────────────────
+        g.addWidget(self._make_section_label('溢光'), r, 0, 1, 4); r += 1
+
+        r, _, _, _ = self._add_kp_slider_row(
+            g, r, label_text='高光阈值:', cfg_key='lens_scratch_threshold',
+            default_value=1.1, soft_min=0.0, soft_max=4.0, hard_min=0.0, hard_max=8.0,
+            supports=('k',), decimals=3, kp_soft_min=-2.0, kp_soft_max=2.0,
+            kp_hard_min=-8.0, kp_hard_max=8.0, kp_decimals=3,
+        )
+        _float_row('柔和过渡:', 'lens_scratch_soft_knee', 0.45, 0.0, 2.0, 0.0, 5.0)
+
+        r, _, _, _ = self._add_kp_slider_row(
+            g, r, label_text='眩光强度:', cfg_key='lens_scratch_glare_intensity',
+            default_value=1.15, soft_min=0.0, soft_max=4.0, hard_min=0.0, hard_max=8.0,
+            supports=('k',), decimals=3, kp_soft_min=-2.0, kp_soft_max=2.0,
+            kp_hard_min=-8.0, kp_hard_max=8.0, kp_decimals=3,
+        )
+
+        # 采样密度
+        count_a_box = self._new_int_box(
+            default_value=20, soft_min=2, soft_max=64, hard_min=2, hard_max=128, step=1,
+            cfg_key='lens_scratch_count_a',
+        )
+        g.addWidget(self._make_graphics_form_row(label_text='采样密度:', widgets=[count_a_box], label_width=96), r, 0, 1, 4); r += 1
+
+        scratch_count_box = self._new_int_box(
+            default_value=3, soft_min=1, soft_max=16, hard_min=1, hard_max=32, step=1,
+            cfg_key='lens_scratch_scratch_count',
+        )
+        g.addWidget(self._make_graphics_form_row(label_text='划痕层数:', widgets=[scratch_count_box], label_width=96), r, 0, 1, 4); r += 1
+
+        streak_count_box = self._new_int_box(
+            default_value=3, soft_min=1, soft_max=16, hard_min=1, hard_max=32, step=1,
+            cfg_key='lens_scratch_streak_count',
+        )
+        g.addWidget(self._make_graphics_form_row(label_text='条纹层数:', widgets=[streak_count_box], label_width=96), r, 0, 1, 4); r += 1
+
+        r, _, _, _ = self._add_kp_slider_row(
+            g, r, label_text='条纹长度:', cfg_key='lens_scratch_streak_length',
+            default_value=3.6, soft_min=0.0, soft_max=20.0, hard_min=0.0, hard_max=100.0,
+            supports=('k',), slider_scale=100, decimals=2, kp_soft_min=-5.0, kp_soft_max=5.0,
+            kp_hard_min=-100.0, kp_hard_max=100.0, kp_decimals=3,
+        )
+        _float_row('条纹扩散:', 'lens_scratch_streak_spread', 1.1, 0.0, 5.0, 0.0, 20.0)
+        _float_row('衰减 A:', 'lens_scratch_falloff_a', 3.8, 0.0, 20.0, 0.0, 100.0)
+        _float_row('衰减 B:', 'lens_scratch_falloff_b', 0.35, 0.0, 5.0, 0.0, 20.0)
+        _float_row('角度抖动(°):', 'lens_scratch_rotation_jitter_deg', 6.0, 0.0, 90.0, 0.0, 360.0, dec=1)
+
+        # ── 折射 ──────────────────────────────────────────────────────────────
+        g.addWidget(self._make_section_label('折射'), r, 0, 1, 4); r += 1
+
+        r, _, _, _ = self._add_kp_slider_row(
+            g, r, label_text='折射强度:', cfg_key='lens_scratch_refraction_strength',
+            default_value=0.18, soft_min=0.0, soft_max=2.0, hard_min=0.0, hard_max=5.0,
+            supports=('k',), slider_scale=100, decimals=3, kp_soft_min=-1.0, kp_soft_max=1.0,
+            kp_hard_min=-5.0, kp_hard_max=5.0, kp_decimals=4,
+        )
+        r, _, _, _ = self._add_kp_slider_row(
+            g, r, label_text='色差:', cfg_key='lens_scratch_chromatic_aberration',
+            default_value=0.0025, soft_min=0.0, soft_max=0.02, hard_min=0.0, hard_max=0.1,
+            supports=('k',), slider_scale=10000, step=0.0001, decimals=4,
+            kp_soft_min=-0.01, kp_soft_max=0.01, kp_hard_min=-0.1, kp_hard_max=0.1, kp_decimals=5,
+        )
+        _float_row('微扰动:', 'lens_scratch_micro_distortion', 0.55, 0.0, 2.0, 0.0, 5.0)
+
+        # ── 颜色 ──────────────────────────────────────────────────────────────
+        g.addWidget(self._make_section_label('眩光颜色'), r, 0, 1, 4); r += 1
+
+        tint_btn = QPushButton()
+        tint_btn.setFixedSize(22, 22)
+        cur_tint = (
+            int(self.config.get('lens_scratch_tint_r', 255)),
+            int(self.config.get('lens_scratch_tint_g', 255)),
+            int(self.config.get('lens_scratch_tint_b', 255)),
+        )
+        tint_btn.setStyleSheet(self._make_color_button_style(cur_tint))
+        self.lens_scratch_tint_btn = tint_btn
+
+        def _pick_tint():
+            cur = (
+                int(self.config.get('lens_scratch_tint_r', 255)),
+                int(self.config.get('lens_scratch_tint_g', 255)),
+                int(self.config.get('lens_scratch_tint_b', 255)),
+            )
+            picker = QuickColorPicker(self, initial=cur, presets=self._get_designer_palette(12), cfg_key_prefix='lens_scratch_tint')
+            def _apply(rgb):
+                self.lens_scratch_tint_btn.setStyleSheet(self._make_color_button_style(rgb))
+                self._update_cfg('lens_scratch_tint_r', rgb[0])
+                self._update_cfg('lens_scratch_tint_g', rgb[1])
+                self._update_cfg('lens_scratch_tint_b', rgb[2])
+            picker.colorSelected.connect(_apply)
+            picker.exec()
+
+        tint_btn.clicked.connect(_pick_tint)
+        g.addWidget(self._make_graphics_form_row(label_text='眩光颜色:', widgets=[tint_btn], label_width=96), r, 0, 1, 4); r += 1
+
+        s.add_layout(g)
+        return s
+
+    def _make_section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet('font-weight:bold; color:#aaa; margin-top:6px; margin-bottom:2px;')
+        return lbl
 
     def _build_unity_export_section(self):
         s = _Collapsible('导出到Unity', expanded=True)
@@ -5993,6 +6237,7 @@ class VisualizerControlUI(QWidget):
             self.viz_process = mp.Process(
                 target=_run_circular,
                 args=(self.config_queue, self.status_queue),
+                daemon=True,  # 父进程退出时自动杀死子进程（无论是正常关闭还是强杀）
             )
             self.viz_process.start()
 
@@ -6599,6 +6844,2412 @@ def main():
     w.move(fg.topLeft())
     sys.exit(app.exec())
 
+
+
+# ============================================================================
+# 以下内容由 _merge_viz.py 从 1.pyw 合并（OpenGL 渲染器类）
+# ============================================================================
+_ON_FIELD_ORDER = [
+    "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
+    "b12_on", "b23_on", "b34_on", "b45_on",
+    "tentacle_on", "tentacle_core_on"
+]
+
+_NOINTERP_KEYS = frozenset({
+    "color_scheme", "gradient_mode", "gradient_points",
+    "num_bars",
+    "contours_enabled", "bars_enabled", "tentacles_enabled",
+    "c1_on", "c2_on", "c3_on", "c4_on", "c5_on",
+    "b12_on", "b23_on", "b34_on", "b45_on",
+    "tentacle_on", "tentacle_core_on",
+    "master_visible",
+    "gradient_enabled", "color_dynamic", "circle_a1_rotation", "circle_a1_radius",
+    "tentacle_shader_enabled",
+    "k2_enabled", "color_cycle_a1", "drag_adjust_mode", "always_on_top", "bg_transparent", "window_layer",
+    "bar_use_independent_damping", "bar_use_independent_time_window",
+    "c1_fill", "c2_fill", "c3_fill", "c4_fill", "c5_fill",
+    "c1_use_independent_damping", "c2_use_independent_damping",
+    "c4_use_independent_damping", "c5_use_independent_damping",
+    "b12_use_independent_damping", "b23_use_independent_damping",
+    "b34_use_independent_damping", "b45_use_independent_damping",
+    "b12_fixed", "b23_fixed", "b34_fixed", "b45_fixed",
+    "b12_from_start", "b12_from_end", "b12_from_center",
+    "b23_from_start", "b23_from_end", "b23_from_center",
+    "b34_from_start", "b34_from_end", "b34_from_center",
+    "b45_from_start", "b45_from_end", "b45_from_center",
+    "pos_x", "pos_y", "width", "height",
+    "lens_scratch_enabled", "lens_scratch_mask_path", "lens_scratch_normal_path",
+    "preset_order", "preset_auto_switch", "preset_switch_interval",
+    "preset_interval_random_enabled", "preset_switch_interval_min", "preset_switch_interval_max",
+    "preset_transition_enabled", "preset_transition_duration", "preset_transition_easing",
+    "random_checked", "random_object_count_min", "random_object_count_max",
+})
+
+
+def _ease_value(t, mode):
+    t = max(0.0, min(1.0, t))
+    if mode == "ease_in":
+        return t * t
+    if mode == "ease_out":
+        return 1.0 - (1.0 - t) ** 2
+    if mode == "ease_in_out":
+        return t * t * (3.0 - 2.0 * t)
+    if mode == "cubic":
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    return t
+
+
+def _sample_gradient_color(points, ratio):
+    normalized = []
+    for entry in (points or []):
+        if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
+            continue
+        pos, color = entry[0], entry[1]
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            continue
+        try:
+            normalized.append((float(pos), (int(color[0]), int(color[1]), int(color[2]))))
+        except Exception:
+            continue
+    if not normalized:
+        return (255, 255, 255)
+    normalized.sort(key=lambda item: item[0])
+    ratio = max(0.0, min(1.0, float(ratio)))
+    for index in range(len(normalized) - 1):
+        pos1, color1 = normalized[index]
+        pos2, color2 = normalized[index + 1]
+        if pos1 <= ratio <= pos2:
+            blend = (ratio - pos1) / (pos2 - pos1) if pos2 > pos1 else 0.0
+            return tuple(
+                int(round(color1[channel] + (color2[channel] - color1[channel]) * blend))
+                for channel in range(3)
+            )
+    return normalized[0][1] if ratio <= normalized[0][0] else normalized[-1][1]
+
+
+def _interpolate_gradient_points(from_points, to_points, ratio, count=8):
+    steps = max(2, int(count))
+    blended = []
+    for index in range(steps):
+        pos = index / max(1, steps - 1)
+        from_color = _sample_gradient_color(from_points, pos)
+        to_color = _sample_gradient_color(to_points, pos)
+        blended.append((
+            pos,
+            tuple(
+                int(round(from_color[channel] + (to_color[channel] - from_color[channel]) * ratio))
+                for channel in range(3)
+            )
+        ))
+    return blended
+
+
+def _load_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as file_obj:
+            return _normalize_loaded_config(json.load(file_obj))
+    except Exception:
+        return _normalize_loaded_config(None)
+
+
+class OverlayControlLayer(QWidget):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+
+    def paintEvent(self, _event):
+        if not self.owner.config.get("drag_adjust_mode", False):
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.owner.drag_handle_rect()
+        hover = self.owner.drag_handle_hover
+        base_alpha = max(60, min(235, int(self.owner.ui_bg_alpha)))
+
+        bg = QColor(70, 70, 90, min(245, base_alpha + 25)) if hover else QColor(50, 50, 60, base_alpha)
+        border = QColor(180, 200, 255) if hover else QColor(120, 130, 160)
+        arrow = QColor(220, 230, 255) if hover else QColor(160, 170, 200)
+        label = QColor(200, 210, 240)
+
+        painter.setPen(QPen(border, 2))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 12, 12)
+
+        cx = rect.center().x()
+        cy = rect.center().y()
+        arm = 16
+        head = 5
+
+        painter.setPen(QPen(arrow, 2))
+        painter.drawLine(QPoint(cx, cy - arm), QPoint(cx, cy - 3))
+        painter.drawLine(QPoint(cx, cy + 3), QPoint(cx, cy + arm))
+        painter.drawLine(QPoint(cx - arm, cy), QPoint(cx - 3, cy))
+        painter.drawLine(QPoint(cx + 3, cy), QPoint(cx + arm, cy))
+
+        painter.setBrush(arrow)
+        painter.drawPolygon(QPolygon([QPoint(cx, cy - arm - head), QPoint(cx - head, cy - arm), QPoint(cx + head, cy - arm)]))
+        painter.drawPolygon(QPolygon([QPoint(cx, cy + arm + head), QPoint(cx - head, cy + arm), QPoint(cx + head, cy + arm)]))
+        painter.drawPolygon(QPolygon([QPoint(cx - arm - head, cy), QPoint(cx - arm, cy - head), QPoint(cx - arm, cy + head)]))
+        painter.drawPolygon(QPolygon([QPoint(cx + arm + head, cy), QPoint(cx + arm, cy - head), QPoint(cx + arm, cy + head)]))
+        painter.drawEllipse(QPoint(cx, cy), 2, 2)
+
+        painter.setPen(label)
+        text_rect = rect.adjusted(0, arm + head + 6, 0, 28)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "拖动")
+
+    def mousePressEvent(self, event):
+        if not self.owner.config.get("drag_adjust_mode", False):
+            event.ignore()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self.owner.drag_handle_rect().contains(event.position().toPoint()):
+            self.owner.dragging = True
+            self.owner.drag_last_global = event.globalPosition().toPoint()
+            self.grabMouse()
+            event.accept()
+            return
+        event.ignore()
+
+    def mouseMoveEvent(self, event):
+        if not self.owner.config.get("drag_adjust_mode", False):
+            event.ignore()
+            return
+
+        point = event.position().toPoint()
+        self.owner.drag_handle_hover = self.owner.drag_handle_rect().contains(point)
+        if self.owner.dragging:
+            current = event.globalPosition().toPoint()
+            last = self.owner.drag_last_global or current
+            delta = current - last
+            self.owner.drag_last_global = current
+            self.owner.move_center_by(delta.x(), delta.y())
+
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.owner.dragging:
+            self.owner.dragging = False
+            self.owner.drag_last_global = None
+            self.releaseMouse()
+            self.update()
+            event.accept()
+            return
+        event.ignore()
+
+    def leaveEvent(self, _event):
+        if not self.owner.dragging:
+            self.owner.drag_handle_hover = False
+            self.update()
+
+
+class OpenGLVisualizerWidget(QOpenGLWidget):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        # 镜头划痕后处理
+        self._scratch_gl = LensScratchGL()
+        self._scratch_fbo: int = 0
+        self._scratch_tex: int = 0
+        self._scratch_fbo_size: tuple[int, int] = (0, 0)
+
+    def _framebuffer_size(self):
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        fb_width = max(1, int(round(self.width() * dpr)))
+        fb_height = max(1, int(round(self.height() * dpr)))
+        return fb_width, fb_height
+
+    def initializeGL(self):
+        GL.glClearColor(0.0, 0.0, 0.0, 0.0)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glEnable(GL.GL_LINE_SMOOTH)
+        GL.glHint(GL.GL_LINE_SMOOTH_HINT, GL.GL_NICEST)
+        GL.glEnable(GL.GL_MULTISAMPLE)
+        self._scratch_gl.initialize()
+
+    def _ensure_scratch_fbo(self, fb_width: int, fb_height: int) -> None:
+        """确保 FBO 和纹理的尺寸与当前帧缓冲一致。"""
+        if (fb_width, fb_height) == self._scratch_fbo_size:
+            return
+        # 释放旧资源
+        if self._scratch_fbo:
+            GL.glDeleteFramebuffers(1, [self._scratch_fbo])
+        if self._scratch_tex:
+            GL.glDeleteTextures(1, [self._scratch_tex])
+        # 创建离屏纹理（RGBA8，4 级 mip 便于 LOD 采样）
+        tex = int(GL.glGenTextures(1))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        GL.glTexImage2D(
+            GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, fb_width, fb_height, 0,
+            GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None,
+        )
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        # 创建 FBO
+        fbo = int(GL.glGenFramebuffers(1))
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fbo)
+        GL.glFramebufferTexture2D(
+            GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, tex, 0,
+        )
+        status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        if status != GL.GL_FRAMEBUFFER_COMPLETE:
+            GL.glDeleteFramebuffers(1, [fbo])
+            GL.glDeleteTextures(1, [tex])
+            print(f"[LensScratchGL] FBO 创建失败: status=0x{status:X}")
+            return
+        self._scratch_fbo = fbo
+        self._scratch_tex = tex
+        self._scratch_fbo_size = (fb_width, fb_height)
+
+    def resizeGL(self, width, height):
+        fb_width, fb_height = self._framebuffer_size()
+        GL.glViewport(0, 0, fb_width, fb_height)
+
+    def paintGL(self):
+        state = self.owner.render_state
+        logical_width = max(1.0, float(self.width()))
+        logical_height = max(1.0, float(self.height()))
+        fb_width, fb_height = self._framebuffer_size()
+
+        cfg = self.owner.config
+        scratch_enabled = bool(cfg.get("lens_scratch_enabled", False))
+        use_scratch = scratch_enabled and self._scratch_gl.ready
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # beginNativePainting 必须在所有 raw GL 调用之前
+        painter.beginNativePainting()
+
+        # QOpenGLWidget 的默认 FBO 不一定是 0，必须在 GL 上下文激活后查询
+        default_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
+
+        if use_scratch:
+            self._ensure_scratch_fbo(fb_width, fb_height)
+            if self._scratch_fbo:
+                GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._scratch_fbo)
+            else:
+                use_scratch = False
+
+        GL.glViewport(0, 0, fb_width, fb_height)
+        clear_alpha = 0.0 if cfg.get("bg_transparent", True) else 1.0
+        GL.glClearColor(0.0, 0.0, 0.0, clear_alpha)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+
+        GL.glMatrixMode(GL.GL_PROJECTION)
+        GL.glLoadIdentity()
+        GL.glOrtho(0.0, logical_width, logical_height, 0.0, -1.0, 1.0)
+
+        GL.glMatrixMode(GL.GL_MODELVIEW)
+        GL.glLoadIdentity()
+
+        GL.glFlush()
+        if state:
+            center = state.get("center", (logical_width * 0.5, logical_height * 0.5))
+            for fill_item in state.get("fills", []):
+                self.owner._gl_draw_radial_fill(center, fill_item["points"], fill_item["color"])
+            GL.glFlush()
+
+        if use_scratch and self._scratch_fbo:
+            # 切回默认 FBO，为划痕着色器生成 mipmap，然后应用效果
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, default_fbo)
+            GL.glViewport(0, 0, fb_width, fb_height)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._scratch_tex)
+            GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            normalized_k = max(0.0, min(1.0, float(self.owner.a1_value)))
+            scratch_params = self._build_scratch_params(cfg, fb_width, fb_height, normalized_k)
+            mask_p = cfg.get("lens_scratch_mask_path", "")
+            norm_p = cfg.get("lens_scratch_normal_path", "")
+            if mask_p:
+                self._scratch_gl.load_mask(mask_p)
+            if norm_p:
+                self._scratch_gl.load_normal(norm_p)
+            self._scratch_gl.apply(self._scratch_tex, scratch_params)
+
+        painter.endNativePainting()
+
+        if state:
+            for tentacle_item in state.get("tentacles", []):
+                self.owner._paint_weighted_segments(painter, tentacle_item["segments"])
+
+            for bar_item in state.get("bars", []):
+                self.owner._paint_segments(painter, bar_item["segments"], bar_item["thickness"])
+
+            for line_item in state.get("lines", []):
+                self.owner._paint_line_loop(painter, line_item["points"], line_item["color"], line_item["thickness"])
+
+        painter.end()
+
+    def _build_scratch_params(self, cfg: dict, fb_w: int, fb_h: int, normalized_k: float) -> dict:
+        """从配置中读取划痕参数，应用 KP 绑定后返回 params dict。"""
+        def _kp(key: str, base: float) -> float:
+            if cfg.get(f"kp_bind_{key}_k", False):
+                wmin = float(cfg.get(f"kp_{key}_k_wmin", 0.0))
+                wmax = float(cfg.get(f"kp_{key}_k_wmax", 0.0))
+                base += wmin + (wmax - wmin) * normalized_k
+            return base
+
+        return {
+            "width": fb_w,
+            "height": fb_h,
+            "scratch_rotation_deg": float(cfg.get("lens_scratch_rotation_deg", 0.0)),
+            "scratch_tiling_x": float(cfg.get("lens_scratch_tiling_x", 1.0)),
+            "scratch_tiling_y": float(cfg.get("lens_scratch_tiling_y", 1.0)),
+            "scratch_offset_x": float(cfg.get("lens_scratch_offset_x", 0.0)),
+            "scratch_offset_y": float(cfg.get("lens_scratch_offset_y", 0.0)),
+            "scratch_mask_power": float(cfg.get("lens_scratch_mask_power", 1.35)),
+            "normal_influence": float(cfg.get("lens_scratch_normal_influence", 1.2)),
+            "threshold": _kp("lens_scratch_threshold", float(cfg.get("lens_scratch_threshold", 1.1))),
+            "soft_knee": float(cfg.get("lens_scratch_soft_knee", 0.45)),
+            "glare_intensity": _kp("lens_scratch_glare_intensity", float(cfg.get("lens_scratch_glare_intensity", 1.15))),
+            "streak_length": _kp("lens_scratch_streak_length", float(cfg.get("lens_scratch_streak_length", 3.6))),
+            "count_a": int(cfg.get("lens_scratch_count_a", 20)),
+            "streak_spread": float(cfg.get("lens_scratch_streak_spread", 1.1)),
+            "falloff_a": float(cfg.get("lens_scratch_falloff_a", 3.8)),
+            "falloff_b": float(cfg.get("lens_scratch_falloff_b", 0.35)),
+            "scratch_count": int(cfg.get("lens_scratch_scratch_count", 3)),
+            "streak_count": int(cfg.get("lens_scratch_streak_count", 3)),
+            "rotation_jitter_deg": float(cfg.get("lens_scratch_rotation_jitter_deg", 6.0)),
+            "refraction_strength": _kp("lens_scratch_refraction_strength", float(cfg.get("lens_scratch_refraction_strength", 0.18))),
+            "chromatic_aberration": _kp("lens_scratch_chromatic_aberration", float(cfg.get("lens_scratch_chromatic_aberration", 0.0025))),
+            "micro_distortion": float(cfg.get("lens_scratch_micro_distortion", 0.55)),
+            "tint_r": int(cfg.get("lens_scratch_tint_r", 255)),
+            "tint_g": int(cfg.get("lens_scratch_tint_g", 255)),
+            "tint_b": int(cfg.get("lens_scratch_tint_b", 255)),
+            "mip_levels": 4.0,
+        }
+
+
+class PainterVisualizerWidget(QWidget):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, _event):
+        pw, ph = self.width(), self.height()
+        if pw <= 0 or ph <= 0:
+            return
+
+        state = self.owner.render_state
+        cfg = self.owner.config
+        scratch_enabled = bool(cfg.get("lens_scratch_enabled", False))
+        bg_transparent = bool(cfg.get("bg_transparent", True))
+
+        if scratch_enabled:
+            # 渲染到离屏缓冲，供后处理使用
+            offscreen = QImage(pw, ph, QImage.Format.Format_RGBA8888)
+            offscreen.fill(QColor(0, 0, 0, 0) if bg_transparent else QColor(0, 0, 0, 255))
+            painter = QPainter(offscreen)
+        else:
+            painter = QPainter(self)
+            if bg_transparent:
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            else:
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        if state:
+            for fill_item in state.get("fills", []):
+                self.owner._paint_fill(painter, fill_item["points"], fill_item["color"])
+            for tentacle_item in state.get("tentacles", []):
+                self.owner._paint_weighted_segments(painter, tentacle_item["segments"])
+            for bar_item in state.get("bars", []):
+                self.owner._paint_segments(painter, bar_item["segments"], bar_item["thickness"])
+            for line_item in state.get("lines", []):
+                self.owner._paint_line_loop(painter, line_item["points"], line_item["color"], line_item["thickness"])
+
+        painter.end()
+
+        if scratch_enabled:
+            # 应用 Unity LensScratchGlareAdvanced 三段式眩光效果（预滤波→条纹→合成）
+            result_img = self._apply_lens_scratch_glare(offscreen, cfg)
+            final_painter = QPainter(self)
+            if bg_transparent:
+                final_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                final_painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+                final_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            else:
+                final_painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
+            final_painter.drawImage(0, 0, result_img)
+            final_painter.end()
+
+    def _apply_lens_scratch_glare(self, scene_image: QImage, cfg: dict) -> QImage:
+        """
+        Unity LensScratchGlareAdvanced 三段式镜头划痕眩光效果的 Python 移植版本。
+
+        Pass 0 (预滤波): 提取超过阈值的高亮像素 → 半分辨率
+        Pass 1 (条纹):   两个方向的定向模糊（streak blur）
+        Pass 2 (合成):   将眩光叠加回原始场景
+        """
+        w, h = scene_image.width(), scene_image.height()
+        if w <= 0 or h <= 0:
+            return scene_image
+
+        # ── 读取参数（对应 Unity LensScratchGlareAdvanced 参数）──────────
+        normalized_k = max(0.0, min(1.0, float(self.owner.a1_value)))
+
+        base_intensity = float(cfg.get("lens_scratch_glare_intensity", 1.25))
+        if cfg.get("kp_bind_lens_scratch_glare_intensity_k", False):
+            wmin = float(cfg.get("kp_lens_scratch_glare_intensity_k_wmin", 0.0))
+            wmax = float(cfg.get("kp_lens_scratch_glare_intensity_k_wmax", 0.0))
+            base_intensity += wmin + (wmax - wmin) * normalized_k
+        base_intensity = max(0.0, base_intensity)
+
+        threshold = float(cfg.get("lens_scratch_threshold", 1.1))
+        soft_knee = max(1e-4, float(cfg.get("lens_scratch_soft_knee", 0.5)))
+
+        streak_length = float(cfg.get("lens_scratch_streak_length", 3.5))
+        if cfg.get("kp_bind_lens_scratch_streak_length_k", False):
+            wmin = float(cfg.get("kp_lens_scratch_streak_length_k_wmin", 0.0))
+            wmax = float(cfg.get("kp_lens_scratch_streak_length_k_wmax", 0.0))
+            streak_length += wmin + (wmax - wmin) * normalized_k
+
+        spread = max(0.01, float(cfg.get("lens_scratch_streak_spread", 1.25)))
+        falloff = max(0.01, float(cfg.get("lens_scratch_falloff_a", 3.5)))
+        scratch1_angle = float(cfg.get("lens_scratch_rotation_deg", 90.0))
+        scratch1_intensity = base_intensity
+        scratch2_intensity = base_intensity * 0.64  # 副方向强度为主方向的 64%
+        composite_intensity = base_intensity
+
+        tint_r = float(cfg.get("lens_scratch_tint_r", 255)) / 255.0
+        tint_g = float(cfg.get("lens_scratch_tint_g", 255)) / 255.0
+        tint_b = float(cfg.get("lens_scratch_tint_b", 255)) / 255.0
+        tint = np.array([tint_r, tint_g, tint_b], dtype=np.float32)
+
+        # ── 将 QImage 转换为 numpy 数组 ───────────────────────────────────
+        scene_image = scene_image.convertToFormat(QImage.Format.Format_RGBA8888)
+        bpl = scene_image.bytesPerLine()
+        ptr = scene_image.constBits()
+        raw = np.frombuffer(ptr, dtype=np.uint8).reshape(h, bpl)
+        scene_np = raw[:, : w * 4].reshape(h, w, 4).copy()
+
+        # ── Pass 0: 预滤波（1/4 分辨率，对应 Unity frag_prefilter）──────
+        sh, sw = max(1, h // 4), max(1, w // 4)
+        # 2x 双步降采样（快速近似）
+        small_rgb = scene_np[::4, ::4, :3][:sh, :sw].astype(np.float32)
+        # 用 alpha 预乘，避免透明区域产生杂散条纹
+        small_a = scene_np[::4, ::4, 3:4][:sh, :sw].astype(np.float32) / 255.0
+        small_rgb = (small_rgb / 255.0) * small_a  # premultiplied [0,1]
+
+        # 提取高亮区（soft knee，对应 Unity frag_prefilter）
+        brightness = np.max(small_rgb, axis=2)  # (sh, sw)
+        knee = soft_knee
+        soft = np.clip((brightness - threshold + knee) / (2.0 * knee), 0.0, 1.0)
+        soft = soft * soft * knee
+        contrib = np.maximum(soft, brightness - threshold)
+        safe_b = np.where(brightness > 1e-4, brightness, 1.0)
+        scale = np.where(brightness > 1e-4, contrib / safe_b, 0.0)
+        prefiltered = small_rgb * scale[:, :, np.newaxis]  # (sh, sw, 3)
+
+        # ── Pass 1: 两个方向的条纹模糊（对应 Unity frag_streak）─────────
+        def compute_glare_dir(angle_deg: float) -> tuple[float, float]:
+            """对应 Unity ComputeGlareDirection：返回与划痕角度垂直的方向。"""
+            rad = math.radians(angle_deg)
+            dx, dy = -math.sin(rad), math.cos(rad)
+            length = math.sqrt(dx * dx + dy * dy)
+            if length > 0:
+                dx, dy = dx / length, dy / length
+            return dx, dy
+
+        def streak_blur(src: np.ndarray, dx: float, dy: float, intensity: float) -> np.ndarray:
+            """
+            定向条纹模糊（对应 Unity frag_streak）:
+            stepUv = direction * texelSize * streakLength * 12 * spread
+            采样 -8..+8 共 17 点，权重 exp2(-|t| * falloff)
+            """
+            src_h, src_w = src.shape[:2]
+            # 像素步长（对应 Unity 中的 texelSize * streakLength * 12 * spread）
+            step_x = dx * streak_length * 12.0 * spread
+            step_y = dy * streak_length * 12.0 * spread
+
+            accum = np.zeros_like(src)
+            total_w = 0.0
+            for si in range(-8, 9):
+                t = si / 8.0
+                weight = 2.0 ** (-abs(t) * falloff)
+                px = int(round(step_x * si))
+                py = int(round(step_y * si))
+                if px == 0 and py == 0:
+                    sample = src
+                else:
+                    # np.roll 边缘环绕（透明背景区域值接近 0，影响可忽略）
+                    sample = src
+                    if px != 0:
+                        sample = np.roll(sample, px, axis=1)
+                    if py != 0:
+                        sample = np.roll(sample, py, axis=0)
+                accum += sample * weight
+                total_w += weight
+
+            return (accum / total_w) * intensity if total_w > 0.0 else accum
+
+        dx1, dy1 = compute_glare_dir(scratch1_angle)
+        dx2, dy2 = compute_glare_dir(scratch1_angle + 90.0)  # 垂直副方向
+
+        scratch_a = streak_blur(prefiltered, dx1, dy1, scratch1_intensity)
+        scratch_b = streak_blur(prefiltered, dx2, dy2, scratch2_intensity)
+
+        # ── Pass 2: 合成（对应 Unity frag_composite）─────────────────────
+        # 将 1/4 分辨率结果上采样回全分辨率（最近邻，4x repeat）
+        scratch_a_full = np.repeat(np.repeat(scratch_a, 4, axis=0), 4, axis=1)[:h, :w]
+        scratch_b_full = np.repeat(np.repeat(scratch_b, 4, axis=0), 4, axis=1)[:h, :w]
+
+        # composite: result = base + (scratchA + scratchB) * tint * compositeIntensity
+        glare = (scratch_a_full + scratch_b_full) * tint[np.newaxis, np.newaxis, :] * composite_intensity
+        orig_rgb = scene_np[:, :, :3].astype(np.float32) / 255.0
+        result_rgb = np.clip(orig_rgb + glare, 0.0, 1.0)
+
+        result_np = scene_np.copy()
+        result_np[:, :, :3] = (result_rgb * 255.0).astype(np.uint8)
+
+        # 转回 QImage
+        result_bytes = result_np.tobytes()
+        result_img = QImage(result_bytes, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+        return result_img
+
+
+def _should_use_painter_renderer(config):
+    return sys.platform.startswith("win")
+
+
+class CircularVisualizerWindow(QWidget):
+    def __init__(self, config_queue=None, status_queue=None, embedded=False, parent=None):
+        super().__init__(parent)
+        self.config_queue = config_queue
+        self.status_queue = status_queue
+        self._embedded = embedded
+
+        if config_queue and not config_queue.empty():
+            self.config = config_queue.get()
+        else:
+            self.config = _load_config()
+
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        width = self.config.get("width", 0)
+        height = self.config.get("height", 0)
+        self.WIDTH = width if width > 0 else screen.width()
+        self.HEIGHT = height if height > 0 else screen.height()
+
+        self.setWindowTitle("圆形频谱 - PyOpenGL")
+        if not self._embedded:
+                    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                    self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+                    self.setAutoFillBackground(False)
+                    self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+                    self.resize(self.WIDTH, self.HEIGHT)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        if _should_use_painter_renderer(self.config):
+            self.gl_widget = PainterVisualizerWidget(self)
+        else:
+            self.gl_widget = OpenGLVisualizerWidget(self)
+        self.overlay = OverlayControlLayer(self)
+
+        self.window_alpha = int(self.config.get("alpha", 255))
+        self.ui_bg_alpha = int(self.config.get("ui_alpha", 180))
+
+        self.dragging = False
+        self.drag_last_global = None
+        self.drag_handle_hover = False
+
+        self.center_x = self.config.get("pos_x", -1)
+        self.center_y = self.config.get("pos_y", -1)
+        if self.center_x < 0:
+            self.center_x = self.WIDTH * 0.5
+        if self.center_y < 0:
+            self.center_y = self.HEIGHT * 0.5
+        self._clamp_center()
+
+        self.CHUNK = 2048
+        self.RATE = 44100
+        self.channel_count = 2
+        self.audio_capture = None
+
+        self.NUM_BARS = int(self.config.get("num_bars", 64))
+        self.colors = []
+        self.color_cycle_hue = 0.0
+        self.current_color_cycle_rate = 0.0
+        self.current_color_cycle_boost = 0.0
+
+        initial_bar_height = self._default_bar_height()
+        self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
+        self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.preview_spectrum_values = [0.0] * self.NUM_BARS
+        self.object_length_states = {
+            key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
+        }
+        self.spectrum_history = None
+        self.spectrum_history_sum = np.zeros(self.NUM_BARS, dtype=float)
+        self.smoothed_bar_values = np.zeros(self.NUM_BARS, dtype=float)
+
+        self.smoothing_factor = float(self.config.get("smoothing", 0.7))
+
+        self.a1_time_window = _clamp_time_window(self.config.get("a1_time_window", 10), 10)
+        self.raw_a1_value = 0.0
+        self.a1_value = 0.0
+        self.prev_a1_value = 0.0
+        self.k2_value = 0.0
+        self.last_status_send = time.time()
+
+        self.layer_rotations = {index: 0.0 for index in range(1, 6)}
+        self.tentacle_core_rotation = 0.0
+        self.tentacle_core_angular_velocity = 0.0
+        self.tentacle_core_accel_direction = 1.0
+        self.tentacle_prev_abs_p = 0.0
+        self.tentacle_prev_p_rising = False
+        self.tentacle_p_peak_reference = 0.0
+        self.tentacle_p_peak_cooldown = 0
+        self.tentacle_soft_state_signature = None
+        self.tentacle_soft_states = []
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in self.config.get("tentacle_color", (130, 240, 220))[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in self.config.get("tentacle_shader_tip_color", (88, 170, 255))[:3])
+        self.current_radius = float(self.config.get("circle_radius", 150))
+        self.radius_velocity = 0.0
+
+        self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "bars": [], "lines": []}
+        self._window_ready = False
+
+        self._update_colors()
+
+        # 预设平滑过渡状态
+        self._transition_active = False
+        self._transition_start = 0.0
+        self._transition_duration = 2.0
+        self._transition_easing = "ease_in_out"
+        self._transition_from = {}
+        self._transition_target = {}
+        self._transition_toggle_schedule = []  # legacy, unused
+        self._transition_alpha_schedule = []     # alpha-based fade schedule
+        self._transition_alpha_controlled = set()
+
+        self.audio_processor = AudioSignalProcessor(
+            self.config,
+            chunk=self.CHUNK,
+            rate=self.RATE,
+            channel_count=self.channel_count,
+        )
+        self._sync_audio_processor_state()
+
+        self._init_audio()
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.frame_timer.timeout.connect(self._tick)
+
+    def _sync_audio_processor_state(self):
+        self.a1_time_window = self.audio_processor.a1_time_window
+        self.raw_a1_value = self.audio_processor.raw_a1_value
+        self.a1_value = self.audio_processor.a1_value
+        self.k2_value = self.audio_processor.k2_value
+        self.spectrum_history = self.audio_processor.spectrum_history
+        self.spectrum_history_sum = self.audio_processor.spectrum_history_sum
+        self.smoothed_bar_values = self.audio_processor.smoothed_bar_values
+
+    def _runtime_kp_delta(self, cfg_key: str, sig: str, normalized: float) -> float:
+        if not bool(self.config.get(f"kp_bind_{cfg_key}_{sig}", False)):
+            return 0.0
+        wmin = float(self.config.get(f"kp_{cfg_key}_{sig}_wmin", 0.0))
+        wmax = float(self.config.get(f"kp_{cfg_key}_{sig}_wmax", 0.0))
+        normalized = max(0.0, min(1.0, float(normalized)))
+        return wmin + (wmax - wmin) * normalized
+
+    def _runtime_kp_add(self, cfg_key: str, base_value: float, normalized_k: float, normalized_p: float) -> float:
+        return (
+            float(base_value)
+            + self._runtime_kp_delta(cfg_key, 'k', normalized_k)
+            + self._runtime_kp_delta(cfg_key, 'p', normalized_p)
+        )
+
+    def resizeEvent(self, event):
+        self.gl_widget.setGeometry(0, 0, self.width(), self.height())
+        self.overlay.setGeometry(0, 0, self.width(), self.height())
+        self.overlay.raise_()
+        super().resizeEvent(event)
+
+    def closeEvent(self, event):
+        self.frame_timer.stop()
+        self._cleanup()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.config.get("drag_adjust_mode", False):
+                self.config["drag_adjust_mode"] = False
+                self.dragging = False
+                self.drag_handle_hover = False
+                self._send_status()
+                self.overlay.update()
+                return
+            return
+        if event.key() == Qt.Key.Key_Q:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def run(self):
+        if not self._embedded:
+            self.show()
+        self.overlay.raise_()
+        self.frame_timer.start(16)
+        QTimer.singleShot(0, self._finalize_window)
+
+    def run_embedded(self):
+        """在同进程中以嵌入模式启动（不弹出独立窗口）。"""
+        if not self.frame_timer.isActive():
+            self.frame_timer.start(16)
+            QTimer.singleShot(0, self._finalize_window)
+
+    def _finalize_window(self):
+        if self._window_ready:
+            return
+        self._window_ready = True
+        self._center_window(reset_visual_center=True)
+        self._apply_window_styles(force=True)
+        self._send_status()
+        # 立即执行一帧 tick，填充 render_state，避免第一帧空白（首次启动 bug）
+        QTimer.singleShot(0, self._tick)
+        # Win32 分层窗口 HWND 可能在 singleShot(0) 时尚未完全就绪，
+        # 延迟二次应用确保样式与重绘生效。
+        QTimer.singleShot(150, lambda: self._apply_window_styles(force=True))
+
+    def _init_audio(self):
+        self.audio_capture = LoopbackAudioCapture(chunk=self.CHUNK)
+        try:
+            self.audio_capture.start()
+            self.device_info = self.audio_capture.device_info
+            self.RATE = self.audio_capture.rate
+            self.channel_count = self.audio_capture.channel_count
+            self.audio_processor.set_stream_format(rate=self.RATE, channel_count=self.channel_count)
+        except Exception as exc:
+            print(f"获取音频设备失败: {exc}")
+            raise
+
+    def _pull_latest_audio_frame(self):
+        if not self.audio_capture:
+            return None
+        return self.audio_capture.pull_latest_frame()
+
+    def _reset_length_states(self, initial_bar_height):
+        self.bar_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.bar_velocities = np.zeros(self.NUM_BARS, dtype=float)
+        self.peak_outer_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.peak_inner_heights = np.full(self.NUM_BARS, initial_bar_height, dtype=float)
+        self.preview_spectrum_values = [float(initial_bar_height)] * self.NUM_BARS
+        self.object_length_states = {
+            key: np.full(self.NUM_BARS, initial_bar_height, dtype=float) for key in _DAMPED_OBJECT_KEYS
+        }
+        self.audio_processor.reset()
+        self._sync_audio_processor_state()
+        self.tentacle_core_angular_velocity = 0.0
+        self.tentacle_core_accel_direction = 1.0
+        self.tentacle_prev_abs_p = 0.0
+        self.tentacle_prev_p_rising = False
+        self.tentacle_p_peak_reference = 0.0
+        self.tentacle_p_peak_cooldown = 0
+        self.tentacle_soft_state_signature = None
+        self.tentacle_soft_states = []
+
+    def _default_bar_height(self):
+        default_height = float(self.config.get("bar_default_height", 0.0))
+        lower_limit = float(self.config.get("bar_internal_min", 0.0))
+        upper_limit = float(self.config.get("bar_internal_max", 300.0))
+        if lower_limit > upper_limit:
+            lower_limit, upper_limit = upper_limit, lower_limit
+        return float(np.clip(default_height, lower_limit, upper_limit))
+
+    @staticmethod
+    def _clamp_damping(value, fallback):
+        try:
+            return max(0.0, min(0.999, float(value)))
+        except Exception:
+            return max(0.0, min(0.999, float(fallback)))
+
+    def _get_damping_pair(self, prefix=None):
+        global_rise = self._clamp_damping(self.config.get("k_rise_damping", 0.1), 0.1)
+        global_fall = self._clamp_damping(self.config.get("k_fall_damping", 0.999), 0.999)
+        if not prefix:
+            return global_rise, global_fall
+        if not self.config.get(f"{prefix}_use_independent_damping", False):
+            return global_rise, global_fall
+        rise = self._clamp_damping(self.config.get(f"{prefix}_independent_rise_damping", global_rise), global_rise)
+        fall = self._clamp_damping(self.config.get(f"{prefix}_independent_fall_damping", global_fall), global_fall)
+        return rise, fall
+
+    def _get_bar_time_window(self):
+        base_time_window = _clamp_time_window(self.a1_time_window, 10.0)
+        if not self.config.get("bar_use_independent_time_window", False):
+            return base_time_window
+        return _clamp_time_window(self.config.get("bar_time_window", base_time_window), base_time_window)
+
+    def _prune_spectrum_history(self, now=None):
+        values = self.audio_processor.prune_spectrum_history(now)
+        self._sync_audio_processor_state()
+        return values
+
+    def _update_spectrum_history(self, bar_values, now=None):
+        values = self.audio_processor.update_spectrum_history(bar_values, now)
+        self._sync_audio_processor_state()
+        return values
+
+    @staticmethod
+    def _apply_damping_step(current, target, rise_damping, fall_damping):
+        return AudioSignalProcessor.apply_damping_step(current, target, rise_damping, fall_damping)
+
+    def _build_band_edges(self, spectrum_length, freq_res):
+        return self.audio_processor.build_band_edges(spectrum_length, freq_res)
+
+    def _process_audio(self, audio_data):
+        values = self.audio_processor.process_frame(audio_data)
+        self._sync_audio_processor_state()
+        return values
+
+    def _update_a1(self, loudness):
+        self.audio_processor.update_loudness(loudness)
+        self._sync_audio_processor_state()
+
+    @property
+    def effective_a1(self):
+        return self.audio_processor.effective_a1
+
+    def _send_status(self):
+        if not self.status_queue:
+            return
+        try:
+            while not self.status_queue.empty():
+                try:
+                    self.status_queue.get_nowait()
+                except Exception:
+                    break
+            self.status_queue.put(
+                {
+                    "raw_k": float(self.raw_a1_value),
+                    "k": float(self.a1_value),
+                    "p": float(self.k2_value),
+                    "a1": float(self.a1_value),
+                    "k2": float(self.k2_value),
+                    "spectrum_bars": list(self.preview_spectrum_values),
+                    "color_preview": [tuple(int(channel) for channel in color) for color in self.colors],
+                    "runtime_color_state": self._build_runtime_color_state(),
+                    "color_cycle_hue": float(self.color_cycle_hue),
+                    "color_cycle_rate": float(self.current_color_cycle_rate),
+                    "drag_adjust_mode": bool(self.config.get("drag_adjust_mode", False)),
+                    "pos_x": int(round(self.center_x)),
+                    "pos_y": int(round(self.center_y)),
+                }
+            )
+        except Exception:
+            pass
+
+    def _build_runtime_color_state(self):
+        state = {
+            'palette_preview': [tuple(int(channel) for channel in color[:3]) for color in (self.colors[:8] or [])],
+            'gradient_points': [
+                (float(entry[0]), tuple(int(channel) for channel in entry[1][:3]))
+                for entry in (self.config.get('gradient_points', []) or [])
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], (list, tuple)) and len(entry[1]) >= 3
+            ],
+            'tentacle_color': tuple(int(channel) for channel in getattr(self, 'runtime_tentacle_base_color', self.config.get('tentacle_color', (130, 240, 220)))[:3]),
+            'tentacle_shader_tip_color': tuple(int(channel) for channel in getattr(self, 'runtime_tentacle_tip_color', self.config.get('tentacle_shader_tip_color', (88, 170, 255)))[:3]),
+        }
+        for layer_index in range(1, 6):
+            state[f'c{layer_index}_color'] = tuple(int(channel) for channel in self.config.get(f'c{layer_index}_color', (255, 255, 255))[:3])
+        return state
+
+    def _update_colors(self):
+        scheme = self.config.get("color_scheme", "rainbow")
+        gradient_enabled = self.config.get("gradient_enabled", True)
+        color_dynamic = self.config.get("color_dynamic", False)
+        self.colors = []
+
+        if scheme == "custom":
+            points = sorted(
+                self.config.get("gradient_points", [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))]),
+                key=lambda item: item[0],
+            )
+            if not gradient_enabled:
+                base = tuple(points[0][1])
+                if color_dynamic:
+                    hue, sat, val = colorsys.rgb_to_hsv(base[0] / 255, base[1] / 255, base[2] / 255)
+                    for _ in range(self.NUM_BARS):
+                        next_hue = (hue + self.color_cycle_hue) % 1.0
+                        rgb = colorsys.hsv_to_rgb(next_hue, sat, val)
+                        self.colors.append(tuple(int(channel * 255) for channel in rgb))
+                else:
+                    self.colors = [base] * self.NUM_BARS
+            else:
+                for index in range(self.NUM_BARS):
+                    ratio = index / max(1, self.NUM_BARS)
+                    base = self._interpolate_color(ratio, points)
+                    if color_dynamic:
+                        hue, sat, val = colorsys.rgb_to_hsv(base[0] / 255, base[1] / 255, base[2] / 255)
+                        next_hue = (hue + self.color_cycle_hue) % 1.0
+                        rgb = colorsys.hsv_to_rgb(next_hue, sat, val)
+                        self.colors.append(tuple(int(channel * 255) for channel in rgb))
+                    else:
+                        self.colors.append(base)
+            return
+
+        for index in range(self.NUM_BARS):
+            ratio = index / max(1, self.NUM_BARS)
+            if scheme == "rainbow":
+                hue = (ratio + self.color_cycle_hue) % 1.0 if color_dynamic else ratio
+                rgb = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+            elif scheme == "fire":
+                rgb = (1.0, ratio * 0.8, ratio * 0.2)
+                if color_dynamic:
+                    hue, sat, val = colorsys.rgb_to_hsv(*rgb)
+                    rgb = colorsys.hsv_to_rgb((hue + self.color_cycle_hue) % 1.0, sat, val)
+            elif scheme == "ice":
+                rgb = (ratio * 0.3, ratio * 0.7, 1.0)
+                if color_dynamic:
+                    hue, sat, val = colorsys.rgb_to_hsv(*rgb)
+                    rgb = colorsys.hsv_to_rgb((hue + self.color_cycle_hue) % 1.0, sat, val)
+            elif scheme == "neon":
+                hue = ((ratio + 0.5) % 1.0 + self.color_cycle_hue) % 1.0 if color_dynamic else (ratio + 0.5) % 1.0
+                rgb = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+            else:
+                rgb = colorsys.hsv_to_rgb(ratio, 1.0, 1.0)
+            self.colors.append(tuple(int(channel * 255) for channel in rgb))
+
+    @staticmethod
+    def _interpolate_color(ratio, points):
+        for index in range(len(points) - 1):
+            pos1, color1 = points[index]
+            pos2, color2 = points[index + 1]
+            if pos1 <= ratio <= pos2:
+                blend = (ratio - pos1) / (pos2 - pos1) if (pos2 - pos1) > 0 else 0.0
+                return (
+                    int(color1[0] * (1 - blend) + color2[0] * blend),
+                    int(color1[1] * (1 - blend) + color2[1] * blend),
+                    int(color1[2] * (1 - blend) + color2[2] * blend),
+                )
+        return tuple(points[0][1]) if ratio <= points[0][0] else tuple(points[-1][1])
+
+    def _get_color_for_bar(self, bar_index, bar_height=None):
+        scheme = self.config.get("color_scheme", "rainbow")
+        gradient_mode = self.config.get("gradient_mode", "frequency")
+
+        if scheme != "custom" or gradient_mode != "height":
+            return self.colors[bar_index] if bar_index < len(self.colors) else (255, 255, 255)
+
+        if bar_height is None:
+            bar_height = self.bar_heights[bar_index]
+        min_height = self.config.get("bar_height_min", 0)
+        max_height = self.config.get("bar_height_max", 500)
+        ratio = max(0.0, min(1.0, (bar_height - min_height) / (max_height - min_height))) if max_height > min_height else 0.0
+
+        points = sorted(
+            self.config.get("gradient_points", [(0.0, (255, 0, 128)), (1.0, (0, 255, 255))]),
+            key=lambda item: item[0],
+        )
+        base = self._interpolate_color(ratio, points)
+
+        if self.config.get("color_dynamic", False):
+            hue, sat, val = colorsys.rgb_to_hsv(base[0] / 255, base[1] / 255, base[2] / 255)
+            rgb = colorsys.hsv_to_rgb((hue + self.color_cycle_hue) % 1.0, sat, val)
+            return tuple(int(channel * 255) for channel in rgb)
+        return base
+
+    def _center_window(self, reset_visual_center=False):
+        if self._embedded:
+            # 嵌入模式：位置由 Qt 布局管理，只更新视觉中心
+            if reset_visual_center:
+                self.center_x = max(1.0, self.width() * 0.5)
+                self.center_y = max(1.0, self.height() * 0.5)
+            self._clamp_center()
+            return
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        if self.width() >= screen.width() or self.height() >= screen.height():
+            self.move(screen.left(), screen.top())
+        else:
+            x = screen.left() + (screen.width() - self.width()) // 2
+            y = screen.top() + (screen.height() - self.height()) // 2
+            self.move(x, y)
+
+        if reset_visual_center:
+            self.center_x = self.width() * 0.5
+            self.center_y = self.height() * 0.5
+        self._clamp_center()
+
+    def _clamp_center(self):
+        width = max(1.0, float(self.width()))
+        height = max(1.0, float(self.height()))
+        margin_x = min(96.0, max(12.0, width * 0.03))
+        margin_y = min(96.0, max(12.0, height * 0.03))
+        min_x = margin_x
+        max_x = max(min_x, width - margin_x)
+        min_y = margin_y
+        max_y = max(min_y, height - margin_y)
+        self.center_x = min(max(float(self.center_x), min_x), max_x)
+        self.center_y = min(max(float(self.center_y), min_y), max_y)
+
+    def drag_handle_rect(self):
+        size = 92
+        cx = int(round(self.center_x))
+        cy = int(round(self.center_y))
+        return QRect(cx - size // 2, cy - size // 2, size, size)
+
+    def move_center_by(self, dx, dy):
+        if dx == 0 and dy == 0:
+            return
+        self.center_x += dx
+        self.center_y += dy
+        self._clamp_center()
+        self._send_status()
+        self.overlay.update()
+
+    def _apply_window_styles(self, force=False):
+        if self._embedded:
+            # 嵌入模式：跳过所有 Win32 层叠/置顶/透明操作
+            self.gl_widget.update()
+            self.overlay.update()
+            return
+        if not self._window_ready and not force:
+            return
+
+        hwnd = int(self.winId())
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        HWND_TOPMOST = -1
+        HWND_NOTOPMOST = -2
+        HWND_BOTTOM = 1
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style |= WS_EX_LAYERED
+        if self.config.get("drag_adjust_mode", False):
+            style &= ~WS_EX_TRANSPARENT
+        else:
+            style |= WS_EX_TRANSPARENT
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+
+        layer = self.config.get("window_layer", "top" if self.config.get("always_on_top", True) else "normal")
+        flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+        if layer == "bottom":
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+            user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags)
+        elif layer == "top":
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        else:
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+
+        opacity = max(0.05, min(1.0, self.window_alpha / 255.0))
+        self.setWindowOpacity(opacity)
+        self.gl_widget.update()
+        self.overlay.update()
+
+    def _build_nurbs(self, ctrl_points):
+        count = len(ctrl_points)
+        if count < 4:
+            return None
+
+        if not _HAS_SCIPY_BSPLINE:
+            return self._densify_polyline(ctrl_points, subdivisions=8, closed=True)
+
+        degree = 3
+        ctrl = np.asarray(ctrl_points, dtype=float)
+        ctrl_wrap = np.vstack([ctrl, ctrl[:degree]])
+        knots = np.arange(len(ctrl_wrap) + degree + 1, dtype=float)
+        try:
+            spline_x = BSpline(knots, ctrl_wrap[:, 0], degree)
+            spline_y = BSpline(knots, ctrl_wrap[:, 1], degree)
+            eval_count = max(count * 8, 200)
+            samples = np.linspace(degree, count + degree, eval_count, endpoint=False)
+            return list(zip(spline_x(samples), spline_y(samples)))
+        except Exception:
+            return None
+
+    def _build_open_spline(self, ctrl_points):
+        count = len(ctrl_points)
+        if count < 2:
+            return None
+
+        if not _HAS_SCIPY_BSPLINE:
+            return self._densify_polyline(ctrl_points, subdivisions=12, closed=False)
+
+        degree = min(3, count - 1)
+        ctrl = np.asarray(ctrl_points, dtype=float)
+        interior_count = count - degree - 1
+        if interior_count > 0:
+            interior = np.linspace(0.0, 1.0, interior_count + 2, dtype=float)[1:-1]
+            knots = np.concatenate([
+                np.zeros(degree + 1, dtype=float),
+                interior,
+                np.ones(degree + 1, dtype=float),
+            ])
+        else:
+            knots = np.concatenate([
+                np.zeros(degree + 1, dtype=float),
+                np.ones(degree + 1, dtype=float),
+            ])
+
+        try:
+            spline_x = BSpline(knots, ctrl[:, 0], degree)
+            spline_y = BSpline(knots, ctrl[:, 1], degree)
+            eval_count = max(count * 12, 64)
+            samples = np.linspace(0.0, 1.0, eval_count, endpoint=True)
+            return list(zip(spline_x(samples), spline_y(samples)))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lerp_color(color_a, color_b, ratio):
+        ratio = max(0.0, min(1.0, float(ratio)))
+        return (
+            int(round(color_a[0] + (color_b[0] - color_a[0]) * ratio)),
+            int(round(color_a[1] + (color_b[1] - color_a[1]) * ratio)),
+            int(round(color_a[2] + (color_b[2] - color_a[2]) * ratio)),
+        )
+
+    @staticmethod
+    def _cp_count_for_tentacle(index, cp_min, cp_max):
+        if cp_max <= cp_min:
+            return cp_min
+        return cp_min + (index % (cp_max - cp_min + 1))
+
+    def _ensure_tentacle_soft_states(self, count, cp_min, cp_max):
+        counts = tuple(self._cp_count_for_tentacle(index, cp_min, cp_max) for index in range(count))
+        signature = (count, counts)
+        if signature == self.tentacle_soft_state_signature:
+            return
+
+        self.tentacle_soft_states = []
+        for cp_count in counts:
+            outer_points = max(1, cp_count - 1)
+            self.tentacle_soft_states.append({
+                "offsets": np.zeros((outer_points, 2), dtype=float),
+                "velocities": np.zeros((outer_points, 2), dtype=float),
+                "initialized": False,
+            })
+        self.tentacle_soft_state_signature = signature
+
+    @staticmethod
+    def _star_points(cx, cy, outer_radius, inner_ratio, point_count, rotation):
+        points = []
+        point_count = max(3, int(point_count))
+        inner_radius = max(1.0, float(outer_radius) * max(0.01, min(1.0, float(inner_ratio))))
+        for index in range(point_count * 2):
+            angle = rotation + (index / (point_count * 2)) * math.tau - math.pi / 2
+            radius = outer_radius if index % 2 == 0 else inner_radius
+            points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
+        return points
+
+    @staticmethod
+    def _densify_polyline(points, subdivisions=12, closed=False):
+        if not points:
+            return []
+        if len(points) == 1:
+            return [points[0]]
+
+        subdivisions = max(1, int(subdivisions))
+        dense_points = []
+        limit = len(points) if closed else len(points) - 1
+        for index in range(limit):
+            start = points[index]
+            end = points[(index + 1) % len(points)]
+            for step in range(subdivisions):
+                ratio = step / subdivisions
+                dense_points.append((
+                    float(start[0]) + (float(end[0]) - float(start[0])) * ratio,
+                    float(start[1]) + (float(end[1]) - float(start[1])) * ratio,
+                ))
+        dense_points.append(points[0] if closed else points[-1])
+        return dense_points
+
+    def _build_tentacle_segments(self, points, root_color, tip_color, alpha_scale, root_thickness, tip_thickness, alpha_start, alpha_end, bias):
+        if not points or len(points) < 2:
+            return []
+
+        segment_count = len(points) - 1
+        segments = []
+        for index in range(segment_count):
+            start = points[index]
+            end = points[index + 1]
+            ratio = (index + 0.5) / max(1, segment_count)
+            grad_t = pow(ratio, max(0.01, float(bias)))
+            color = self._lerp_color(root_color, tip_color, grad_t)
+            alpha_ratio = alpha_start + (alpha_end - alpha_start) * grad_t
+            alpha = max(0, min(255, int(round(alpha_scale * alpha_ratio))))
+            thickness = max(0.0, float(root_thickness) + (float(tip_thickness) - float(root_thickness)) * grad_t)
+            if alpha <= 0 or thickness <= 0.05:
+                continue
+            segments.append((start, end, (*color, alpha), thickness))
+        return segments
+
+    def _contour_from_radii(self, cx, cy, radii, rot_rad, segments, seg_angle, step):
+        sample_ids = np.arange(0, self.NUM_BARS, step)
+        bar_ids = np.tile(sample_ids, segments)
+        seg_ids = np.repeat(np.arange(segments), len(sample_ids))
+        angles = bar_ids / self.NUM_BARS * seg_angle - np.pi / 2 + rot_rad + seg_ids * seg_angle
+        pos_x = cx + radii[bar_ids] * np.cos(angles)
+        pos_y = cy + radii[bar_ids] * np.sin(angles)
+        return self._build_nurbs(list(zip(pos_x, pos_y)))
+
+    @staticmethod
+    def _circle_points(cx, cy, radius, segments=256, rotation=0.0):
+        angles = np.linspace(0.0, np.pi * 2.0, max(32, segments), endpoint=False) + rotation - np.pi / 2
+        pos_x = cx + radius * np.cos(angles)
+        pos_y = cy + radius * np.sin(angles)
+        return list(zip(pos_x, pos_y))
+
+    def _build_bar_segments(self, cx, cy, radii_a, radii_b, rot_a, rot_b, segments, seg_angle, lengths, key):
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+        fixed = self.config.get(f"{key}_fixed", False)
+        fixed_len = self._runtime_kp_add(key + "_fixed_len", float(self.config.get(f"{key}_fixed_len", 30)), normalized_k, normalized_p)
+        from_start = self.config.get(f"{key}_from_start", True)
+        from_end = self.config.get(f"{key}_from_end", False)
+        from_center = self.config.get(f"{key}_from_center", False)
+
+        indices = np.arange(self.NUM_BARS)
+        line_segments = []
+        for segment in range(segments):
+            seg_off = segment * seg_angle
+            angle_a = indices / self.NUM_BARS * seg_angle - np.pi / 2 + rot_a + seg_off
+            angle_b = indices / self.NUM_BARS * seg_angle - np.pi / 2 + rot_b + seg_off
+            ax = cx + radii_a * np.cos(angle_a)
+            ay = cy + radii_a * np.sin(angle_a)
+            bx = cx + radii_b * np.cos(angle_b)
+            by = cy + radii_b * np.sin(angle_b)
+
+            b_alpha = int(self.config.get(f"_tr_{key}_alpha", 255))
+            len_frac = float(self.config.get(f"_tr_{key}_len_frac", 1.0))
+            if not fixed:
+                for index in range(self.NUM_BARS):
+                    color_index = (index + segment * self.NUM_BARS // max(1, segments)) % max(1, len(self.colors))
+                    color = self._get_color_for_bar(color_index, lengths[index])
+                    ex = ax[index] + (bx[index] - ax[index]) * len_frac
+                    ey = ay[index] + (by[index] - ay[index]) * len_frac
+                    line_segments.append(((ax[index], ay[index]), (ex, ey), (*color, b_alpha)))
+                continue
+
+            eff_fixed_len = fixed_len * len_frac
+            delta_x = bx - ax
+            delta_y = by - ay
+            full_len = np.sqrt(delta_x * delta_x + delta_y * delta_y)
+            full_len = np.maximum(full_len, 1e-6)
+            unit_x = delta_x / full_len
+            unit_y = delta_y / full_len
+            clip_len = np.minimum(eff_fixed_len, full_len)
+
+            for index in range(self.NUM_BARS):
+                color_index = (index + segment * self.NUM_BARS // max(1, segments)) % max(1, len(self.colors))
+                color = self._get_color_for_bar(color_index, lengths[index])
+                rgba = (*color, b_alpha)
+                if from_start:
+                    line_segments.append(
+                        (
+                            (ax[index], ay[index]),
+                            (ax[index] + unit_x[index] * clip_len[index], ay[index] + unit_y[index] * clip_len[index]),
+                            rgba,
+                        )
+                    )
+                if from_end:
+                    line_segments.append(
+                        (
+                            (bx[index], by[index]),
+                            (bx[index] - unit_x[index] * clip_len[index], by[index] - unit_y[index] * clip_len[index]),
+                            rgba,
+                        )
+                    )
+                if from_center:
+                    mid_x = (ax[index] + bx[index]) * 0.5
+                    mid_y = (ay[index] + by[index]) * 0.5
+                    half = clip_len[index] * 0.5
+                    line_segments.append(
+                        (
+                            (mid_x - unit_x[index] * half, mid_y - unit_y[index] * half),
+                            (mid_x + unit_x[index] * half, mid_y + unit_y[index] * half),
+                            rgba,
+                        )
+                    )
+        return line_segments
+
+    def _build_tentacle_curves(self, cx, cy, radius, scale, shared_lengths):
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in self.config.get("tentacle_color", (130, 240, 220))[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in self.config.get("tentacle_shader_tip_color", (88, 170, 255))[:3])
+        if not self.config.get("tentacles_enabled", True):
+            return []
+        if not self.config.get("tentacle_on", True):
+            return []
+
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+
+        def _lerp(a, b, t):
+            return float(a) + (float(b) - float(a)) * max(0.0, min(1.0, float(t)))
+
+        def _kp_bind_key(cfg_key: str, sig: str) -> str:
+            return f"kp_bind_{cfg_key}_{sig}"
+
+        def _kp_wmin_key(cfg_key: str, sig: str) -> str:
+            return f"kp_{cfg_key}_{sig}_wmin"
+
+        def _kp_wmax_key(cfg_key: str, sig: str) -> str:
+            return f"kp_{cfg_key}_{sig}_wmax"
+
+        def _kp_delta(cfg_key: str, sig: str, normalized: float) -> float:
+            if not bool(self.config.get(_kp_bind_key(cfg_key, sig), False)):
+                return 0.0
+            wmin = float(self.config.get(_kp_wmin_key(cfg_key, sig), 0.0))
+            wmax = float(self.config.get(_kp_wmax_key(cfg_key, sig), 0.0))
+            return _lerp(wmin, wmax, normalized)
+
+        def _kp_add(cfg_key: str, base_value: float) -> float:
+            return float(base_value) + _kp_delta(cfg_key, 'k', normalized_k) + _kp_delta(cfg_key, 'p', normalized_p)
+
+        def _any_kp_enabled_for(cfg_key: str) -> bool:
+            return bool(self.config.get(_kp_bind_key(cfg_key, 'k'), False)) or bool(self.config.get(_kp_bind_key(cfg_key, 'p'), False))
+
+        def _apply_kp_to_rgb(prefix: str, rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+            # 通道 cfg_key 命名规则：<prefix>__h/__s/__l 或 <prefix>__r/__g/__b
+            # 若同时存在两套绑定：优先采用 HSL（因为弹窗默认 HSL 模式）。
+            try:
+                base_r, base_g, base_b = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+            except Exception:
+                base_r, base_g, base_b = (255, 255, 255)
+
+            h_key = f"{prefix}__h"
+            s_key = f"{prefix}__s"
+            l_key = f"{prefix}__l"
+            r_key = f"{prefix}__r"
+            g_key = f"{prefix}__g"
+            b_key = f"{prefix}__b"
+
+            use_hsl = _any_kp_enabled_for(h_key) or _any_kp_enabled_for(s_key) or _any_kp_enabled_for(l_key)
+            use_rgb = _any_kp_enabled_for(r_key) or _any_kp_enabled_for(g_key) or _any_kp_enabled_for(b_key)
+
+            if use_hsl:
+                hh, ll, ss = colorsys.rgb_to_hls(base_r / 255.0, base_g / 255.0, base_b / 255.0)
+                h_deg = (hh % 1.0) * 360.0
+                s_pct = max(0.0, min(100.0, ss * 100.0))
+                l_pct = max(0.0, min(100.0, ll * 100.0))
+
+                h_deg = (h_deg + _kp_delta(h_key, 'k', normalized_k) + _kp_delta(h_key, 'p', normalized_p)) % 360.0
+                s_pct = max(0.0, min(100.0, s_pct + _kp_delta(s_key, 'k', normalized_k) + _kp_delta(s_key, 'p', normalized_p)))
+                l_pct = max(0.0, min(100.0, l_pct + _kp_delta(l_key, 'k', normalized_k) + _kp_delta(l_key, 'p', normalized_p)))
+
+                rr, gg, bb = colorsys.hls_to_rgb((h_deg % 360.0) / 360.0, l_pct / 100.0, s_pct / 100.0)
+                return (int(round(rr * 255.0)), int(round(gg * 255.0)), int(round(bb * 255.0)))
+
+            if use_rgb:
+                rr = base_r + _kp_delta(r_key, 'k', normalized_k) + _kp_delta(r_key, 'p', normalized_p)
+                gg = base_g + _kp_delta(g_key, 'k', normalized_k) + _kp_delta(g_key, 'p', normalized_p)
+                bb = base_b + _kp_delta(b_key, 'k', normalized_k) + _kp_delta(b_key, 'p', normalized_p)
+                rr = max(0.0, min(255.0, rr))
+                gg = max(0.0, min(255.0, gg))
+                bb = max(0.0, min(255.0, bb))
+                return (int(round(rr)), int(round(gg)), int(round(bb)))
+
+            return (base_r, base_g, base_b)
+
+        # 触须参数（所有数值参数均支持 K/P 绑定）
+        count = int(round(_kp_add('tentacle_count', float(self.config.get("tentacle_count", 16)))))
+        count = max(3, min(256, count))
+
+        base_length_unscaled = _kp_add('tentacle_length', float(self.config.get("tentacle_length", 280.0)))
+        base_length = max(12.0, base_length_unscaled * scale)
+
+        length_jitter_unscaled = _kp_add('tentacle_length_jitter', float(self.config.get("tentacle_length_jitter", 80.0)))
+        length_jitter = max(0.0, length_jitter_unscaled * scale)
+
+        length_jitter_speed = max(0.0, _kp_add('tentacle_length_jitter_speed', float(self.config.get("tentacle_length_jitter_speed", 0.35))))
+        length_jitter_random = bool(self.config.get("tentacle_length_jitter_random", False))
+
+        cp_min = int(round(_kp_add('tentacle_control_points_min', float(self.config.get("tentacle_control_points_min", 3)))))
+        cp_min = max(3, min(24, cp_min))
+        cp_max = int(round(_kp_add('tentacle_control_points_max', float(self.config.get("tentacle_control_points_max", 5)))))
+        cp_max = max(cp_min, min(24, cp_max))
+
+        tip_bias = max(0.1, _kp_add('tentacle_tip_bias', float(self.config.get("tentacle_tip_bias", 1.85))))
+
+        turbulence_base = max(0.0, float(self.config.get("tentacle_turbulence", 46.0)) * scale)
+        k_influence = max(0.0, float(self.config.get("tentacle_k_influence", 1.35)))
+
+        sway_speed = max(0.0, _kp_add('tentacle_sway_speed', float(self.config.get("tentacle_sway_speed", 1.1))))
+        sway_density = max(0.1, _kp_add('tentacle_sway_density', float(self.config.get("tentacle_sway_density", 2.4))))
+
+        transition_tentacle_alpha = self.config.get("_tr_tentacle_alpha")
+        if transition_tentacle_alpha is None:
+            alpha_base = float(self.config.get("tentacle_alpha", 170))
+            alpha = int(round(_kp_add('tentacle_alpha', alpha_base)))
+        else:
+            alpha = int(round(float(transition_tentacle_alpha)))
+        alpha = max(0, min(255, alpha))
+
+        length_fraction = max(0.0, float(self.config.get("_tr_tentacle_len_frac", 1.0)))
+
+        thickness = max(0.0, _kp_add('tentacle_thick', float(self.config.get("tentacle_thick", 3))))
+
+        tip_thickness_frac = _kp_add('tentacle_tip_thickness', float(self.config.get("tentacle_tip_thickness", 0.15)))
+        tip_thickness_frac = max(0.0, min(1.0, tip_thickness_frac))
+        tip_thickness = thickness * tip_thickness_frac
+
+        water_damping = _kp_add('tentacle_water_damping', float(self.config.get("tentacle_water_damping", 0.84)))
+        water_damping = max(0.0, min(0.999, water_damping))
+
+        angle_stiffness = max(0.0, _kp_add('tentacle_angle_stiffness', float(self.config.get("tentacle_angle_stiffness", 0.18))))
+        length_stiffness = max(0.0, _kp_add('tentacle_length_stiffness', float(self.config.get("tentacle_length_stiffness", 0.24))))
+        stretch_limit = max(1.0, _kp_add('tentacle_stretch_limit', float(self.config.get("tentacle_stretch_limit", 1.12))))
+
+        shader_enabled = bool(self.config.get("tentacle_shader_enabled", True))
+        tip_color = tuple(self.config.get("tentacle_shader_tip_color", (88, 170, 255)))
+        tip_color = _apply_kp_to_rgb('tentacle_shader_tip_color', tip_color)
+        alpha_start = _kp_add('tentacle_shader_alpha_start', float(self.config.get("tentacle_shader_alpha_start", 1.0)))
+        alpha_start = max(0.0, min(1.0, alpha_start))
+        alpha_end = _kp_add('tentacle_shader_alpha_end', float(self.config.get("tentacle_shader_alpha_end", 0.18)))
+        alpha_end = max(0.0, min(1.0, alpha_end))
+        shader_bias = max(0.01, _kp_add('tentacle_shader_bias', float(self.config.get("tentacle_shader_bias", 1.15))))
+
+        base_color = tuple(self.config.get("tentacle_color", (130, 240, 220)))
+        base_color = _apply_kp_to_rgb('tentacle_color', base_color)
+        self.runtime_tentacle_base_color = tuple(int(channel) for channel in base_color[:3])
+        self.runtime_tentacle_tip_color = tuple(int(channel) for channel in tip_color[:3])
+
+        # 紊流：沿用“系数乘法”语义，并扩展为可同时绑定 K/P
+        turbulence_coef = 0.0
+        if bool(self.config.get("kp_bind_tentacle_turbulence_k", False)):
+            wmin = float(self.config.get("kp_tentacle_turbulence_k_wmin", 0.22))
+            wmax = float(self.config.get("kp_tentacle_turbulence_k_wmax", 0.683))
+            turbulence_coef += _lerp(wmin, wmax, normalized_k)
+        if bool(self.config.get("kp_bind_tentacle_turbulence_p", False)):
+            wmin = float(self.config.get("kp_tentacle_turbulence_p_wmin", 0.0))
+            wmax = float(self.config.get("kp_tentacle_turbulence_p_wmax", 0.0))
+            turbulence_coef += _lerp(wmin, wmax, normalized_p)
+        if turbulence_coef <= 0.0 and not bool(self.config.get("kp_bind_tentacle_turbulence_k", False)) and not bool(self.config.get("kp_bind_tentacle_turbulence_p", False)):
+            turbulence_coef = 0.22 + normalized_k * min(0.55, 0.22 + k_influence * 0.18)
+        turbulence_coef = max(0.0, min(2.5, turbulence_coef))
+        turbulence = turbulence_base * turbulence_coef
+        angular_velocity = float(getattr(self, "tentacle_core_angular_velocity", 0.0))
+        swirl_strength = min(1.65, abs(angular_velocity) * (7.5 + sway_speed * 2.0))
+        fluid_damping = 0.86 + water_damping * 0.13
+        bend_response = 0.04 + angle_stiffness * 0.18
+        stretch_response = 0.04 + length_stiffness * 0.16
+        follow_response = 0.06 + (angle_stiffness + length_stiffness) * 0.08
+        time_now = time.time()
+        flow_time = time_now * (0.18 + sway_speed * 0.18)
+        jitter_time = time_now * length_jitter_speed
+        curves = []
+        self._ensure_tentacle_soft_states(count, cp_min, cp_max)
+
+        for index in range(count):
+            angle = self.tentacle_core_rotation + (index / count) * math.tau - math.pi / 2
+            angle += 0.08 * math.sin(time_now * (0.35 + sway_speed * 0.25) + index * 0.91) * (0.2 + normalized_k * 0.8)
+            direction = np.array((math.cos(angle), math.sin(angle)), dtype=float)
+
+            normal = np.array((-direction[1], direction[0]), dtype=float)
+            state = self.tentacle_soft_states[index]
+            cp_count = self._cp_count_for_tentacle(index, cp_min, cp_max)
+            outer_points = max(1, cp_count - 1)
+            shared_index = index % max(1, len(shared_lengths))
+            shared_length = float(shared_lengths[shared_index]) if len(shared_lengths) else 0.0
+
+            # 非随机时：所有触须同步往复；随机时：每根触须相位/幅度不同
+            if length_jitter_random:
+                jitter_phase = (jitter_time + index * 0.17) % 1.0
+            else:
+                jitter_phase = jitter_time % 1.0
+            jitter_tri = 1.0 - abs(2.0 * jitter_phase - 1.0)  # 0→1→0
+            jitter_scale = 1.0
+            if length_jitter_random:
+                hashed = math.sin(index * 12.9898 + 78.233) * 43758.5453
+                hashed -= math.floor(hashed)
+                jitter_scale = 0.25 + 0.75 * hashed
+            jitter_amount = jitter_tri * length_jitter * jitter_scale
+            total_length = base_length + shared_length * 0.38 + jitter_amount * 0.45
+            total_length = max(12.0, total_length * max(0.0, length_fraction))
+            segment_length = total_length / max(1, outer_points)
+            root_position = np.array((cx, cy), dtype=float)
+
+            ctrl_points = [(float(root_position[0]), float(root_position[1]))]
+            desired_offsets = [np.zeros(2, dtype=float)]
+
+            for state_index in range(outer_points):
+                ratio = (state_index + 1) / max(1, outer_points)
+                tip_weight = pow(ratio, tip_bias)
+                arc_length = segment_length * (state_index + 1)
+                radial_wave = math.sin(flow_time * (0.75 + sway_density * 0.22) + index * 0.73 + ratio * (2.4 + sway_density * 0.8))
+                lateral_wave = math.cos(flow_time * (0.58 + sway_density * 0.17) + index * 0.41 - ratio * 1.9)
+                lateral_offset = turbulence * tip_weight * 0.16 * lateral_wave
+                radial_offset = turbulence * tip_weight * 0.12 * radial_wave
+
+                contract_amount = swirl_strength * total_length * pow(ratio, 1.35) * (0.1 + angle_stiffness * 0.22)
+                contracted_arc = max(segment_length * (1.0 + 0.08 * length_stiffness), arc_length + radial_offset - contract_amount)
+                swirl_drag = angular_velocity * total_length * tip_weight * (0.3 + angle_stiffness * 0.6)
+                inward_pull = -direction * (swirl_strength * total_length * pow(ratio, 1.55) * (0.035 + length_stiffness * 0.08))
+                desired_prev = desired_offsets[-1]
+                desired_segment = direction * max(segment_length * 0.75, contracted_arc - np.linalg.norm(desired_prev))
+                desired_segment += normal * (lateral_offset * 0.38 + swirl_drag * 0.72)
+                segment_norm = float(np.linalg.norm(desired_segment))
+                if segment_norm > 1e-6:
+                    desired_segment = desired_segment / segment_norm * max(segment_length * 0.72, min(segment_norm, segment_length * 1.08))
+                desired_offset = desired_prev + desired_segment + inward_pull
+                desired_offsets.append(desired_offset)
+
+                if not state["initialized"]:
+                    state["offsets"][state_index] = desired_offset
+                    state["velocities"][state_index] = 0.0
+                else:
+                    current = state["offsets"][state_index]
+                    velocity = state["velocities"][state_index]
+                    parent_current = state["offsets"][state_index - 1] if state_index > 0 else np.zeros(2, dtype=float)
+                    parent_desired = desired_offsets[state_index]
+                    radial_current = float(np.dot(current, direction))
+                    tangential_current = float(np.dot(current, normal))
+                    radial_target = contracted_arc
+                    tangential_target = lateral_offset + swirl_drag
+                    current_segment = current - parent_current
+                    desired_segment = desired_offset - parent_desired
+                    blended_target = current * 0.72 + desired_offset * 0.28
+                    force = (blended_target - current) * (0.05 + stretch_response * 0.45)
+                    force += (desired_segment - current_segment) * (0.07 + stretch_response * 0.38)
+                    force += direction * (radial_target - radial_current) * stretch_response
+                    force += normal * (tangential_target - tangential_current) * (bend_response + 0.04 * swirl_strength)
+                    force += (parent_current - parent_desired) * follow_response
+                    velocity = velocity * fluid_damping + force
+                    max_velocity = max(0.6, segment_length * (0.11 + sway_speed * 0.015))
+                    velocity_norm = float(np.linalg.norm(velocity))
+                    if velocity_norm > max_velocity:
+                        velocity = velocity * (max_velocity / velocity_norm)
+                    current = current + velocity
+                    max_offset_length = max(1.0, arc_length * stretch_limit)
+                    current_length = float(np.linalg.norm(current))
+                    if current_length > max_offset_length:
+                        clamp_ratio = max_offset_length / current_length
+                        current = current * clamp_ratio
+                        velocity = velocity * clamp_ratio
+                    state["offsets"][state_index] = current
+                    state["velocities"][state_index] = velocity
+
+                current_offset = state["offsets"][state_index]
+                ctrl_points.append((
+                    float(root_position[0] + current_offset[0]),
+                    float(root_position[1] + current_offset[1]),
+                ))
+
+            state["initialized"] = True
+
+            spline_points = self._build_open_spline(ctrl_points)
+            if not spline_points or len(spline_points) < 2:
+                continue
+
+            color_index = index % max(1, len(self.colors))
+            spectrum_color = self.colors[color_index] if self.colors else base_color
+            root_color = self._lerp_color(base_color, spectrum_color, 0.35)
+            shader_tip = tip_color if shader_enabled else root_color
+            shader_alpha_start = alpha_start if shader_enabled else 1.0
+            shader_alpha_end = alpha_end if shader_enabled else 1.0
+            segments = self._build_tentacle_segments(
+                spline_points,
+                root_color,
+                shader_tip,
+                alpha,
+                thickness,
+                tip_thickness,
+                shader_alpha_start,
+                shader_alpha_end,
+                shader_bias,
+            )
+            if segments:
+                curves.append({"segments": segments})
+
+        return curves
+
+    def _update_visual_state(self, bar_values):
+        if not self.config.get("master_visible", True):
+            self.preview_spectrum_values = [0.0] * self.NUM_BARS
+            self.render_state = {"center": (self.center_x, self.center_y), "fills": [], "tentacles": [], "bars": [], "lines": []}
+            return
+
+        cx = float(self.center_x)
+        cy = float(self.center_y)
+        scale = float(self.config.get("global_scale", 1.0))
+        main_radius_scale = float(self.config.get("main_radius_scale", 1.0))
+        rotation_base = float(self.config.get("rotation_base", 1.0))
+        base_radius = float(self.config.get("circle_radius", 150)) * scale * main_radius_scale
+        segments = max(1, int(self.config.get("circle_segments", 1)))
+        seg_angle = 2 * np.pi / segments
+
+        target_radius = base_radius
+        effective_a1 = self.effective_a1
+        if self.config.get("circle_a1_radius", True) and effective_a1 > 0:
+            target_radius = base_radius + (effective_a1 / 1000.0) * 100.0 * scale
+
+        radius_damping = float(self.config.get("radius_damping", 0.92))
+        radius_spring = float(self.config.get("radius_spring", 0.15))
+        radius_gravity = float(self.config.get("radius_gravity", 0.3))
+
+        spring_force = (target_radius - self.current_radius) * radius_spring
+        gravity_force = -(self.current_radius - base_radius) * radius_gravity * 0.01
+        self.radius_velocity *= radius_damping
+        self.radius_velocity += spring_force + gravity_force
+        self.current_radius = max(10.0, self.current_radius + self.radius_velocity)
+        radius = self.current_radius
+
+        bar_len_min = float(self.config.get("bar_length_min", 0))
+        bar_len_max = float(self.config.get("bar_length_max", 300))
+        if bar_len_min > bar_len_max:
+            bar_len_min, bar_len_max = bar_len_max, bar_len_min
+        internal_min = float(self.config.get("bar_internal_min", 0.0))
+        internal_max = float(self.config.get("bar_internal_max", 300.0))
+        if internal_min > internal_max:
+            internal_min, internal_max = internal_max, internal_min
+        targets = self._default_bar_height() + bar_values / 200.0
+        shared_rise, shared_fall = self._get_damping_pair()
+        self.bar_heights = np.clip(
+            self._apply_damping_step(self.bar_heights, targets, shared_rise, shared_fall),
+            internal_min,
+            internal_max,
+        )
+        shared_lengths = np.clip(self.bar_heights, bar_len_min, bar_len_max) * scale
+
+        object_lengths = {}
+        for key in _DAMPED_OBJECT_KEYS:
+            if self.config.get(f"{key}_use_independent_damping", False):
+                rise_damping, fall_damping = self._get_damping_pair(key)
+                state = self.object_length_states.get(key)
+                if state is None or len(state) != self.NUM_BARS:
+                    state = np.full(self.NUM_BARS, self._default_bar_height(), dtype=float)
+                state = np.clip(
+                    self._apply_damping_step(state, targets, rise_damping, fall_damping),
+                    internal_min,
+                    internal_max,
+                )
+                self.object_length_states[key] = state
+                object_lengths[key] = np.clip(state, bar_len_min, bar_len_max) * scale
+            else:
+                object_lengths[key] = shared_lengths
+
+        self.preview_spectrum_values = [float(value) for value in object_lengths["bar"].tolist()]
+
+        normalized_k = min(1.0, math.log1p(abs(float(self.effective_a1))) / 6.0)
+        normalized_p = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+
+        decay_inner = self._runtime_kp_add("c1_decay", float(self.config.get("c1_decay", 0.995)), normalized_k, normalized_p)
+        decay_outer = self._runtime_kp_add("c5_decay", float(self.config.get("c5_decay", 0.995)), normalized_k, normalized_p)
+        self.peak_inner_heights = np.maximum(object_lengths["c1"], self.peak_inner_heights * decay_inner)
+        self.peak_outer_heights = np.maximum(object_lengths["c5"], self.peak_outer_heights * decay_outer)
+
+        a1_delta = abs(effective_a1 - self.prev_a1_value)
+        self.prev_a1_value = effective_a1
+        normalized_delta = min(a1_delta / 500.0, 1.0)
+        for layer_index in range(1, 6):
+            speed = self._runtime_kp_add(f"c{layer_index}_rot_speed", float(self.config.get(f"c{layer_index}_rot_speed", 1.0)), normalized_k, normalized_p)
+            power = self._runtime_kp_add(f"c{layer_index}_rot_pow", float(self.config.get(f"c{layer_index}_rot_pow", 0.5)), normalized_k, normalized_p)
+            if self.config.get("circle_a1_rotation", True) and normalized_delta > 1e-4:
+                if power >= 0:
+                    factor = pow(normalized_delta + 0.001, power)
+                else:
+                    factor = max(0.0, 1.0 - pow(normalized_delta, abs(power)))
+                self.layer_rotations[layer_index] += speed * factor * 2.0 * rotation_base
+            else:
+                self.layer_rotations[layer_index] += speed * 0.1 * rotation_base
+            self.layer_rotations[layer_index] %= 360.0
+        rot = {index: np.deg2rad(self.layer_rotations[index]) for index in range(1, 6)}
+
+        radius_map = {
+            1: np.maximum(0, radius - self.peak_inner_heights),
+            2: np.maximum(0, radius - object_lengths["c2"]),
+            3: np.full(self.NUM_BARS, radius),
+            4: radius + object_lengths["c4"],
+            5: radius + self.peak_outer_heights,
+        }
+
+        contours_enabled = bool(self.config.get("contours_enabled", True))
+        bars_enabled = bool(self.config.get("bars_enabled", True))
+        tentacles_enabled = bool(self.config.get("tentacles_enabled", True))
+
+        contour_points = {}
+        circle_points = None
+        fills = []
+        if contours_enabled:
+            for layer_index in (1, 2, 4, 5):
+                need_line = self.config.get(f"c{layer_index}_on", False)
+                need_fill = self.config.get(f"c{layer_index}_fill", False)
+                if not (need_line or need_fill):
+                    continue
+                step = max(1, int(round(self._runtime_kp_add(f"c{layer_index}_step", float(self.config.get(f"c{layer_index}_step", 2)), normalized_k, normalized_p))))
+                contour_points[layer_index] = self._contour_from_radii(cx, cy, radius_map[layer_index], rot[layer_index], segments, seg_angle, step)
+
+            circle_points = self._circle_points(cx, cy, radius, max(96, self.NUM_BARS * segments * 4), rot[3])
+
+            for layer_index in (5, 4, 3, 2, 1):
+                if not self.config.get(f"c{layer_index}_fill", False):
+                    continue
+                points = circle_points if layer_index == 3 else contour_points.get(layer_index)
+                if points and len(points) >= 3:
+                    color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
+                    transition_alpha = self.config.get(f"_tr_c{layer_index}_fill_alpha")
+                    if transition_alpha is None:
+                        alpha = int(round(self._runtime_kp_add(f"c{layer_index}_fill_alpha", float(self.config.get(f"c{layer_index}_fill_alpha", 50)), normalized_k, normalized_p)))
+                    else:
+                        alpha = int(round(float(transition_alpha)))
+                    alpha = max(0, min(255, alpha))
+                    fills.append({"points": points, "color": (*color, alpha)})
+
+        if tentacles_enabled and self.config.get("tentacle_core_on", True):
+            normalized_k_speed = min(1.0, math.log1p(abs(float(self.a1_value))) / 6.0)
+            normalized_p_speed = min(1.0, math.log1p(abs(float(self.k2_value))) / 6.0)
+            abs_p = abs(float(self.k2_value))
+            self.tentacle_p_peak_reference = self.tentacle_p_peak_reference * 0.94 + abs_p * 0.06
+            is_rising = abs_p > self.tentacle_prev_abs_p + 1e-4
+            if self.tentacle_p_peak_cooldown > 0:
+                self.tentacle_p_peak_cooldown -= 1
+            peak_threshold = max(0.015, self.tentacle_p_peak_reference * 1.08)
+            if self.tentacle_prev_p_rising and not is_rising and self.tentacle_prev_abs_p >= peak_threshold and self.tentacle_p_peak_cooldown == 0:
+                self.tentacle_core_accel_direction *= -1.0
+                self.tentacle_p_peak_cooldown = 10
+            self.tentacle_prev_p_rising = is_rising
+            self.tentacle_prev_abs_p = abs_p
+            core_acceleration = float(self.config.get("tentacle_core_base_speed", 0.75))
+
+            def _lerp(a, b, t):
+                return float(a) + (float(b) - float(a)) * max(0.0, min(1.0, float(t)))
+
+            if bool(self.config.get("kp_bind_tentacle_core_base_speed_k", False)):
+                wmin = float(self.config.get("kp_tentacle_core_base_speed_k_wmin", 0.0))
+                wmax = float(self.config.get("kp_tentacle_core_base_speed_k_wmax", 1.2))
+                core_acceleration += _lerp(wmin, wmax, normalized_k_speed)
+            else:
+                core_acceleration += normalized_k_speed * float(self.config.get("tentacle_core_k_speed", 1.2))
+
+            if bool(self.config.get("kp_bind_tentacle_core_base_speed_p", False)):
+                wmin = float(self.config.get("kp_tentacle_core_base_speed_p_wmin", 0.0))
+                wmax = float(self.config.get("kp_tentacle_core_base_speed_p_wmax", 1.35))
+                core_acceleration += _lerp(wmin, wmax, normalized_p_speed)
+            else:
+                core_acceleration += normalized_p_speed * float(self.config.get("tentacle_core_p_speed", 1.35))
+            core_acceleration *= self.tentacle_core_accel_direction
+            self.tentacle_core_angular_velocity *= 0.92
+            self.tentacle_core_angular_velocity += core_acceleration * 0.0028 * rotation_base
+            self.tentacle_core_angular_velocity = float(np.clip(self.tentacle_core_angular_velocity, -0.12, 0.12))
+            self.tentacle_core_rotation = (self.tentacle_core_rotation + self.tentacle_core_angular_velocity) % math.tau
+        else:
+            self.tentacle_core_angular_velocity *= 0.82
+        tentacles = self._build_tentacle_curves(cx, cy, radius, scale, shared_lengths)
+
+        bars = []
+        if bars_enabled:
+            for layer_a, layer_b, key in ((4, 5, "b45"), (3, 4, "b34"), (2, 3, "b23"), (1, 2, "b12")):
+                if not self.config.get(f"{key}_on", False):
+                    continue
+                thickness = int(round(self._runtime_kp_add(f"{key}_thick", float(self.config.get(f"{key}_thick", 3)), normalized_k, normalized_p)))
+                thickness = max(1, thickness)
+                segments_data = self._build_bar_segments(
+                    cx,
+                    cy,
+                    radius_map[layer_a],
+                    radius_map[layer_b],
+                    rot[layer_a],
+                    rot[layer_b],
+                    segments,
+                    seg_angle,
+                    object_lengths[key],
+                    key,
+                )
+                bars.append({"segments": segments_data, "thickness": thickness})
+
+        lines = []
+        if contours_enabled:
+            for layer_index in (5, 4, 3, 2, 1):
+                if not self.config.get(f"c{layer_index}_on", False):
+                    continue
+                points = circle_points if layer_index == 3 else contour_points.get(layer_index)
+                if points and len(points) >= 3:
+                    color = tuple(self.config.get(f"c{layer_index}_color", (255, 255, 255)))
+                    transition_alpha = self.config.get(f"_tr_c{layer_index}_alpha")
+                    if transition_alpha is None:
+                        alpha = int(round(self._runtime_kp_add(f"c{layer_index}_alpha", float(self.config.get(f"c{layer_index}_alpha", 180)), normalized_k, normalized_p)))
+                    else:
+                        alpha = int(round(float(transition_alpha)))
+                    alpha = max(0, min(255, alpha))
+                    thickness = int(round(self._runtime_kp_add(f"c{layer_index}_thick", float(self.config.get(f"c{layer_index}_thick", 2)), normalized_k, normalized_p)))
+                    thickness = max(1, thickness)
+                    lines.append({"points": points, "color": (*color, alpha), "thickness": thickness})
+
+        self.render_state = {"center": (cx, cy), "fills": fills, "tentacles": tentacles, "bars": bars, "lines": lines}
+
+    @staticmethod
+    def _gl_set_color(color):
+        GL.glColor4f(color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, color[3] / 255.0)
+
+    def _gl_draw_radial_fill(self, center, points, color):
+        if not points or len(points) < 3:
+            return
+        self._gl_set_color(color)
+        GL.glBegin(GL.GL_TRIANGLE_FAN)
+        GL.glVertex2f(float(center[0]), float(center[1]))
+        for pos_x, pos_y in points:
+            GL.glVertex2f(float(pos_x), float(pos_y))
+        GL.glVertex2f(float(points[0][0]), float(points[0][1]))
+        GL.glEnd()
+
+    def _gl_draw_line_loop(self, points, color, thickness):
+        if not points or len(points) < 2:
+            return
+        GL.glLineWidth(max(1.0, float(thickness)))
+        self._gl_set_color(color)
+        GL.glBegin(GL.GL_LINE_LOOP)
+        for pos_x, pos_y in points:
+            GL.glVertex2f(float(pos_x), float(pos_y))
+        GL.glEnd()
+
+    def _gl_draw_segments(self, segments, thickness):
+        if not segments:
+            return
+        GL.glLineWidth(max(1.0, float(thickness)))
+        GL.glBegin(GL.GL_LINES)
+        for start, end, color in segments:
+            self._gl_set_color(color)
+            GL.glVertex2f(float(start[0]), float(start[1]))
+            GL.glVertex2f(float(end[0]), float(end[1]))
+        GL.glEnd()
+
+    @staticmethod
+    def _make_round_pen(color, thickness):
+        pen = QPen(QColor(color[0], color[1], color[2], color[3]))
+        pen.setWidthF(max(1.0, float(thickness)))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return pen
+
+    def _paint_line_loop(self, painter, points, color, thickness):
+        if not points or len(points) < 2:
+            return
+
+        path = QPainterPath()
+        first_x, first_y = points[0]
+        path.moveTo(QPointF(float(first_x), float(first_y)))
+        for pos_x, pos_y in points[1:]:
+            path.lineTo(QPointF(float(pos_x), float(pos_y)))
+        path.closeSubpath()
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(self._make_round_pen(color, thickness))
+        painter.drawPath(path)
+
+    def _paint_fill(self, painter, points, color):
+        if not points or len(points) < 3:
+            return
+
+        path = QPainterPath()
+        first_x, first_y = points[0]
+        path.moveTo(QPointF(float(first_x), float(first_y)))
+        for pos_x, pos_y in points[1:]:
+            path.lineTo(QPointF(float(pos_x), float(pos_y)))
+        path.closeSubpath()
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color[0], color[1], color[2], color[3]))
+        painter.drawPath(path)
+
+    def _paint_polyline(self, painter, points, color, thickness):
+        if not points or len(points) < 2:
+            return
+
+        path = QPainterPath()
+        first_x, first_y = points[0]
+        path.moveTo(QPointF(float(first_x), float(first_y)))
+        for pos_x, pos_y in points[1:]:
+            path.lineTo(QPointF(float(pos_x), float(pos_y)))
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(self._make_round_pen(color, thickness))
+        painter.drawPath(path)
+
+    def _paint_weighted_segments(self, painter, segments):
+        if not segments:
+            return
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        last_style = None
+        for start, end, color, thickness in segments:
+            style = (color, round(float(thickness), 3))
+            if style != last_style:
+                painter.setPen(self._make_round_pen(color, thickness))
+                last_style = style
+            painter.drawLine(
+                QPointF(float(start[0]), float(start[1])),
+                QPointF(float(end[0]), float(end[1])),
+            )
+
+    def _paint_segments(self, painter, segments, thickness):
+        if not segments:
+            return
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        last_color = None
+        for start, end, color in segments:
+            if color != last_color:
+                painter.setPen(self._make_round_pen(color, thickness))
+                last_color = color
+            painter.drawLine(
+                QPointF(float(start[0]), float(start[1])),
+                QPointF(float(end[0]), float(end[1])),
+            )
+
+    def _update_config_from_queue(self):
+        if not self.config_queue:
+            return
+
+        try:
+            while True:
+                new_config = self.config_queue.get_nowait()
+
+                if "command" in new_config:
+                    if new_config["command"] == "center_window":
+                        self._center_window(reset_visual_center=True)
+                        self._send_status()
+                    elif new_config["command"] == "set_window_layer":
+                        mode = str(new_config.get("mode", "normal")).lower()
+                        if mode not in {"top", "normal", "bottom"}:
+                            mode = "normal"
+                        self.config["window_layer"] = mode
+                        self.config["always_on_top"] = mode == "top"
+                        self._apply_window_styles(force=True)
+                    elif new_config["command"] == "preset_transition":
+                        self._start_transition(
+                            new_config.get("from_config", {}),
+                            new_config.get("to_config", {}),
+                            float(new_config.get("duration", 2.0)),
+                            new_config.get("easing", "ease_in_out"),
+                        )
+                    continue
+
+                normalized_config = _normalize_loaded_config(new_config)
+                old = self.config.copy()
+                if self._transition_active:
+                    self._transition_active = False   # 手动变更打断过渡
+                self.config = normalized_config
+                new_config = normalized_config
+                self.audio_processor.update_config(new_config)
+                self._sync_audio_processor_state()
+
+                if int(new_config.get("num_bars", 64)) != self.NUM_BARS:
+                    self.NUM_BARS = int(new_config.get("num_bars", 64))
+                    old_heights = self.bar_heights.copy()
+                    initial_bar_height = self._default_bar_height()
+                    self._reset_length_states(initial_bar_height)
+                    count = min(len(old_heights), self.NUM_BARS)
+                    self.bar_heights[:count] = old_heights[:count]
+                    for state in self.object_length_states.values():
+                        state[:count] = old_heights[:count]
+                    self._update_colors()
+
+                self.smoothing_factor = float(new_config.get("smoothing", 0.7))
+                self.a1_time_window = _clamp_time_window(new_config.get("a1_time_window", 10), 10)
+                self.ui_bg_alpha = int(new_config.get("ui_alpha", 180))
+                self.window_alpha = int(new_config.get("alpha", 255))
+
+                if (
+                    new_config.get("color_scheme") != old.get("color_scheme")
+                    or new_config.get("gradient_points") != old.get("gradient_points")
+                    or new_config.get("gradient_enabled") != old.get("gradient_enabled")
+                    or new_config.get("gradient_mode") != old.get("gradient_mode")
+                    or new_config.get("color_dynamic") != old.get("color_dynamic")
+                    or new_config.get("color_cycle_speed") != old.get("color_cycle_speed")
+                    or new_config.get("color_cycle_pow") != old.get("color_cycle_pow")
+                    or new_config.get("color_cycle_a1") != old.get("color_cycle_a1")
+                ):
+                    self._update_colors()
+
+                if (
+                    new_config.get("drag_adjust_mode", False) != old.get("drag_adjust_mode", False)
+                    or new_config.get("always_on_top", True) != old.get("always_on_top", True)
+                    or new_config.get("bg_transparent", True) != old.get("bg_transparent", True)
+                    or new_config.get("alpha", 255) != old.get("alpha", 255)
+                ):
+                    self._apply_window_styles(force=True)
+
+                new_x = new_config.get("pos_x", -1)
+                new_y = new_config.get("pos_y", -1)
+                if new_x < 0:
+                    self.center_x = self.width() * 0.5
+                else:
+                    self.center_x = float(new_x)
+                if new_y < 0:
+                    self.center_y = self.height() * 0.5
+                else:
+                    self.center_y = float(new_y)
+                self._clamp_center()
+        except queue.Empty:
+            pass
+
+    def _tick(self):
+        self._update_config_from_queue()
+
+        now = time.time()
+
+        if self._transition_active:
+            self._update_transition(now)
+
+        if self.config.get("color_dynamic", False):
+            base_speed = max(0.0, float(self.config.get("color_cycle_speed", 1.0)))
+            peak_speed = max(base_speed, float(self.config.get("color_cycle_pow", 2.0)))
+            if self.config.get("color_cycle_a1", True):
+                reference = max(2.0, abs(self.a1_value) * 0.08 + 2.0)
+                boost_target = math.tanh(abs(self.k2_value) / reference)
+                self.current_color_cycle_boost = max(boost_target, self.current_color_cycle_boost * 0.88)
+            else:
+                self.current_color_cycle_boost *= 0.88
+            # V0 直接决定基础速率（boost=0 时），VP 决定加速后的速率
+            base_rate = base_speed * 0.001
+            boost_extra = ((peak_speed - base_speed) * self.current_color_cycle_boost * 0.001
+                           + self.current_color_cycle_boost * 0.008)
+            self.current_color_cycle_rate = base_rate + boost_extra
+            self.color_cycle_hue = (self.color_cycle_hue + self.current_color_cycle_rate) % 1.0
+            self._update_colors()
+        else:
+            self.current_color_cycle_rate = 0.0
+            self.current_color_cycle_boost = 0.0
+
+        audio_frame = self._pull_latest_audio_frame()
+        if audio_frame is None:
+            bar_values = self._prune_spectrum_history(now)
+        else:
+            bar_values = self._update_spectrum_history(self._process_audio(audio_frame), now)
+
+        self._update_visual_state(bar_values)
+        self.gl_widget.update()
+        self.overlay.update()
+
+        if now - self.last_status_send >= 0.12:
+            self._send_status()
+            self.last_status_send = now
+
+    # ── 预设平滑过渡（透明度淡入淡出版） ─────────────────────────
+
+    def _start_transition(self, from_config, to_config, duration, easing):
+        # 清除 from_config 中的运行时 _tr_* 键，避免中途切换带来的脏状态
+        clean_from = {k: v for k, v in (from_config or {}).items() if not k.startswith('_tr_')}
+        self._transition_from = _normalize_loaded_config(clean_from)
+        self._transition_target = _normalize_loaded_config(to_config)
+        self._transition_duration = max(0.05, float(duration))
+        self._transition_easing = easing if easing else 'ease_in_out'
+        self._transition_start = time.time()
+        self._transition_active = True
+        self._transition_toggle_schedule = []
+
+        # 分别收集需要关闭 / 开启的图元
+        turning_off = []  # (on_key, prefix)
+        turning_on = []   # (on_key, prefix)
+        for key in _ON_FIELD_ORDER:
+            from_val = bool(self._transition_from.get(key, False))
+            to_val = bool(self._transition_target.get(key, False))
+            prefix = key[:-3]          # strip '_on'
+            if from_val and not to_val:
+                turning_off.append((key, prefix))
+            elif not from_val and to_val:
+                turning_on.append((key, prefix))
+
+        # 交错排列：off0, on0, off1, on1 ...
+        sequence = []
+        off_i = on_i = 0
+        while off_i < len(turning_off) or on_i < len(turning_on):
+            if off_i < len(turning_off):
+                sequence.append(('out', turning_off[off_i][0], turning_off[off_i][1]))
+                off_i += 1
+            if on_i < len(turning_on):
+                sequence.append(('in', turning_on[on_i][0], turning_on[on_i][1]))
+                on_i += 1
+
+        n = len(sequence)
+        self._transition_alpha_schedule = []
+        alpha_controlled_keys = set()
+
+        for i, (direction, on_key, prefix) in enumerate(sequence):
+            slot_t_start = i / n if n > 0 else 0.0
+            slot_t_end = (i + 1) / n if n > 0 else 1.0
+
+            is_circle = prefix.startswith('c') and len(prefix) == 2 and prefix[1:].isdigit()
+            is_tentacle_core = (prefix == 'tentacle_core')
+            alpha_entries = []
+
+            if is_tentacle_core:
+                # tentacle_core 没有独立的透明度渲染，仅在时间槽端点切换开关（快照式）
+                pass
+            elif is_circle:
+                if direction == 'out':
+                    from_a = int(self._transition_from.get(f'{prefix}_alpha', 180))
+                    alpha_entries.append((f'_tr_{prefix}_alpha', from_a, 0))
+                    if self._transition_from.get(f'{prefix}_fill', False):
+                        fa = int(self._transition_from.get(f'{prefix}_fill_alpha', 50))
+                        alpha_entries.append((f'_tr_{prefix}_fill_alpha', fa, 0))
+                else:
+                    to_a = int(self._transition_target.get(f'{prefix}_alpha', 180))
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 0, to_a))
+                    if self._transition_target.get(f'{prefix}_fill', False):
+                        ta = int(self._transition_target.get(f'{prefix}_fill_alpha', 50))
+                        alpha_entries.append((f'_tr_{prefix}_fill_alpha', 0, ta))
+            elif prefix == 'tentacle':
+                # 触须：使用 _tr_ 运行时键，起始/结束透明度从配置读取
+                if direction == 'out':
+                    from_a = float(self._transition_from.get('tentacle_alpha', 170))
+                    alpha_entries.append(('_tr_tentacle_alpha', from_a, 0.0))
+                    alpha_entries.append(('_tr_tentacle_len_frac', 1.0, 0.0))
+                else:
+                    to_a = float(self._transition_target.get('tentacle_alpha', 170))
+                    alpha_entries.append(('_tr_tentacle_alpha', 0.0, to_a))
+                    alpha_entries.append(('_tr_tentacle_len_frac', 0.0, 1.0))
+            else:
+                # b-层（条形图）：用 _tr_ 运行时键控制 alpha 和长度缩放，不落盘
+                if direction == 'out':
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 255, 0))
+                    alpha_entries.append((f'_tr_{prefix}_len_frac', 1.0, 0.0))
+                else:
+                    alpha_entries.append((f'_tr_{prefix}_alpha', 0, 255))
+                    alpha_entries.append((f'_tr_{prefix}_len_frac', 0.0, 1.0))
+
+            for ak, _, _ in alpha_entries:
+                alpha_controlled_keys.add(ak)
+
+            self._transition_alpha_schedule.append({
+                'direction': direction,
+                'on_key': on_key,
+                'prefix': prefix,
+                'is_circle': is_circle,
+                'alpha_entries': alpha_entries,
+                'from_fill': self._transition_from.get(f'{prefix}_fill', False) if is_circle else False,
+                'slot_t_start': slot_t_start,
+                'slot_t_end': slot_t_end,
+            })
+
+        self._transition_alpha_controlled = alpha_controlled_keys
+
+    def _update_transition(self, now):
+        elapsed = now - self._transition_start
+        t = elapsed / self._transition_duration if self._transition_duration > 0 else 1.0
+
+        if t >= 1.0:
+            self.config = self._transition_target.copy()
+            self._transition_active = False
+            self._update_colors()
+            return
+
+        interp = self._transition_target.copy()
+        et = _ease_value(t, self._transition_easing)
+
+        from_gradient = self._transition_from.get('gradient_points', [])
+        to_gradient = self._transition_target.get('gradient_points', [])
+        interp['gradient_points'] = _interpolate_gradient_points(from_gradient, to_gradient, et, count=max(2, len(from_gradient), len(to_gradient), 8))
+
+        # ── 数值插值（跳过透明度调度控制的键和布尔开关）────────────
+        skip_interp = _NOINTERP_KEYS | getattr(self, '_transition_alpha_controlled', set())
+        for key, from_val in self._transition_from.items():
+            if key in skip_interp:
+                continue
+            to_val = self._transition_target.get(key)
+            if to_val is None:
+                continue
+            if isinstance(from_val, (int, float)) and isinstance(to_val, (int, float)):
+                interp[key] = from_val + (to_val - from_val) * et
+            elif (
+                isinstance(from_val, (list, tuple)) and isinstance(to_val, (list, tuple))
+                and len(from_val) == 3 and len(to_val) == 3
+                and all(isinstance(x, (int, float)) for x in from_val)
+                and all(isinstance(x, (int, float)) for x in to_val)
+            ):
+                interp[key] = tuple(
+                    int(round(from_val[i] + (to_val[i] - from_val[i]) * et))
+                    for i in range(3)
+                )
+
+        # ── 所有 _on 字段先恢复 from 状态，由时间表覆盖 ────────────
+        for key in _ON_FIELD_ORDER:
+            interp[key] = self._transition_from.get(key, False)
+
+        # ── 透明度淡入/淡出时间表 ──────────────────────────────────
+        for entry in getattr(self, '_transition_alpha_schedule', []):
+            direction = entry['direction']
+            on_key = entry['on_key']
+            prefix = entry['prefix']
+            alpha_entries = entry['alpha_entries']
+            is_circle = entry['is_circle']
+            from_fill = entry.get('from_fill', False)
+            s0 = entry['slot_t_start']
+            s1 = entry['slot_t_end']
+
+            if direction == 'in':
+                if t < s0:
+                    # 尚未到时间槽：元素处于隐藏状态（预透明度=0）
+                    interp[on_key] = False
+                    for ak, from_a, _ in alpha_entries:
+                        interp[ak] = 0.0 if isinstance(from_a, float) else 0
+                else:
+                    # 时间槽内或之后：已开启，透明度从0渐入
+                    interp[on_key] = True
+                    slot_et = _ease_value(
+                        min(1.0, (t - s0) / max(1e-9, s1 - s0)),
+                        self._transition_easing)
+                    for ak, from_a, to_a in alpha_entries:
+                        _v = from_a + (to_a - from_a) * slot_et
+                        interp[ak] = _v if isinstance(from_a, float) else int(round(_v))
+            else:  # 'out'
+                if t < s0:
+                    # 时间槽前：保持原透明度和填充
+                    interp[on_key] = True
+                    for ak, from_a, _ in alpha_entries:
+                        interp[ak] = from_a
+                    if from_fill:
+                        interp[f'{prefix}_fill'] = True
+                elif t < s1:
+                    # 时间槽内：淡出
+                    interp[on_key] = True
+                    slot_et = _ease_value(
+                        (t - s0) / max(1e-9, s1 - s0),
+                        self._transition_easing)
+                    for ak, from_a, to_a in alpha_entries:
+                        _v = from_a + (to_a - from_a) * slot_et
+                        interp[ak] = _v if isinstance(from_a, float) else int(round(_v))
+                    if from_fill:
+                        interp[f'{prefix}_fill'] = True
+                else:
+                    # 时间槽后：关闭，透明度归零
+                    interp[on_key] = False
+                    for ak, _, _ in alpha_entries:
+                        interp[ak] = 0.0 if isinstance(_, float) else 0
+
+                # b-层有 _tr_ alpha，淡出结束后隐藏（on_key 已设为 False）
+
+        self.config = interp
+        self._update_colors()
+
+    def _cleanup(self):
+        if self.audio_capture is not None:
+            self.audio_capture.close()
+            self.audio_capture = None
+        print("PyOpenGL 圆形频谱窗口已关闭")
+
+
+
+
+# ============================================================================
+# 嵌入模式组合控件 — 供 main.pyw 通过 MODULE_WIDGET 调用
+# ============================================================================
+
+class EmbeddedVisualizerModule(QWidget):
+    """
+    将 CircularVisualizerWindow（渲染）和 VisualizerControlUI（控制面板）
+    合并为一个可嵌入 QWidget，供 main.pyw 的 QStackedWidget 使用。
+
+    布局：左侧（2/3）= 渲染画布，右侧（1/3）= 控制面板。
+    通讯：通过 queue.Queue（同进程），不再 mp.Process。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        import queue
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        from PySide6.QtWidgets import QSplitter
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setHandleWidth(4)
+        outer.addWidget(splitter)
+
+        self._config_q = queue.Queue(maxsize=1)
+        self._status_q = queue.Queue(maxsize=1)
+
+        self._viz = CircularVisualizerWindow(
+            config_queue=self._config_q,
+            status_queue=self._status_q,
+            embedded=True,
+            parent=splitter,
+        )
+        self._viz.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        splitter.addWidget(self._viz)
+
+        self._ctrl = VisualizerControlUI()
+        self._ctrl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        splitter.addWidget(self._ctrl)
+
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        self._patch_ctrl()
+        try:
+            self._config_q.put_nowait(self._ctrl.config)
+        except Exception:
+            pass
+        self._viz.run_embedded()
+
+    def _patch_ctrl(self):
+        """让 VisualizerControlUI 通过 queue.Queue 与嵌入渲染器通讯。"""
+        ctrl  = self._ctrl
+        viz   = self._viz
+        cfg_q = self._config_q
+        sts_q = self._status_q
+
+        ctrl.config_queue = cfg_q
+        ctrl.status_queue = sts_q
+
+        # 用假进程对象阻止 VisualizerControlUI.__init__ 里的 QTimer.singleShot(100,
+        # self._start_visualizer) 触发旧版子进程逻辑（该方法首行判断 viz_process.is_alive()）
+        class _FakeAliveProcess:
+            def is_alive(self):
+                return True
+        ctrl.viz_process = _FakeAliveProcess()
+
+        def _start_embedded():
+            try:
+                cfg_q.put_nowait(ctrl.config)
+            except Exception:
+                pass
+            viz.run_embedded()
+            ctrl.status_timer.start(100)
+
+        def _stop_embedded():
+            ctrl.status_timer.stop()
+            try:
+                viz.frame_timer.stop()
+                viz._cleanup()
+            except Exception:
+                pass
+
+        ctrl._start_visualizer = _start_embedded
+        ctrl._stop_visualizer  = _stop_embedded
+        ctrl.status_timer.start(100)
+
+    def _stop_visualizer(self):
+        """main.pyw closeEvent 调用的清理入口。"""
+        try:
+            self._ctrl._stop_visualizer()
+        except Exception:
+            pass
+        try:
+            self._viz.frame_timer.stop()
+            self._viz._cleanup()
+        except Exception:
+            pass
+
+
+MODULE_WIDGET = EmbeddedVisualizerModule
 
 if __name__ == "__main__":
     main()

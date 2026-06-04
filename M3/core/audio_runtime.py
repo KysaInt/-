@@ -14,7 +14,7 @@ try:
 except Exception:
     scipy_fft = np.fft.fft
     _HAS_SCIPY_FFT = False
-    print("⚠ SciPy FFT 不可用 — 使用 NumPy FFT")
+    print("[INFO] SciPy FFT unavailable - using NumPy FFT")
 
 
 def clamp_time_window(value: Any, fallback: float) -> float:
@@ -32,11 +32,11 @@ try:
 
     _HAS_GPU = True
     cp.fft.fft(cp.zeros(2048))
-    print("✓ CuPy 可用 — 启用 GPU FFT")
+    print("[OK] CuPy OK - GPU FFT")
 except Exception:
     cp = None
     _HAS_GPU = False
-    print("⚠ CuPy 不可用 — 使用 CPU FFT")
+    print("[INFO] CuPy unavailable - using CPU FFT")
 
 
 class LoopbackAudioCapture:
@@ -78,7 +78,7 @@ class LoopbackAudioCapture:
             stream_callback=self._audio_callback,
         )
         self.stream.start_stream()
-        print("✓ 音频捕获已启动")
+        print("[OK] audio capture started")
 
     def _audio_callback(self, in_data, _frame_count, _time_info, _status):
         if in_data:

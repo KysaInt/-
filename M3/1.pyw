@@ -26,11 +26,12 @@ except Exception:
 from OpenGL import GL
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen, QPolygon, QSurfaceFormat
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPolygon, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QWidget
 
 from core.audio_runtime import AudioSignalProcessor, LoopbackAudioCapture
+from core.lens_scratch_gl import LensScratchGL, _gen_procedural_scratch_mask
 
 
 CONFIG_FILE = Path(__file__).parent / "visualizer_config.json"
@@ -223,6 +224,51 @@ _DEFAULT_CONFIG = {
     "kp_bind_tentacle_core_base_speed_p": True,
     "kp_tentacle_core_base_speed_p_wmin": 0.0,
     "kp_tentacle_core_base_speed_p_wmax": 1.35,
+
+    # ── 镜头划痕眩光后处理 ──────────────────────────────────────────────────
+    "lens_scratch_enabled": False,
+    "lens_scratch_mask_path": "",
+    "lens_scratch_normal_path": "",
+    "lens_scratch_tiling_x": 1.0,
+    "lens_scratch_tiling_y": 1.0,
+    "lens_scratch_offset_x": 0.0,
+    "lens_scratch_offset_y": 0.0,
+    "lens_scratch_rotation_deg": 0.0,
+    "lens_scratch_mask_power": 1.35,
+    "lens_scratch_normal_influence": 1.2,
+    "lens_scratch_threshold": 1.1,
+    "lens_scratch_soft_knee": 0.45,
+    "lens_scratch_glare_intensity": 1.15,
+    "lens_scratch_count_a": 20,
+    "lens_scratch_streak_count": 3,
+    "lens_scratch_scratch_count": 3,
+    "lens_scratch_streak_length": 3.6,
+    "lens_scratch_streak_spread": 1.1,
+    "lens_scratch_falloff_a": 3.8,
+    "lens_scratch_falloff_b": 0.35,
+    "lens_scratch_rotation_jitter_deg": 6.0,
+    "lens_scratch_refraction_strength": 0.18,
+    "lens_scratch_chromatic_aberration": 0.0025,
+    "lens_scratch_micro_distortion": 0.55,
+    "lens_scratch_tint_r": 255,
+    "lens_scratch_tint_g": 255,
+    "lens_scratch_tint_b": 255,
+    # K绑定
+    "kp_bind_lens_scratch_glare_intensity_k": False,
+    "kp_lens_scratch_glare_intensity_k_wmin": 0.0,
+    "kp_lens_scratch_glare_intensity_k_wmax": 0.0,
+    "kp_bind_lens_scratch_threshold_k": False,
+    "kp_lens_scratch_threshold_k_wmin": 0.0,
+    "kp_lens_scratch_threshold_k_wmax": 0.0,
+    "kp_bind_lens_scratch_streak_length_k": False,
+    "kp_lens_scratch_streak_length_k_wmin": 0.0,
+    "kp_lens_scratch_streak_length_k_wmax": 0.0,
+    "kp_bind_lens_scratch_refraction_strength_k": False,
+    "kp_lens_scratch_refraction_strength_k_wmin": 0.0,
+    "kp_lens_scratch_refraction_strength_k_wmax": 0.0,
+    "kp_bind_lens_scratch_chromatic_aberration_k": False,
+    "kp_lens_scratch_chromatic_aberration_k_wmin": 0.0,
+    "kp_lens_scratch_chromatic_aberration_k_wmax": 0.0,
 }
 
 for _prefix in _DAMPED_OBJECT_KEYS[1:]:
@@ -337,6 +383,7 @@ _NOINTERP_KEYS = frozenset({
     "b34_from_start", "b34_from_end", "b34_from_center",
     "b45_from_start", "b45_from_end", "b45_from_center",
     "pos_x", "pos_y", "width", "height",
+    "lens_scratch_enabled", "lens_scratch_mask_path", "lens_scratch_normal_path",
     "preset_order", "preset_auto_switch", "preset_switch_interval",
     "preset_interval_random_enabled", "preset_switch_interval_min", "preset_switch_interval_max",
     "preset_transition_enabled", "preset_transition_duration", "preset_transition_easing",
@@ -510,6 +557,11 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         self.owner = owner
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
+        # 镜头划痕后处理
+        self._scratch_gl = LensScratchGL()
+        self._scratch_fbo: int = 0
+        self._scratch_tex: int = 0
+        self._scratch_fbo_size: tuple[int, int] = (0, 0)
 
     def _framebuffer_size(self):
         dpr = max(1.0, float(self.devicePixelRatioF()))
@@ -525,6 +577,45 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         GL.glEnable(GL.GL_LINE_SMOOTH)
         GL.glHint(GL.GL_LINE_SMOOTH_HINT, GL.GL_NICEST)
         GL.glEnable(GL.GL_MULTISAMPLE)
+        self._scratch_gl.initialize()
+
+    def _ensure_scratch_fbo(self, fb_width: int, fb_height: int) -> None:
+        """确保 FBO 和纹理的尺寸与当前帧缓冲一致。"""
+        if (fb_width, fb_height) == self._scratch_fbo_size:
+            return
+        # 释放旧资源
+        if self._scratch_fbo:
+            GL.glDeleteFramebuffers(1, [self._scratch_fbo])
+        if self._scratch_tex:
+            GL.glDeleteTextures(1, [self._scratch_tex])
+        # 创建离屏纹理（RGBA8，4 级 mip 便于 LOD 采样）
+        tex = int(GL.glGenTextures(1))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        GL.glTexImage2D(
+            GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, fb_width, fb_height, 0,
+            GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None,
+        )
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        # 创建 FBO
+        fbo = int(GL.glGenFramebuffers(1))
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fbo)
+        GL.glFramebufferTexture2D(
+            GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, tex, 0,
+        )
+        status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        if status != GL.GL_FRAMEBUFFER_COMPLETE:
+            GL.glDeleteFramebuffers(1, [fbo])
+            GL.glDeleteTextures(1, [tex])
+            print(f"[LensScratchGL] FBO 创建失败: status=0x{status:X}")
+            return
+        self._scratch_fbo = fbo
+        self._scratch_tex = tex
+        self._scratch_fbo_size = (fb_width, fb_height)
 
     def resizeGL(self, width, height):
         fb_width, fb_height = self._framebuffer_size()
@@ -536,13 +627,29 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
         logical_height = max(1.0, float(self.height()))
         fb_width, fb_height = self._framebuffer_size()
 
+        cfg = self.owner.config
+        scratch_enabled = bool(cfg.get("lens_scratch_enabled", False))
+        use_scratch = scratch_enabled and self._scratch_gl.ready
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # beginNativePainting 必须在所有 raw GL 调用之前
         painter.beginNativePainting()
 
+        # QOpenGLWidget 的默认 FBO 不一定是 0，必须在 GL 上下文激活后查询
+        default_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
+
+        if use_scratch:
+            self._ensure_scratch_fbo(fb_width, fb_height)
+            if self._scratch_fbo:
+                GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._scratch_fbo)
+            else:
+                use_scratch = False
+
         GL.glViewport(0, 0, fb_width, fb_height)
-        clear_alpha = 0.0 if self.owner.config.get("bg_transparent", True) else 1.0
+        clear_alpha = 0.0 if cfg.get("bg_transparent", True) else 1.0
         GL.glClearColor(0.0, 0.0, 0.0, clear_alpha)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
 
@@ -560,6 +667,23 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
                 self.owner._gl_draw_radial_fill(center, fill_item["points"], fill_item["color"])
             GL.glFlush()
 
+        if use_scratch and self._scratch_fbo:
+            # 切回默认 FBO，为划痕着色器生成 mipmap，然后应用效果
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, default_fbo)
+            GL.glViewport(0, 0, fb_width, fb_height)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._scratch_tex)
+            GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            normalized_k = max(0.0, min(1.0, float(self.owner.a1_value)))
+            scratch_params = self._build_scratch_params(cfg, fb_width, fb_height, normalized_k)
+            mask_p = cfg.get("lens_scratch_mask_path", "")
+            norm_p = cfg.get("lens_scratch_normal_path", "")
+            if mask_p:
+                self._scratch_gl.load_mask(mask_p)
+            if norm_p:
+                self._scratch_gl.load_normal(norm_p)
+            self._scratch_gl.apply(self._scratch_tex, scratch_params)
+
         painter.endNativePainting()
 
         if state:
@@ -574,6 +698,45 @@ class OpenGLVisualizerWidget(QOpenGLWidget):
 
         painter.end()
 
+    def _build_scratch_params(self, cfg: dict, fb_w: int, fb_h: int, normalized_k: float) -> dict:
+        """从配置中读取划痕参数，应用 KP 绑定后返回 params dict。"""
+        def _kp(key: str, base: float) -> float:
+            if cfg.get(f"kp_bind_{key}_k", False):
+                wmin = float(cfg.get(f"kp_{key}_k_wmin", 0.0))
+                wmax = float(cfg.get(f"kp_{key}_k_wmax", 0.0))
+                base += wmin + (wmax - wmin) * normalized_k
+            return base
+
+        return {
+            "width": fb_w,
+            "height": fb_h,
+            "scratch_rotation_deg": float(cfg.get("lens_scratch_rotation_deg", 0.0)),
+            "scratch_tiling_x": float(cfg.get("lens_scratch_tiling_x", 1.0)),
+            "scratch_tiling_y": float(cfg.get("lens_scratch_tiling_y", 1.0)),
+            "scratch_offset_x": float(cfg.get("lens_scratch_offset_x", 0.0)),
+            "scratch_offset_y": float(cfg.get("lens_scratch_offset_y", 0.0)),
+            "scratch_mask_power": float(cfg.get("lens_scratch_mask_power", 1.35)),
+            "normal_influence": float(cfg.get("lens_scratch_normal_influence", 1.2)),
+            "threshold": _kp("lens_scratch_threshold", float(cfg.get("lens_scratch_threshold", 1.1))),
+            "soft_knee": float(cfg.get("lens_scratch_soft_knee", 0.45)),
+            "glare_intensity": _kp("lens_scratch_glare_intensity", float(cfg.get("lens_scratch_glare_intensity", 1.15))),
+            "streak_length": _kp("lens_scratch_streak_length", float(cfg.get("lens_scratch_streak_length", 3.6))),
+            "count_a": int(cfg.get("lens_scratch_count_a", 20)),
+            "streak_spread": float(cfg.get("lens_scratch_streak_spread", 1.1)),
+            "falloff_a": float(cfg.get("lens_scratch_falloff_a", 3.8)),
+            "falloff_b": float(cfg.get("lens_scratch_falloff_b", 0.35)),
+            "scratch_count": int(cfg.get("lens_scratch_scratch_count", 3)),
+            "streak_count": int(cfg.get("lens_scratch_streak_count", 3)),
+            "rotation_jitter_deg": float(cfg.get("lens_scratch_rotation_jitter_deg", 6.0)),
+            "refraction_strength": _kp("lens_scratch_refraction_strength", float(cfg.get("lens_scratch_refraction_strength", 0.18))),
+            "chromatic_aberration": _kp("lens_scratch_chromatic_aberration", float(cfg.get("lens_scratch_chromatic_aberration", 0.0025))),
+            "micro_distortion": float(cfg.get("lens_scratch_micro_distortion", 0.55)),
+            "tint_r": int(cfg.get("lens_scratch_tint_r", 255)),
+            "tint_g": int(cfg.get("lens_scratch_tint_g", 255)),
+            "tint_b": int(cfg.get("lens_scratch_tint_b", 255)),
+            "mip_levels": 4.0,
+        }
+
 
 class PainterVisualizerWidget(QWidget):
     def __init__(self, owner):
@@ -583,32 +746,190 @@ class PainterVisualizerWidget(QWidget):
         self.setAutoFillBackground(False)
 
     def paintEvent(self, _event):
+        pw, ph = self.width(), self.height()
+        if pw <= 0 or ph <= 0:
+            return
+
         state = self.owner.render_state
-        painter = QPainter(self)
+        cfg = self.owner.config
+        scratch_enabled = bool(cfg.get("lens_scratch_enabled", False))
+        bg_transparent = bool(cfg.get("bg_transparent", True))
+
+        if scratch_enabled:
+            # 渲染到离屏缓冲，供后处理使用
+            offscreen = QImage(pw, ph, QImage.Format.Format_RGBA8888)
+            offscreen.fill(QColor(0, 0, 0, 0) if bg_transparent else QColor(0, 0, 0, 255))
+            painter = QPainter(offscreen)
+        else:
+            painter = QPainter(self)
+            if bg_transparent:
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            else:
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
+
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-
-        if self.owner.config.get("bg_transparent", True):
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-        else:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
 
         if state:
             for fill_item in state.get("fills", []):
                 self.owner._paint_fill(painter, fill_item["points"], fill_item["color"])
-
             for tentacle_item in state.get("tentacles", []):
                 self.owner._paint_weighted_segments(painter, tentacle_item["segments"])
-
             for bar_item in state.get("bars", []):
                 self.owner._paint_segments(painter, bar_item["segments"], bar_item["thickness"])
-
             for line_item in state.get("lines", []):
                 self.owner._paint_line_loop(painter, line_item["points"], line_item["color"], line_item["thickness"])
 
         painter.end()
+
+        if scratch_enabled:
+            # 应用 Unity LensScratchGlareAdvanced 三段式眩光效果（预滤波→条纹→合成）
+            result_img = self._apply_lens_scratch_glare(offscreen, cfg)
+            final_painter = QPainter(self)
+            if bg_transparent:
+                final_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                final_painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+                final_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            else:
+                final_painter.fillRect(self.rect(), QColor(0, 0, 0, 255))
+            final_painter.drawImage(0, 0, result_img)
+            final_painter.end()
+
+    def _apply_lens_scratch_glare(self, scene_image: QImage, cfg: dict) -> QImage:
+        """
+        Unity LensScratchGlareAdvanced 三段式镜头划痕眩光效果的 Python 移植版本。
+
+        Pass 0 (预滤波): 提取超过阈值的高亮像素 → 半分辨率
+        Pass 1 (条纹):   两个方向的定向模糊（streak blur）
+        Pass 2 (合成):   将眩光叠加回原始场景
+        """
+        w, h = scene_image.width(), scene_image.height()
+        if w <= 0 or h <= 0:
+            return scene_image
+
+        # ── 读取参数（对应 Unity LensScratchGlareAdvanced 参数）──────────
+        normalized_k = max(0.0, min(1.0, float(self.owner.a1_value)))
+
+        base_intensity = float(cfg.get("lens_scratch_glare_intensity", 1.25))
+        if cfg.get("kp_bind_lens_scratch_glare_intensity_k", False):
+            wmin = float(cfg.get("kp_lens_scratch_glare_intensity_k_wmin", 0.0))
+            wmax = float(cfg.get("kp_lens_scratch_glare_intensity_k_wmax", 0.0))
+            base_intensity += wmin + (wmax - wmin) * normalized_k
+        base_intensity = max(0.0, base_intensity)
+
+        threshold = float(cfg.get("lens_scratch_threshold", 1.1))
+        soft_knee = max(1e-4, float(cfg.get("lens_scratch_soft_knee", 0.5)))
+
+        streak_length = float(cfg.get("lens_scratch_streak_length", 3.5))
+        if cfg.get("kp_bind_lens_scratch_streak_length_k", False):
+            wmin = float(cfg.get("kp_lens_scratch_streak_length_k_wmin", 0.0))
+            wmax = float(cfg.get("kp_lens_scratch_streak_length_k_wmax", 0.0))
+            streak_length += wmin + (wmax - wmin) * normalized_k
+
+        spread = max(0.01, float(cfg.get("lens_scratch_streak_spread", 1.25)))
+        falloff = max(0.01, float(cfg.get("lens_scratch_falloff_a", 3.5)))
+        scratch1_angle = float(cfg.get("lens_scratch_rotation_deg", 90.0))
+        scratch1_intensity = base_intensity
+        scratch2_intensity = base_intensity * 0.64  # 副方向强度为主方向的 64%
+        composite_intensity = base_intensity
+
+        tint_r = float(cfg.get("lens_scratch_tint_r", 255)) / 255.0
+        tint_g = float(cfg.get("lens_scratch_tint_g", 255)) / 255.0
+        tint_b = float(cfg.get("lens_scratch_tint_b", 255)) / 255.0
+        tint = np.array([tint_r, tint_g, tint_b], dtype=np.float32)
+
+        # ── 将 QImage 转换为 numpy 数组 ───────────────────────────────────
+        scene_image = scene_image.convertToFormat(QImage.Format.Format_RGBA8888)
+        bpl = scene_image.bytesPerLine()
+        ptr = scene_image.constBits()
+        raw = np.frombuffer(ptr, dtype=np.uint8).reshape(h, bpl)
+        scene_np = raw[:, : w * 4].reshape(h, w, 4).copy()
+
+        # ── Pass 0: 预滤波（1/4 分辨率，对应 Unity frag_prefilter）──────
+        sh, sw = max(1, h // 4), max(1, w // 4)
+        # 2x 双步降采样（快速近似）
+        small_rgb = scene_np[::4, ::4, :3][:sh, :sw].astype(np.float32)
+        # 用 alpha 预乘，避免透明区域产生杂散条纹
+        small_a = scene_np[::4, ::4, 3:4][:sh, :sw].astype(np.float32) / 255.0
+        small_rgb = (small_rgb / 255.0) * small_a  # premultiplied [0,1]
+
+        # 提取高亮区（soft knee，对应 Unity frag_prefilter）
+        brightness = np.max(small_rgb, axis=2)  # (sh, sw)
+        knee = soft_knee
+        soft = np.clip((brightness - threshold + knee) / (2.0 * knee), 0.0, 1.0)
+        soft = soft * soft * knee
+        contrib = np.maximum(soft, brightness - threshold)
+        safe_b = np.where(brightness > 1e-4, brightness, 1.0)
+        scale = np.where(brightness > 1e-4, contrib / safe_b, 0.0)
+        prefiltered = small_rgb * scale[:, :, np.newaxis]  # (sh, sw, 3)
+
+        # ── Pass 1: 两个方向的条纹模糊（对应 Unity frag_streak）─────────
+        def compute_glare_dir(angle_deg: float) -> tuple[float, float]:
+            """对应 Unity ComputeGlareDirection：返回与划痕角度垂直的方向。"""
+            rad = math.radians(angle_deg)
+            dx, dy = -math.sin(rad), math.cos(rad)
+            length = math.sqrt(dx * dx + dy * dy)
+            if length > 0:
+                dx, dy = dx / length, dy / length
+            return dx, dy
+
+        def streak_blur(src: np.ndarray, dx: float, dy: float, intensity: float) -> np.ndarray:
+            """
+            定向条纹模糊（对应 Unity frag_streak）:
+            stepUv = direction * texelSize * streakLength * 12 * spread
+            采样 -8..+8 共 17 点，权重 exp2(-|t| * falloff)
+            """
+            src_h, src_w = src.shape[:2]
+            # 像素步长（对应 Unity 中的 texelSize * streakLength * 12 * spread）
+            step_x = dx * streak_length * 12.0 * spread
+            step_y = dy * streak_length * 12.0 * spread
+
+            accum = np.zeros_like(src)
+            total_w = 0.0
+            for si in range(-8, 9):
+                t = si / 8.0
+                weight = 2.0 ** (-abs(t) * falloff)
+                px = int(round(step_x * si))
+                py = int(round(step_y * si))
+                if px == 0 and py == 0:
+                    sample = src
+                else:
+                    # np.roll 边缘环绕（透明背景区域值接近 0，影响可忽略）
+                    sample = src
+                    if px != 0:
+                        sample = np.roll(sample, px, axis=1)
+                    if py != 0:
+                        sample = np.roll(sample, py, axis=0)
+                accum += sample * weight
+                total_w += weight
+
+            return (accum / total_w) * intensity if total_w > 0.0 else accum
+
+        dx1, dy1 = compute_glare_dir(scratch1_angle)
+        dx2, dy2 = compute_glare_dir(scratch1_angle + 90.0)  # 垂直副方向
+
+        scratch_a = streak_blur(prefiltered, dx1, dy1, scratch1_intensity)
+        scratch_b = streak_blur(prefiltered, dx2, dy2, scratch2_intensity)
+
+        # ── Pass 2: 合成（对应 Unity frag_composite）─────────────────────
+        # 将 1/4 分辨率结果上采样回全分辨率（最近邻，4x repeat）
+        scratch_a_full = np.repeat(np.repeat(scratch_a, 4, axis=0), 4, axis=1)[:h, :w]
+        scratch_b_full = np.repeat(np.repeat(scratch_b, 4, axis=0), 4, axis=1)[:h, :w]
+
+        # composite: result = base + (scratchA + scratchB) * tint * compositeIntensity
+        glare = (scratch_a_full + scratch_b_full) * tint[np.newaxis, np.newaxis, :] * composite_intensity
+        orig_rgb = scene_np[:, :, :3].astype(np.float32) / 255.0
+        result_rgb = np.clip(orig_rgb + glare, 0.0, 1.0)
+
+        result_np = scene_np.copy()
+        result_np[:, :, :3] = (result_rgb * 255.0).astype(np.uint8)
+
+        # 转回 QImage
+        result_bytes = result_np.tobytes()
+        result_img = QImage(result_bytes, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+        return result_img
 
 
 def _should_use_painter_renderer(config):
@@ -801,6 +1122,11 @@ class CircularVisualizerWindow(QWidget):
         self._center_window(reset_visual_center=True)
         self._apply_window_styles(force=True)
         self._send_status()
+        # 立即执行一帧 tick，填充 render_state，避免第一帧空白（首次启动 bug）
+        QTimer.singleShot(0, self._tick)
+        # Win32 分层窗口 HWND 可能在 singleShot(0) 时尚未完全就绪，
+        # 延迟二次应用确保样式与重绘生效。
+        QTimer.singleShot(150, lambda: self._apply_window_styles(force=True))
 
     def _init_audio(self):
         self.audio_capture = LoopbackAudioCapture(chunk=self.CHUNK)
@@ -1118,6 +1444,7 @@ class CircularVisualizerWindow(QWidget):
 
         opacity = max(0.05, min(1.0, self.window_alpha / 255.0))
         self.setWindowOpacity(opacity)
+        self.gl_widget.update()
         self.overlay.update()
 
     def _build_nurbs(self, ctrl_points):
