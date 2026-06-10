@@ -1942,9 +1942,7 @@ class CircularVisualizerWindow(QWidget):
             if not spline_points or len(spline_points) < 2:
                 continue
 
-            color_index = index % max(1, len(self.colors))
-            spectrum_color = self.colors[color_index] if self.colors else base_color
-            root_color = self._lerp_color(base_color, spectrum_color, 0.35)
+            root_color = base_color
             shader_tip = tip_color if shader_enabled else root_color
             shader_alpha_start = alpha_start if shader_enabled else 1.0
             shader_alpha_end = alpha_end if shader_enabled else 1.0
